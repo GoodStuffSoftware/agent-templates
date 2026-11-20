@@ -26,15 +26,15 @@
 // the same budget; nothing here runs them yet.
 //
 // Billing (0.31.55): the ledger holds only what runs booked for themselves, and booked spend
-// can be wrong (on 2026-11-15 it read $88.66 where Anthropic had billed $41.56). So `decide`
+// can be wrong (for example it can read $90.00 where Anthropic billed $40.00). So `decide`
 // and `status` take a billing snapshot (scripts/lib/api-spend.mjs fetches and caches it from
 // the Admin API; this file stays free of the network) and rest on BILLED spend, plus booked
 // spend only for the window after the last complete billed UTC day. Without a snapshot they
 // fall back to booked figures and say so (BOOKED_ONLY). Per-workspace monthly limits are a
 // config map because the API cannot read them back.
 
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, appendFileSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { opt, stateFile } from '../../hooks/lib/context.mjs';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
 import { spawnSyncHidden } from './proc.mjs';
@@ -336,8 +336,63 @@ export function decide(category, { now = Date.now(), cfg = loadConfig(), path = 
 
 // --- record ----------------------------------------------------------------------------
 
-export function record(category, usd, meta = '', { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), success = true, detail = null, alreadyBooked = 0, count = true, id = null } = {}) {
+// Every category books money that the Console bills to an API key (review and workers run on the key; overflow and rater are
+// categories of the same budget), so every category needs proof that the run billed the API: apiKeySource === 'ANTHROPIC_API_KEY'
+// (what the SDK init message reports for a run on the key; a subscription run reports another source). A record without it is
+// refused, nothing is written to the ledger, and the attempt goes to the rejects log beside the ledger.
+export const REQUIRED_API_KEY_SOURCE = 'ANTHROPIC_API_KEY';
+export const rejectsPath = (path = ledgerPath()) => join(dirname(path), 'api-credits-rejects.jsonl');
+export class RecordRefused extends Error {}
+
+// The rejects log is capped: past REJECTS_MAX_BYTES (64 KiB) it is cut back to its newest lines that fit in REJECTS_KEEP_BYTES (32 KiB),
+// so a runaway caller cannot grow it without bound. The current cycle's count (rejectsInCycle) reads what is left.
+export const REJECTS_MAX_BYTES = 64 * 1024;
+export const REJECTS_KEEP_BYTES = 32 * 1024;
+
+function trimRejects(rp) {
+  if (statSync(rp).size <= REJECTS_MAX_BYTES) return;
+  const lines = readFileSync(rp, 'utf8').split(/\r?\n/).filter((l) => l.trim());
+  const keep = [];
+  let bytes = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    bytes += Buffer.byteLength(lines[i]) + 1;
+    if (bytes > REJECTS_KEEP_BYTES && keep.length) break;
+    keep.unshift(lines[i]);
+  }
+  const tmp = `${rp}.tmp`;
+  writeFileSync(tmp, `${keep.join('\n')}\n`);
+  renameSync(tmp, rp);
+}
+
+function logReject(path, now, category, usd, meta, reason) {
+  try {
+    const rp = rejectsPath(path);
+    mkdirSync(dirname(rp), { recursive: true });
+    appendFileSync(rp, `${JSON.stringify({ t: new Date(now).toISOString(), cat: String(category), usd: Number.isFinite(Number(usd)) ? Number(usd) : String(usd), meta: String(meta).slice(0, 200), reason })}\n`);
+    trimRejects(rp);
+  } catch { /* the refusal still stands when the log cannot be written */ }
+}
+
+// The rejects of the cycle that holds `now`: the lines of the rejects log with a time inside it.
+export function rejectsInCycle({ now = Date.now(), cfg = loadConfig(), path = ledgerPath() } = {}) {
+  const cy = cycleOf(now, cfg.cycleDay);
+  let n = 0;
+  try {
+    for (const line of readFileSync(rejectsPath(path), 'utf8').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try { const t = Date.parse(JSON.parse(line).t); if (t >= cy.start && t < cy.end) n++; } catch { /* a damaged line is not counted */ }
+    }
+  } catch { /* no log: none */ }
+  return n;
+}
+
+export function record(category, usd, meta = '', { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), success = true, detail = null, alreadyBooked = 0, count = true, id = null, apiKeySource = null } = {}) {
   if (!CATEGORIES.includes(category)) throw new Error(`unknown category "${category}"`);
+  if (apiKeySource !== REQUIRED_API_KEY_SOURCE) {
+    const reason = apiKeySource ? `api key source "${String(apiKeySource).slice(0, 40)}" is not ${REQUIRED_API_KEY_SOURCE}` : 'no api key source: the record carries no proof that the run billed the API key';
+    logReject(path, now, category, usd, meta, reason);
+    throw new RecordRefused(`refused, nothing booked: ${reason}; pass --api-key-source ${REQUIRED_API_KEY_SOURCE} (CLI) or apiKeySource: '${REQUIRED_API_KEY_SOURCE}' (library) only for a run billed to the API key`);
+  }
   const n = Number(usd);
   if (!Number.isFinite(n) || n < 0) throw new Error('usd must be a non-negative number');
   return mutate(now, cfg, path, (c) => {
@@ -437,6 +492,7 @@ export function status({ now = Date.now(), cfg = loadConfig(), path = ledgerPath
     const pace = (sh[k] || 0) * cfg.budget * cy.frac;
     lines.push(`${k.padEnd(9)} spent $${(c.spent[k] || 0).toFixed(2)} in ${c.n[k] || 0} item(s); share ${(sh[k] * 100).toFixed(0)}% = $${(sh[k] * cfg.budget).toFixed(2)}; paced allowance now $${pace.toFixed(2)}`);
   }
+  { const rj = rejectsInCycle({ now, cfg, path }); if (rj > 0) lines.push(`REJECTED records this cycle: ${rj} (see ${rejectsPath(path)}): callers tried to book spend without proof of an API-billed run`); }
   if (!unreadable) lines.push(`real reviews this cycle: ${reviewSummaryLine(summarizeReviews(c.entries))}`);
   lines.push(`total spent $${total.toFixed(2)} of $${cfg.budget}; left $${(cfg.budget - total).toFixed(2)} (reserve $${((sh.reserve || 0) * cfg.budget).toFixed(2)})`);
   { const w = sharesWarning(sh); if (w) lines.push(w); }
@@ -463,27 +519,45 @@ const group = (rows, keyFn, valFn) => { const m = new Map(); for (const r of row
 const tokensOf = (r) => (r.input || 0) + (r.output || 0) + (r.cacheRead || 0) + (r.cacheWrite || 0);
 const model5 = (m) => String(m || 'unknown').replace(/^claude-/, '');
 
-// Gaps between what the ledger booked and what Anthropic billed. Tolerance: the larger of $1 and 10% of billed.
+// Gaps between what the ledger booked and what Anthropic billed. Tolerance (the total and each workspace): the larger of $1 and 10% of billed.
 export function billingGaps(snap, { cfg, cy, entries, now }) {
-  const out = { over: [], unmatched: { n: 0, usd: 0, examples: [] }, checked: false };
+  const out = { over: [], unbilled: [], unmatched: { n: 0, usd: 0, examples: [] }, checked: false };
   const tol = (billed) => Math.max(1, 0.1 * billed);
   const booked = (cats) => bookedBetween(entries, cy.start, snap.through, cats);
   const total = { scope: 'all categories', booked: booked(null), billed: billedSince(snap, cy.start) };
   if (total.booked - total.billed > tol(total.billed)) out.over.push({ ...total, over: total.booked - total.billed });
-  const seen = new Set();
-  for (const [cat, ref] of Object.entries(cfg.categoryWorkspaces || {})) {
-    const id = resolveWorkspace(snap, ref);
-    if (id === null || seen.has(id)) continue;
-    seen.add(id);
-    const cats = Object.entries(cfg.categoryWorkspaces).filter(([, w]) => resolveWorkspace(snap, w) === id).map(([c]) => c);
-    const row = { scope: `workspace ${workspaceName(snap, id)}`, booked: booked(cats), billed: billedSince(snap, cy.start, id) };
+  // Per workspace: every category routed to it, mapped or not. A category with no mapped workspace (overflow and rater by default)
+  // is held to the default workspace, so its booked spend counts against that workspace's billed cost; comparing category by
+  // category let review's billed cost on the default workspace hide overflow booked next to it. Both sides stop at the snapshot
+  // cut-off (the end of the last complete UTC day), so the current day, which Console cost data has not reported yet, is left out.
+  const byWs = new Map();
+  for (const cat of CATEGORIES) {
+    const ref = (cfg.categoryWorkspaces || {})[cat];
+    const id = ref ? resolveWorkspace(snap, ref) : '';
+    if (id === null) continue;
+    byWs.set(id, [...(byWs.get(id) || []), cat]);
+  }
+  for (const [id, cats] of byWs) {
+    const row ={ scope: `workspace ${workspaceName(snap, id)}`, booked: booked(cats), billed: billedSince(snap, cy.start, id) };
     if (row.booked - row.billed > tol(row.billed)) out.over.push({ ...row, over: row.booked - row.billed });
+  }
+  // A category that booked spend this cycle (through the cut-off) while its workspace has no billed cost at all. A category with
+  // no mapped workspace (overflow and rater by default) was skipped by the loop above, which is why "gaps: none" hid a category
+  // booked on a workspace with no billing; it is held to the default workspace. One mapped to a name the snapshot does not
+  // know is skipped (status says so elsewhere).
+  for (const cat of CATEGORIES) {
+    const ref = (cfg.categoryWorkspaces || {})[cat];
+    const ws = ref ? resolveWorkspace(snap, ref) : '';
+    if (ws === null) continue;
+    const bk = booked([cat]);
+    if (bk > 0 && billedSince(snap, cy.start, ws) <= 0) out.unbilled.push({ cat, booked: bk, ws: workspaceName(snap, ws), mapped: !!ref });
   }
   if (Array.isArray(snap.hourly) && Number.isFinite(snap.hourlyFrom)) {
     out.checked = true;
     const have = new Set(snap.hourly.map((h) => `${h.ws}|${h.hour}`));
+    // The same grouping as the per-workspace check above: a category with no mapped workspace is held to the default workspace ('').
     const wsOfCat = {};
-    for (const [cat, ref] of Object.entries(cfg.categoryWorkspaces || {})) wsOfCat[cat] = resolveWorkspace(snap, ref);
+    for (const cat of CATEGORIES) { const ref = (cfg.categoryWorkspaces || {})[cat]; wsOfCat[cat] = ref ? resolveWorkspace(snap, ref) : ''; }
     for (const e of entries || []) {
       const at = tOf(e);
       const ws = wsOfCat[e.cat];
@@ -550,10 +624,11 @@ export function billingStatusLines(snap, { cfg, entries, now, reason = '', cache
   lines.push(wsMonth.length ? `workspace limits (calendar month, billed): ${wsMonth.join('; ')}` : 'workspace limits: none configured (api_credits_workspace_limits; the API cannot read the Console limits)');
   const g = billingGaps(snap, { cfg, cy, entries, now });
   for (const o of g.over) lines.push(`GAP: ${o.scope}: booked ${usd2(o.booked)} but billed ${usd2(o.billed)} (booked over billed by ${usd2(o.over)}; booked spend that never reached the API?)`);
+  for (const u of g.unbilled) lines.push(`GAP: category ${u.cat}: booked ${usd2(u.booked)} this cycle but the Console shows no billed cost on its workspace ${u.ws}${u.mapped ? '' : ' (no workspace mapped, so the default one)'}; booked spend that never reached the API?`);
   if (g.unmatched.n) lines.push(`GAP: ${g.unmatched.n} booked entr${g.unmatched.n === 1 ? 'y' : 'ies'} (${usd2(g.unmatched.usd)}) with no usage on their workspace in that hour: ${g.unmatched.examples.join(', ')}${g.unmatched.n > g.unmatched.examples.length ? ', ...' : ''}`);
   else if (g.checked) lines.push('hourly check: every booked entry in the last days has usage on its workspace in its hour');
   else lines.push('hourly check: not available (hourly usage could not be read)');
-  if (!g.over.length && !g.unmatched.n) lines.push('gaps: none');
+  if (!g.over.length && !g.unbilled.length && !g.unmatched.n) lines.push('gaps: none');
   if (Array.isArray(snap.missing) && snap.missing.length) lines.push(`not fetched: ${snap.missing.join(', ')}`);
   return lines;
 }

@@ -9,7 +9,7 @@
 // PreToolUse hook, hooks/lib/plan-allowance.mjs, which also holds the logic).
 
 import { claudeDir } from '../hooks/lib/context.mjs';
-import { agentSpend, unitsPerPercent, planWeights, modelWeight, fmtTokens } from '../hooks/lib/plan-allowance.mjs';
+import { agentSpend, rateLabel, planWeights, modelWeight, fmtTokens } from '../hooks/lib/plan-allowance.mjs';
 
 const agentId = process.argv.slice(2).find((a) => !a.startsWith('-'));
 if (!agentId) {
@@ -28,7 +28,6 @@ if (!r.ok) {
 }
 
 const f = (n) => (n >= 10 ? n.toFixed(1) : n >= 1 ? n.toFixed(2) : n.toFixed(3));
-const per = unitsPerPercent();
 const head = r.allowancePct
   ? `Spent ${f(r.totalPct)}% of the weekly limit (${f(r.totalUnits)} units) = ${f(r.usedOfAllowance * 100)}% of your ${r.allowancePct}% allowance.`
   : `Spent ${f(r.totalPct)}% of the weekly limit (${f(r.totalUnits)} units). No % allowance in your brief.`;
@@ -45,5 +44,6 @@ const tokens = r.allowancePct && r.allowanceTokens
   ? `Tokens: ${fmtTokens(r.totalTokens, 3)} used. The allowance is about ${fmtTokens(r.allowanceTokens)} at ${r.allowanceModel}'s usual mix; about ${fmtTokens(r.tokensLeft ?? 0)} left.`
   : `Tokens: ${fmtTokens(r.totalTokens, 3)} used.`;
 console.log(tokens);
-console.log(`Basis: ${per} units = 1%, weights ${basis}; cache reads at API price. An estimate (${planWeights().updated || 'undated'} fit).`);
+// The default rate prints exactly as in 0.31.58; an account or plan rate says where it came from.
+console.log(`Basis: ${r.rate.basis === 'default' ? `${r.rate.value} units = 1%` : rateLabel(r.rate)}, weights ${basis}; cache reads at API price. An estimate (${planWeights().updated || 'undated'} fit).`);
 if (r.unknownCalls) console.log(`${r.unknownCalls} calls on an unrecognised model were counted at the Sonnet weight.`);

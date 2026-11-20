@@ -8,7 +8,7 @@
     "remeasure": "By hand today: node scripts/calibrate-weights.mjs --apply writes your fit to config/plan-weights.json in your state folder; or edit that file; or set the weekly_limit_units option (/ac settings). See docs/DEFAULTS-ENVIRONMENT.md."
   },
   "updated": "2026-11-03",
-  "note": "How many plan units one percent of the WEEKLY plan limit is, and how heavily each model's tokens count against it, as DATA (like model-tiers.json: a number baked into code goes stale silently). Read by hooks/lib/plan-allowance.mjs (the `BUDGET: N%` spawn note and its 80% / 100% notices), scripts/allowance.mjs (an agent's own spend) and scripts/lib/daily-checkup.mjs (the daily checkup and the usage analysis: its model weights). Override without a release by writing a file of this shape to <state root>/plan-weights.json (the same place as the model-tiers.json override; merged by key, one level deep, so a file naming only models.opus.weight keeps everything else). Every figure carries its date, source, interval and status: 'measured' (fitted from the operator's own official readings), 'assumed' (a stand-in, not fitted) or 'estimated' (derived from a neighbouring cell). Nothing here is a published limit.",
+  "note": "How many plan units one percent of the WEEKLY plan limit is, and how heavily each model's tokens count against it, as DATA (like model-tiers.json: a number baked into code goes stale silently). Read by hooks/lib/plan-allowance.mjs (the `BUDGET: N%` spawn note and its 80% / 100% notices), scripts/allowance.mjs (an agent's own spend) and scripts/lib/daily-checkup.mjs (the daily checkup and the usage analysis: its model weights). Override without a release by writing a file of this shape to <state root>/plan-weights.json (the same place as the model-tiers.json override; merged by key, one level deep, so a file naming only models.opus.weight keeps everything else). Every figure carries its date, source, interval and status: 'measured' (fitted from the operator's own official readings), 'assumed' (a stand-in, not fitted) or 'estimated' (derived from a neighbouring cell). Nothing here is a published limit. Each claude.ai account has its own weekly limit and plan, so unitsPerPercent above is the DEFAULT rate: unitsPerPercentByAccount ({ \"<account id>\": { value, interval, status, date, source } or a number }, written by scripts/calibrate-weights.mjs --apply once meter samples are tagged with their account) and unitsPerPercentByPlan ({ \"Max\": number or the same object }, by hand) override it for the account in use, the account entry first. Both are empty here.",
   "unit": {
     "description": "A plan unit is a token count priced at the Sonnet 5 vector, then times the model's weight: input 1, output 5, cache write 1.25 (5 minute) or 2 (1 hour), cache read 0.1 (times cacheReadFactor), all times inPerMTok/1e6.",
     "inPerMTok": 2,
@@ -27,6 +27,8 @@
     "date": "2026-11-03",
     "source": "Weight fit of 2026-11-03: 107 official weekly readings (2026-10-02 to 2026-11-03) against 502,767 requests from local transcripts. Three independent weeks gave 28.4, 28.8 and 28.5 units per 1% at Opus 1.5 and cache reads at API price."
   },
+  "unitsPerPercentByAccount": {},
+  "unitsPerPercentByPlan": {},
   "cacheReadFactor": {
     "value": 1,
     "interval": [

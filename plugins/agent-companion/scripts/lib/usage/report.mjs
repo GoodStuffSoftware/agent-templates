@@ -122,6 +122,96 @@ function unobservableText(u) {
   return String(u);
 }
 
+// ------------------------------------------------------------- efficiency --
+
+const MARKER_ORDER = [
+  ['claudeCode', 'Claude Code'], ['agentCompanion', 'agent-companion'], ['autoCompactWindow', 'autoCompactWindow'], ['mainCompactFloorTokens', 'main_compact_floor_tokens'],
+];
+const pctText = (x, d = 1) => (num(x) ? `${fmt(x, d)}%` : 'n/a');
+const gapLine = (g) => `Not measured: ${cell(g.gap)}.`;
+
+/** The efficiency sections (landings, lead compactions, Opus share, accounts, setting markers) and their definitions. Lines; [] for a result without any. */
+export function efficiencyLines(eff) {
+  if (!isObj(eff)) return [];
+  const L = [];
+  L.push('## Efficiency', '');
+
+  L.push('### Landings', '');
+  const ld = eff.landings;
+  if (!ld || ld.gap) L.push(gapLine(ld || { gap: 'not computed' }));
+  else if (!ld.repos.length) L.push(`No session of the day worked in a git repository (${fmt(ld.unattributedUnits, 1)} units not attributed to a repository).${ld.gitNote ? ` ${cell(ld.gitNote)}` : ''}`);
+  else {
+    L.push('| repository | branch | sessions | units | landings | units per landing |');
+    L.push('|---|---|---|---|---|---|');
+    for (const r of ld.repos) L.push(`| ${cell(r.label)} | ${cell(r.branch || 'n/a')} | ${fmt(r.sessions, 0)} | ${fmt(r.units, 1)} | ${num(r.landings) ? fmt(r.landings, 0) : 'n/a'} | ${num(r.unitsPerLanding) ? fmt(r.unitsPerLanding, 1) : 'n/a'} |`);
+    L.push('');
+    L.push(`All repositories: ${fmt(ld.totalLandings, 0)} landings, ${num(ld.unitsPerLanding) ? `${fmt(ld.unitsPerLanding, 1)} units per landing` : 'units per landing n/a (no landing)'} (${fmt(ld.countedUnits, 1)} units in the repositories counted; ${fmt(ld.unattributedUnits, 1)} units not attributed to a repository${ld.skippedRepos ? `; ${ld.skippedRepos} smaller repositories not counted` : ''}).`);
+  }
+  L.push('');
+
+  L.push('### Lead compactions', '');
+  const cp = eff.compactions;
+  if (!cp || cp.gap) L.push(gapLine(cp || { gap: 'not computed' }));
+  else {
+    L.push(`${fmt(cp.leadSessions, 0)} lead sessions, ${fmt(cp.sessionsWithCompaction, 0)} compacted, ${fmt(cp.total, 0)} compactions; median context before compacting ${num(cp.medianPreTokens) ? `${fmt(cp.medianPreTokens, 0)} tokens` : 'n/a'}${cp.unreadable ? `; ${cp.unreadable} transcripts unreadable (not counted as zero)` : ''}${cp.withoutTokenFigure ? `; ${cp.withoutTokenFigure} compactions carry no token figure` : ''}.`);
+    if (cp.rows.length) {
+      L.push('');
+      L.push('| lead session | compactions | auto | manual | median tokens before |');
+      L.push('|---|---|---|---|---|');
+      for (const r of cp.rows) L.push(`| ${cell(r.sid)} | ${fmt(r.n, 0)} | ${fmt(r.auto, 0)} | ${fmt(r.manual, 0)} | ${num(r.medianPreTokens) ? fmt(r.medianPreTokens, 0) : 'n/a'} |`);
+    }
+  }
+  L.push('');
+
+  L.push('### Opus share of subagent cost', '');
+  const op = eff.opus;
+  if (!op || op.gap) L.push(gapLine(op || { gap: 'not computed' }));
+  else {
+    L.push('| what | units | % of subagent units |');
+    L.push('|---|---|---|');
+    L.push(`| all subagents | ${fmt(op.subagentUnits, 1)} | 100 |`);
+    L.push(`| on Opus | ${fmt(op.opusUnits, 1)} | ${pctText(op.opusPct)} |`);
+    L.push(`| Opus writers | ${fmt(op.writerUnits, 1)} | ${pctText(op.writerPct)} |`);
+    L.push('');
+    L.push(`${fmt(op.opusSpawns, 0)} Opus spawns, ${fmt(op.writerSpawns, 0)} of them writers${op.spawnsWithoutGuardRow ? `; ${op.spawnsWithoutGuardRow} Opus spawns had no spawn-guard row (role read from the transcript's own brief)` : ''}.`);
+  }
+  L.push('');
+
+  L.push('### Accounts', '');
+  const ac = eff.accounts;
+  if (!ac || ac.gap) L.push(gapLine(ac || { gap: 'not computed' }));
+  else if (ac.single) L.push('account: single');
+  else {
+    L.push('| account | units | % of its week | rate (units = 1%) |');
+    L.push('|---|---|---|---|');
+    for (const r of ac.rows) L.push(`| ${cell(r.account)} | ${fmt(r.units, 1)} | ${pctText(r.pctOfWeek, 2)} | ${num(r.unitsPerPercent) ? `${fmt(r.unitsPerPercent, 1)} (${cell(r.rateBasis || 'unknown')})` : r.account === 'unattributed' ? 'n/a (switch time unknown)' : 'n/a (account not known)'} |`);
+  }
+  L.push('');
+
+  L.push('### Setting markers', '');
+  const mk = eff.markers;
+  if (!mk || mk.gap) L.push(gapLine(mk || { gap: 'not computed' }));
+  else {
+    L.push('| setting | value | vs previous day |');
+    L.push('|---|---|---|');
+    for (const [k, label] of MARKER_ORDER) {
+      const was = mk.changed && mk.changed[k];
+      L.push(`| ${label} | ${cell(mk.values[k])} | ${was !== undefined ? `CHANGED (was ${cell(was)})` : mk.prevDay ? 'same' : 'no previous report'} |`);
+    }
+    if (mk.late) L.push('', 'These values were read when this report was computed, which was after the day closed: autoCompactWindow and main_compact_floor_tokens may not be the day\'s own.');
+  }
+  L.push('');
+
+  L.push('### Definitions', '');
+  L.push('- Landing: a commit on the repository\'s default branch (or its merge target, git config guard.mergeTarget; origin\'s copy when there is one), counted along the first parent, committed during the day. A merged branch or a squash is one landing; the commits inside a merged branch are not. Repositories: those a session of the day worked in (the session\'s working directory, a linked worktree resolving to its main repository). Units per landing: the units of those sessions in that repository / its landings.');
+  L.push('- Lead compaction: a compact_boundary record in a main-thread transcript; the tokens are its preTokens (context just before compacting). Lead sessions: those with main-thread requests that day.');
+  L.push('- Opus writer: a spawn on an Opus model whose declared ROLE (spawn guard, spawns.jsonl declared_role) is writer, fixer or lander, or which has no ROLE and a writing task type. Reviewers, plan legs and lookup, operate or docs roles that wrote notes, plans or scratch files are not writers. Shares are of the day\'s subagent units.');
+  L.push('- Accounts: each session-hour is attributed to the account active at the start of that hour; % of its week uses that account\'s units per 1%. An hour inside a stretch whose switch time is unknown (one account was last seen, another first seen, nothing dated in between) is shown as unattributed, never guessed.');
+  L.push('- Setting markers: Claude Code build (from the lead transcripts), agent-companion version (the spawn guard\'s version on the day\'s spawns), autoCompactWindow and main_compact_floor_tokens (read when the day was computed). A value that differs from the previous day\'s report is marked CHANGED.');
+  L.push('');
+  return L;
+}
+
 export function renderReport(res) {
   const L = [];
   const t = res.totals || {};
@@ -157,6 +247,7 @@ export function renderReport(res) {
     L.push(`| ${cell(m)} | ${fmt(w.mult)} | ${cell(w.source)} | ${w.label || '?'} | ${fmt(w.units, 1)} |`);
   }
   L.push('');
+  L.push(...efficiencyLines(res.efficiency));
   L.push('## Regressions');
   L.push('');
   const tbl = (rows) => {

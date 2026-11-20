@@ -23,7 +23,7 @@
 //                        to --day or --from/--to, which name the days to compute); otherwise none
 //   --day D | --from D --to D   compute these days only (not limited to the default per-run count)
 //   --scenario A,B       restrict to these scenario ids (a dry look: nothing is persisted)
-//   --force              recompute days whose inputs are unchanged (the output is byte-identical)
+//   --force              recompute days whose inputs are unchanged (not always byte-identical: the efficiency landings read git as it is now, and a commit landed since can change them)
 //   --dry-run            compute, write nothing at all under --root: no transcript scan (so no scan state and no facts), no lock,
 //                        no status, no reports; it analyses the facts already on disk
 //   --no-scan            skip the transcript scan (analyse the facts already on disk)
@@ -33,7 +33,7 @@
 //
 // The run holds the checkup's lock (state/daily-checkup.lock) for the scan and the analysis, so it never
 // overlaps a checkup; a hand-typed run that finds the lock taken prints { skipped } and exits 0; a --scheduled run waits for it (see above) and, if it is still held at the bound, prints { skipped, lockTimeout: true } and exits 3. No model call, no
-// network, no child process of its own. Exit 0 whatever happens when --scheduled (except 3, lock still held after the wait); otherwise 1 on an error, 2 on bad usage.
+// network. The one child process is `git` (read only, hidden window, 5 s per call), run by the efficiency landings (lib/usage/efficiency.mjs). Exit 0 whatever happens when --scheduled (except 3, lock still held after the wait); otherwise 1 on an error, 2 on bad usage.
 
 import { isMain } from './lib/is-main.mjs';
 import { runAnalysis, writeStatus, readStatus, readLatest, rerenderReport, usagePaths } from './lib/usage/runner.mjs';
@@ -184,6 +184,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`) }
         force: !!f.force,
         dryRun: !!f['dry-run'],
         reportDir,
+        transcriptsRoot: f.transcripts || undefined,
       });
       if (analysis.error) errors.push(`analysis: ${analysis.error}`);
       Object.assign(result, analysis, { skipped_days: (analysis.skipped || []).length });

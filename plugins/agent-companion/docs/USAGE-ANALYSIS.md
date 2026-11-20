@@ -1,6 +1,6 @@
 # Daily usage analysis
 
-A deterministic, zero-token analysis of how the plan was spent yesterday and how that compares with a baseline. It reads the facts the daily checkup already scans from your transcripts, makes no model call and no network call, and writes only below the state root. The skill that drives it is [`skills/usage-analysis/SKILL.md`](../skills/usage-analysis/SKILL.md) (`/ac usage`).
+A deterministic, zero-token analysis of how the plan was spent yesterday and how that compares with a baseline. It reads the facts the daily checkup already scans from your transcripts, makes no model call and no network call, runs read-only `git` (hidden window, 5 s per call) for the efficiency landings, and writes only below the state root. The skill that drives it is [`skills/usage-analysis/SKILL.md`](../skills/usage-analysis/SKILL.md) (`/ac usage`).
 
 ## What it computes
 
@@ -15,7 +15,7 @@ For each closed, settled checkup day:
 
 A day is a fixed 08:00Z to 08:00Z window (`environment.day.boundaryUtcHour`, default 8). The close does not follow your clock: 08:00Z is **04:00 EDT** and, after the US clocks go back on 2026-11-01, **03:00 EST**. A closed day is computed once it has settled, 5 minutes after the close. The scout's 04:10 local run is after the close in both cases (04:10 EDT = 08:10Z, 04:10 EST = 09:10Z).
 
-Re-running with the same inputs gives byte-identical output. A config or facts change gives the day a new revision and a stated reason (`config: scenario u.x changed`).
+Re-running with the same inputs leaves the stored day as it is (nothing is recomputed). `--force` recomputes it anyway; the result is the same except for the efficiency landings, which read git as it is now. The 04:10 run keeps to its `--max-seconds` budget (120 by default) even on its first day: the slow efficiency parts (lead compactions, landings) stop at it, say so in the report ("the run time budget was used up; the next run completes this part"), and the next run completes only those parts. A config or facts change gives the day a new revision and a stated reason (`config: scenario u.x changed`).
 
 ## Where files live
 
@@ -88,10 +88,11 @@ Without `--scheduled` neither limit applies unless you pass it. `--dry-run` writ
 
 1. **Summary**: three lines (the day's units and the week, the regressions, the report path). This is also what `status` prints.
 2. **Totals**: units by class, model, project and rung, with the E share.
-3. **Regressions**: each scenario over its threshold, with the value, the baseline, the change, the sample size and the interval. Read the sample size first: a large percent on a few sessions is noise, and the threshold's `minSample` already filters the worst of it.
-4. **Scenarios**: every scenario computed that day, including those that passed, were skipped (`not-due` for a weekly scenario on a non-reset day), or are gaps.
-5. **Exclusions** and **Windows**: what was left out and why, and the resolved boundaries of each named window.
-6. **Unobservable items and gaps**: what could not be known, each with the field it needs.
-7. **Revisions**: why this day has been recomputed.
+3. **Efficiency** ("did a change make us more efficient?"): landings (commits on each repo's default branch or merge target that day, and units per landing), lead compactions (per lead session: how many, and the median context tokens just before compacting), the Opus share of subagent units and the Opus-writer share (an Opus spawn whose declared ROLE is writer, fixer or lander, or with no ROLE a writing task type), units and % of the week per account (`account: single` with one or no account source), and the setting markers (Claude Code build, agent-companion version, `autoCompactWindow`, `main_compact_floor_tokens`; a value that differs from the previous day's report is marked CHANGED). Each part says why when it could not be measured. The report footer defines each term; the code is `scripts/lib/usage/efficiency.mjs`.
+4. **Regressions**: each scenario over its threshold, with the value, the baseline, the change, the sample size and the interval. Read the sample size first: a large percent on a few sessions is noise, and the threshold's `minSample` already filters the worst of it.
+5. **Scenarios**: every scenario computed that day, including those that passed, were skipped (`not-due` for a weekly scenario on a non-reset day), or are gaps.
+6. **Exclusions** and **Windows**: what was left out and why, and the resolved boundaries of each named window.
+7. **Unobservable items and gaps**: what could not be known, each with the field it needs.
+8. **Revisions**: why this day has been recomputed.
 
 To dig into one result: `node scripts/usage-config.mjs explain <scenario-id>`, then `node scripts/usage-analysis.mjs report --day <day> --dry-run` to re-render without a scan.

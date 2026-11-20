@@ -2,7 +2,7 @@
 // api-credits.mjs — the API-credit governor (ledger: <state root>/state/api-credits.json).
 //
 //   node api-credits.mjs decide <category>              prints "api" or "plan", then one reason line (billed spend from the Admin API plus booked spend after the last complete day; "booked only, not verified against billing" without an admin key or network)
-//   node api-credits.mjs record <category> <usd> <meta> appends spend
+//   node api-credits.mjs record <category> <usd> <meta> --api-key-source ANTHROPIC_API_KEY  appends spend; without the flag it is refused (exit 2, nothing booked, a line in api-credits-rejects.jsonl)
 //   node api-credits.mjs status                         spend by category, the pace, what is left, the review limits in force, then billed spend (month and cycle, by workspace, key and model), the booked figure beside it, gaps, credits left (estimate), workspace limits
 //   node api-credits.mjs record-fallback <review id> [--reason <r>]  marks a review as redone on the plan (the id api-review.mjs printed)
 //   node api-credits.mjs reviews [--since <ISO date>] [--until <ISO date>]  real reviews only (no probe or measure rows): count, spend, median, stopped or fallen back
@@ -48,8 +48,11 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   }
   if (!cfg) { out('unreadable configuration'); return 2; }
   if (cmd === 'record') {
-    if (!CATEGORIES.includes(rest[0]) || rest[1] === undefined) { out('usage: api-credits.mjs record <review|overflow|rater|workers> <usd> <meta>'); return 2; }
-    try { const r = record(rest[0], rest[1], rest.slice(2).join(' '), { now, cfg }); out(`recorded; ${rest[0]} total $${r.spent.toFixed(2)} in ${r.n} item(s)`); return 0; } catch (e) { out(`record failed: ${e.message}`); return 2; }
+    const ki = rest.indexOf('--api-key-source');
+    const apiKeySource = ki >= 0 ? (rest[ki + 1] ?? '') : null;
+    const rr = ki >= 0 ? rest.filter((_, i) => i !== ki && i !== ki + 1) : rest;
+    if (!CATEGORIES.includes(rr[0]) || rr[1] === undefined) { out('usage: api-credits.mjs record <review|overflow|rater|workers> <usd> <meta> --api-key-source ANTHROPIC_API_KEY'); return 2; }
+    try { const r = record(rr[0], rr[1], rr.slice(2).join(' '), { now, cfg, apiKeySource }); out(`recorded; ${rr[0]} total $${r.spent.toFixed(2)} in ${r.n} item(s)`); return 0; } catch (e) { out(`record failed: ${e.message}`); return 2; }
   }
   if (cmd === 'record-fallback') {
     const ri = rest.indexOf('--reason');
@@ -90,7 +93,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     out(r.unavailable ? `API review unavailable: ${r.reason}` : `probe failed: ${r.reason}`);
     return 1;
   }
-  out('usage: api-credits.mjs decide <category> | record <category> <usd> <meta> | record-fallback <review id> [--reason <r>] | reviews [--since <date>] [--until <date>] | status | summary | probe');
+  out('usage: api-credits.mjs decide <category> | record <category> <usd> <meta> --api-key-source ANTHROPIC_API_KEY | record-fallback <review id> [--reason <r>] | reviews [--since <date>] [--until <date>] | status | summary | probe');
   return 2;
 }
 

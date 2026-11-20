@@ -10,7 +10,7 @@ import { join, dirname } from 'node:path';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
 import {
   DEFAULT_SHARES, decide, record, recordFailure, recordFallback, reviewStats, summarizeReviews, reviewSummaryLine, status, summaryLine, cycleOf,
-  keyConfigured, parseKeySource, parseShares, sharesWarning,
+  keyConfigured, rejectsPath, rejectsInCycle, REJECTS_MAX_BYTES, billingStatusLines, billingGaps, parseKeySource, parseShares, sharesWarning,
 } from '../scripts/lib/api-credits.mjs';
 import { runApi, validKeyShape, isUnavailable, isWorkspaceMissing, isSpendLimit, hardUsdFrom, softUsdFrom, reviewLimits, reviewLimitsLine, OFFICIAL_ENDPOINT, SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
 import { makeTools } from '../scripts/lib/api-tools.mjs';
@@ -29,7 +29,7 @@ const SENTINEL = 'sk-ant-api03-SENTINEL-do-not-leak-0123456789';
 
 function ledgerIn(fx) { return join(fx.dir, 'ledger', 'api-credits.json'); }
 const dec = (fx, cat, now, env = KEYENV, cfg = CFG) => decide(cat, { now: T(now), cfg, env, path: ledgerIn(fx) });
-const rec = (fx, cat, usd, now) => record(cat, usd, 'test', { now: T(now), cfg: CFG, path: ledgerIn(fx) });
+const rec = (fx, cat, usd, now) => record(cat, usd, 'test', { apiKeySource: 'ANTHROPIC_API_KEY', now: T(now), cfg: CFG, path: ledgerIn(fx) });
 
 
 // --- governor ------------------------------------------------------------------------
@@ -142,11 +142,11 @@ test('two billing or auth failures in a row make decide answer plan for the rest
     assert.equal(d.decision, 'plan');
     assert.match(d.reason, /failed 2 times in a row/);
     assert.match(status({ ...o, env: KEYENV }).text, /BREAKER TRIPPED/);
-    record('review', 0.01, 'probe', { ...o });
+    record('review', 0.01, 'probe', { ...o, apiKeySource: 'ANTHROPIC_API_KEY' });
     assert.doesNotMatch(dec(fx, 'review', '2026-11-18T00:00:00Z').reason, /failed 2 times/);
     // a failure separated by a success does not trip it
     recordFailure('x', o);
-    record('review', 1, 'ok', o);
+    record('review', 1, 'ok', { ...o, apiKeySource: 'ANTHROPIC_API_KEY' });
     recordFailure('x', o);
     assert.doesNotMatch(dec(fx, 'review', '2026-11-19T00:00:00Z').reason, /failed 2 times/);
   } finally { fx.cleanup(); }
@@ -162,7 +162,7 @@ test('CLI: decide prints the word then one reason line; with no key it is plan',
     assert.equal(lines[0], 'plan');
     const withKey = runScript('scripts/api-credits.mjs', ['decide', 'review', '--now', '2026-11-16T00:00:00Z'], { env: { AC_API_KEY: 'x' } });
     assert.equal(withKey.stdout.trim().split(/\r?\n/)[0], 'api');
-    const r = runScript('scripts/api-credits.mjs', ['record', 'review', '1.5', 'a', 'note', '--now', '2026-11-16T00:00:00Z'], { env: { AC_API_KEY: 'x' } });
+    const r = runScript('scripts/api-credits.mjs', ['record', 'review', '1.5', 'a', 'note', '--api-key-source', 'ANTHROPIC_API_KEY', '--now', '2026-11-16T00:00:00Z'], { env: { AC_API_KEY: 'x' } });
     assert.match(r.stdout, /recorded; review total \$1\.50/);
     const s = runScript('scripts/api-credits.mjs', ['status', '--now', '2026-11-16T00:00:00Z'], { env: { AC_API_KEY: 'x' } });
     assert.match(s.stdout, /review\s+spent \$1\.50/);
@@ -597,7 +597,7 @@ test('summary line: reviews spent of the review share, cycle day; the CLI prints
 test('the ledger keeps every run, not a rolling hundred', () => {
   const fx = makeFixture();
   try {
-    for (let i = 0; i < 150; i++) record('review', 0.01, `r${i}`, { now: T('2026-11-16T00:00:00Z'), cfg: CFG, path: ledgerIn(fx), detail: { project: 'p', model: 'm', tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, turns: 1 } });
+    for (let i = 0; i < 150; i++) record('review', 0.01, `r${i}`, { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-11-16T00:00:00Z'), cfg: CFG, path: ledgerIn(fx), detail: { project: 'p', model: 'm', tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, turns: 1 } });
     const led = JSON.parse(readFileSync(ledgerIn(fx), 'utf8')).cycles['2026-11-01'];
     assert.equal(led.entries.length, 150);
     assert.equal(led.entries[0].project, 'p');
@@ -1071,7 +1071,7 @@ test('real-review count: probe and measure rows are left out; stopped and fallen
   try {
     const path = ledgerIn(fx);
     const NOWT = T('2026-11-16T10:00:00Z');
-    const put = (usd, meta, extra = {}) => record('review', usd, meta, { now: NOWT, cfg: CFG, path, ...extra });
+    const put = (usd, meta, extra = {}) => record('review', usd, meta, { apiKeySource: 'ANTHROPIC_API_KEY', now: NOWT, cfg: CFG, path, ...extra });
     put(0.0003, 'probe ok');
     put(0.01, 'probe partial', { success: false });
     put(0.002, 'measure ok');
@@ -1106,8 +1106,8 @@ test('real-review count: probe and measure rows are left out; stopped and fallen
 test('CLI: api-credits reviews counts real reviews only', async () => {
   const t = rig();
   try {
-    record('review', 0.0003, 'probe ok', { cfg: CFG });
-    record('review', 0.7, 'review x..y ok', { cfg: CFG });
+    record('review', 0.0003, 'probe ok', { cfg: CFG, apiKeySource: 'ANTHROPIC_API_KEY' });
+    record('review', 0.7, 'review x..y ok', { cfg: CFG, apiKeySource: 'ANTHROPIC_API_KEY' });
     const lines = [];
     assert.equal(await creditsMain(['reviews'], { out: (s) => lines.push(s), cfg: CFG }), 0);
     assert.match(lines[0], /^1 real review \(\$0\.70\), median \$0\.70; 0 stopped or fell back/);
@@ -1151,9 +1151,9 @@ test('record: a workers booking never clears or trips the review breaker', () =>
   try {
     const now = T('2026-11-16T00:00:00Z');
     recordFailure('boom', { now, cfg: CFG, path: ledgerIn(fx), hard: true });
-    record('workers', 1, 'w', { now, cfg: CFG, path: ledgerIn(fx) });
+    record('workers', 1, 'w', { apiKeySource: 'ANTHROPIC_API_KEY', now, cfg: CFG, path: ledgerIn(fx) });
     assert.match(dec(fx, 'review', '2026-11-16T00:00:00Z').reason, /failed 1 time in a row/);
-    record('review', 1, 'r', { now, cfg: CFG, path: ledgerIn(fx) });
+    record('review', 1, 'r', { apiKeySource: 'ANTHROPIC_API_KEY', now, cfg: CFG, path: ledgerIn(fx) });
     assert.doesNotMatch(dec(fx, 'review', '2026-11-16T00:00:00Z').reason, /^API runs fa/);
   } finally { fx.cleanup(); }
 });
@@ -1161,4 +1161,154 @@ test('record: a workers booking never clears or trips the review breaker', () =>
 test('default shares: review 0.5, workers 0.3, overflow 0.1, rater 0.05, reserve 0.05, sum 1.0', () => {
   assert.deepEqual(DEFAULT_SHARES, { review: 0.5, overflow: 0.1, rater: 0.05, workers: 0.3, reserve: 0.05 });
   assert.ok(Math.abs(Object.values(DEFAULT_SHARES).reduce((a, v) => a + v, 0) - 1) < 1e-9);
+});
+
+// --- record guard: proof that the run billed the API key -----------------------------------------------------
+
+const readRejects = (path) => (existsSync(rejectsPath(path)) ? readFileSync(rejectsPath(path), 'utf8').split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l)) : []);
+
+test('record guard: a record without proof is refused, writes nothing and adds one rejects line', () => {
+  const fx = makeFixture();
+  try {
+    const path = ledgerIn(fx);
+    const o = { now: T('2026-11-16T00:00:00Z'), cfg: CFG, path };
+    for (const cat of ['review', 'overflow', 'rater', 'workers']) {
+      assert.throws(() => record(cat, 4.5, 'other-project run', o), /refused.*--api-key-source ANTHROPIC_API_KEY/);
+    }
+    assert.throws(() => record('overflow', 1, 'x', { ...o, apiKeySource: 'none' }), /"none" is not ANTHROPIC_API_KEY/);
+    assert.equal(existsSync(path), false, 'no ledger file was written');
+    const rej = readRejects(path);
+    assert.equal(rej.length, 5);
+    assert.deepEqual(Object.keys(rej[0]).sort(), ['cat', 'meta', 'reason', 't', 'usd']);
+    assert.equal(rej[0].cat, 'review'); assert.equal(rej[0].usd, 4.5); assert.equal(rej[0].meta, 'other-project run');
+    // the CLI: exit 2, one line naming the flag, nothing booked
+    const out = [];
+    return creditsMain(['record', 'overflow', '2', 'nightly job', '--now', '2026-11-16T00:00:00Z'], { out: (s) => out.push(s), cfg: { ...CFG } }).then((code) => {
+      assert.equal(code, 2);
+      assert.equal(out.length, 1);
+      assert.match(out[0], /--api-key-source ANTHROPIC_API_KEY/);
+    });
+  } finally { fx.cleanup(); }
+});
+
+test('record guard: a record with ANTHROPIC_API_KEY proof is booked and writes no reject', async () => {
+  const fx = makeFixture();
+  try {
+    const path = ledgerIn(fx);
+    const r = record('overflow', 2.25, 'with proof', { now: T('2026-11-16T00:00:00Z'), cfg: CFG, path, apiKeySource: 'ANTHROPIC_API_KEY' });
+    assert.equal(r.spent, 2.25);
+    assert.equal(readRejects(path).length, 0);
+    const res = runScript('scripts/api-credits.mjs', ['record', 'rater', '1', 'cli', 'with', 'proof', '--api-key-source', 'ANTHROPIC_API_KEY', '--now', '2026-11-16T00:00:00Z'], { env: { AC_API_KEY: 'x' } });
+    assert.equal(res.status, 0);
+    assert.match(res.stdout, /recorded; rater total \$1\.00/);
+  } finally { fx.cleanup(); }
+});
+
+test('record guard: the plugin\'s own call sites pass the proof', () => {
+  const src = (f) => readFileSync(join(PLUGIN_ROOT, 'scripts', f), 'utf8');
+  assert.match(src('lib/api-run.mjs'), /apiKeySource: 'ANTHROPIC_API_KEY'/);
+  assert.match(src('lib/api-sdk-run.mjs'), /apiKeySource: REQUIRED_KEY_SOURCE/);
+  assert.match(src('api-worker.mjs'), /'--api-key-source', 'ANTHROPIC_API_KEY'/);
+});
+
+test('status: shows the rejects count of the cycle only when it is non-zero', () => {
+  const fx = makeFixture();
+  try {
+    const path = ledgerIn(fx);
+    const now = T('2026-11-16T00:00:00Z');
+    assert.doesNotMatch(status({ now, cfg: CFG, path, env: KEYENV }).text, /REJECTED/);
+    for (let i = 0; i < 3; i++) assert.throws(() => record('overflow', 1, `m${i}`, { now: now + i, cfg: CFG, path }));
+    assert.throws(() => record('overflow', 1, 'old cycle', { now: T('2026-10-05T00:00:00Z'), cfg: CFG, path }));
+    assert.equal(rejectsInCycle({ now, cfg: CFG, path }), 3);
+    assert.match(status({ now, cfg: CFG, path, env: KEYENV }).text, /REJECTED records this cycle: 3/);
+  } finally { fx.cleanup(); }
+});
+
+test('billing gaps: a category booked this cycle with no billed cost on its workspace is flagged, mapped or not', () => {
+  const fx = makeFixture();
+  try {
+    const path = ledgerIn(fx);
+    const cfg = { ...CFG, categoryWorkspaces: { review: 'reviewers', workers: 'workers' }, workspaceLimits: {} };
+    const o = { now: T('2026-11-12T00:00:00Z'), cfg, path, apiKeySource: 'ANTHROPIC_API_KEY' };
+    record('review', 5, 'r', o); record('overflow', 5, 'o', o); record('workers', 5, 'w', o);
+    const snap = { through: T('2026-11-15T00:00:00Z'), cost: [{ day: '2026-11-10', ws: 'wrkspc_rev', model: 'm', usd: 5 }], usage: null, hourly: null, hourlyFrom: null, workspaces: { wrkspc_rev: 'reviewers', wrkspc_wrk: 'workers' }, keys: {}, missing: [] };
+    const now = T('2026-11-16T00:00:00Z');
+    const entries = status({ now, cfg, path }).ledger.entries;
+    const text = billingStatusLines(snap, { cfg, entries, now }).join('\n');
+    assert.match(text, /GAP: category workers: booked \$5\.00 this cycle but the Console shows no billed cost on its workspace workers/);
+    assert.match(text, /GAP: category overflow: booked \$5\.00 .*no workspace mapped, so the default one/);
+    assert.doesNotMatch(text, /GAP: category review/);
+    assert.doesNotMatch(text, /gaps: none/);
+  } finally { fx.cleanup(); }
+});
+
+test('billing gaps: review and overflow both booked to the default workspace, billed covers only review: the workspace is flagged', () => {
+  const fx = makeFixture();
+  try {
+    const path = ledgerIn(fx);
+    const cfg = { ...CFG, categoryWorkspaces: { workers: 'workers' }, workspaceLimits: {} };
+    const o = { now: T('2026-11-12T00:00:00Z'), cfg, path, apiKeySource: 'ANTHROPIC_API_KEY' };
+    record('review', 5, 'r', o); record('overflow', 5, 'o', o);
+    // The default workspace is billed for review only; other billed cost elsewhere keeps the all-categories total from flagging.
+    const snap = { through: T('2026-11-15T00:00:00Z'), cost: [{ day: '2026-11-10', ws: '', model: 'm', usd: 5 }, { day: '2026-11-10', ws: 'wrkspc_wrk', model: 'm', usd: 50 }], usage: null, hourly: null, hourlyFrom: null, workspaces: { wrkspc_wrk: 'workers' }, keys: {}, missing: [] };
+    const now = T('2026-11-16T00:00:00Z');
+    const entries = status({ now, cfg, path }).ledger.entries;
+    const g = billingGaps(snap, { cfg, cy: cycleOf(now, cfg.cycleDay), entries, now });
+    assert.deepEqual(g.over.map((x) => x.scope), ['workspace default']);
+    assert.equal(g.over[0].booked, 10);
+    assert.equal(g.over[0].billed, 5);
+    assert.deepEqual(g.unbilled, []);
+    const text = billingStatusLines(snap, { cfg, entries, now }).join('\n');
+    assert.match(text, /GAP: workspace default: booked \$10\.00 but billed \$5\.00/);
+    assert.doesNotMatch(text, /gaps: none/);
+    // Billed covering the booked spend is not flagged, and spend booked after the cut-off (the current, not yet billed day) is left out.
+    record('overflow', 7, 'today', { ...o, now: T('2026-11-15T12:00:00Z') });
+    const snap2 = { ...snap, cost: [{ day: '2026-11-10', ws: '', model: 'm', usd: 10 }, snap.cost[1]] };
+    const e2 = status({ now, cfg, path }).ledger.entries;
+    assert.deepEqual(billingGaps(snap2, { cfg, cy: cycleOf(now, cfg.cycleDay), entries: e2, now }).over, []);
+  } finally { fx.cleanup(); }
+});
+
+test('billing gaps: the hourly check holds a category with no mapped workspace to the default workspace, as the per-workspace check does', () => {
+  const fx = makeFixture();
+  try {
+    const path = ledgerIn(fx);
+    const cfg = { ...CFG, categoryWorkspaces: { workers: 'workers' }, workspaceLimits: {} };
+    const o = { now: T('2026-11-12T10:30:00Z'), cfg, path, apiKeySource: 'ANTHROPIC_API_KEY' };
+    record('overflow', 5, 'unmapped category', o); // no workspace mapped: the default workspace ('')
+    const now = T('2026-11-16T00:00:00Z');
+    const hour = T('2026-11-12T10:00:00Z');
+    const mk = (hourly) => ({ through: T('2026-11-15T00:00:00Z'), cost: [{ day: '2026-11-12', ws: '', model: 'm', usd: 5 }], usage: null, hourly, hourlyFrom: T('2026-11-10T00:00:00Z'), workspaces: { wrkspc_wrk: 'workers' }, keys: {}, missing: [] });
+    const entries = status({ now, cfg, path }).ledger.entries;
+    const gaps = (hourly) => billingGaps(mk(hourly), { cfg, cy: cycleOf(now, cfg.cycleDay), entries, now });
+    // only the workers workspace used the API in that hour: the unmapped overflow run has no usage on the default workspace
+    const none = gaps([{ hour, ws: 'wrkspc_wrk' }]);
+    assert.equal(none.checked, true);
+    assert.equal(none.unmatched.n, 1);
+    assert.equal(none.unmatched.usd, 5);
+    // the default workspace has usage in that hour: matched, no gap
+    assert.equal(gaps([{ hour, ws: '' }]).unmatched.n, 0);
+    // the hour before counts too (a run is booked when it ends)
+    assert.equal(gaps([{ hour: hour - 3600000, ws: '' }]).unmatched.n, 0);
+  } finally { fx.cleanup(); }
+});
+
+test('rejects log is capped: past 64 KiB it is cut back to its newest lines within 32 KiB', () => {
+  const fx = makeFixture();
+  try {
+    const path = ledgerIn(fx);
+    const big = 'x'.repeat(190);
+    for (let i = 0; i < 400; i++) assert.throws(() => record('review', i, `${big}${i}`, { cfg: CFG, path, now: T('2026-11-16T00:00:00Z') + i * 1000 }), /refused/);
+    assert.ok(statSync(rejectsPath(path)).size <= REJECTS_MAX_BYTES + 1024, 'the log stays near its cap');
+    const rej = readRejects(path);
+    assert.ok(rej.length < 400, 'old lines were dropped');
+    assert.ok(rej.length >= 1);
+    assert.equal(rej[rej.length - 1].usd, 399, 'the newest line is kept');
+    for (let i = 1; i < rej.length; i++) assert.ok(rej[i].usd > rej[i - 1].usd, 'order kept');
+    // a log under the cap is left alone
+    const small = join(dirname(path), 'other', 'api-credits.json');
+    assert.throws(() => record('review', 1, 'a', { cfg: CFG, path: small, now: T('2026-11-16T00:00:00Z') }), /refused/);
+    assert.throws(() => record('review', 2, 'b', { cfg: CFG, path: small, now: T('2026-11-16T00:00:01Z') }), /refused/);
+    assert.equal(readRejects(small).length, 2);
+  } finally { fx.cleanup(); }
 });
