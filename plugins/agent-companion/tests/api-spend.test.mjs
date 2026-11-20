@@ -57,7 +57,7 @@ const run = (s, extra = {}) => check({ now: NOW, cfg: CFG, fetchImpl: s.fetchImp
 test('line: reviewers and total spend this cycle, cents to dollars, default workspace counted in total', async () => {
   const p = tmp();
   const s = stub({ cents: { [REV]: 1234, default: 500 } });
-  record('review', 12.34, 't', { now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
+  record('review', 12.34, 't', { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
   const r = await run(s, p);
   assert.equal(r.ok, true);
   assert.equal(r.line, 'API credits: reviewers $12.34 of $100 · total $17.34 of $200 · cycle day 10');
@@ -73,7 +73,7 @@ test('line: reviewers and total spend this cycle, cents to dollars, default work
 test('cost report pages are summed', async () => {
   const p = tmp();
   const s = stub({ pages: [[[REV, 1000]], [[REV, 250], [null, 100]]] });
-  record('review', 12.5, 't', { now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
+  record('review', 12.5, 't', { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
   const r = await run(s, p);
   assert.equal(r.reviewers, 12.5);
   assert.equal(r.total, 13.5);
@@ -97,7 +97,7 @@ test('first day of the cycle: no completed day yet, no cost call, zero spend', a
 
 test('threshold crossing notifies until acknowledged, then not again this cycle', async () => {
   const p = tmp();
-  record('review', 52, 't', { now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
+  record('review', 52, 't', { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
   const s = stub({ cents: { [REV]: 5200 } });
   const a = await run(s, p);
   assert.equal(a.notify.length, 1);
@@ -118,7 +118,7 @@ test('threshold crossing notifies until acknowledged, then not again this cycle'
 
 test('below the threshold nothing is notified; several thresholds notify one id each', async () => {
   const p = tmp();
-  record('review', 60, 't', { now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
+  record('review', 60, 't', { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
   const lo = await run(stub({ cents: { [REV]: 4900 } }), { ...p, o: { cfg: { ...CFG, alerts: [50] } } });
   assert.deepEqual(lo.notify, []);
   const hi = await run(stub({ cents: { [REV]: 6000 } }), { ...p, o: { cfg: { ...CFG, alerts: [25, 50, 90] } } });
@@ -129,7 +129,7 @@ test('cycle rollover: an alert acked last cycle fires again in the new cycle', a
   const p = tmp();
   ack('reviewers-50', { now: NOW, cfg: CFG, path: p.alerts });
   const later = T('2026-12-03T12:00:00Z');
-  record('review', 55, 't', { now: T('2026-12-02T01:00:00Z'), cfg: CFG, path: p.ledger });
+  record('review', 55, 't', { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-12-02T01:00:00Z'), cfg: CFG, path: p.ledger });
   const r = await run(stub({ cents: { [REV]: 5500 } }), { ...p, o: { now: later } });
   assert.equal(r.cycle, '2026-12-01');
   assert.deepEqual(r.notify.map((n) => n.id), ['reviewers-50']);
@@ -144,14 +144,14 @@ test('unexplained spend: reviewers beyond the ledger by more than max($1, 10%)',
   assert.ok(unexplained(111, 100) > 10);
   assert.equal(unexplained(3, 5), 0);
   const p = tmp();
-  record('review', 20, 't', { now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
+  record('review', 20, 't', { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
   const r = await run(stub({ cents: { [REV]: 5200 } }), p);
   assert.equal(r.line, 'API credits: reviewers $52 of $100 · total $52 of $200 · cycle day 10 · unexplained $32');
   assert.deepEqual(r.notify.map((n) => n.id).sort(), ['reviewers-50', 'unexplained']);
   const u = r.notify.find((n) => n.id === 'unexplained');
   assert.match(u.message, /\$32\.00/);
   // within tolerance: not flagged
-  const ok = await run(stub({ cents: { [REV]: 5200 } }), (() => { const q = tmp(); record('review', 50, 't', { now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: q.ledger }); return q; })());
+  const ok = await run(stub({ cents: { [REV]: 5200 } }), (() => { const q = tmp(); record('review', 50, 't', { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: q.ledger }); return q; })());
   assert.doesNotMatch(ok.line, /unexplained/);
   // ack silences it for the cycle
   ack('unexplained', { now: NOW, cfg: CFG, path: p.alerts });
@@ -170,7 +170,7 @@ test('spend booked per turn without an entry (a killed run) is in the ledger, no
 
 test('ledger spend after the cost report cut-off does not hide unexplained spend', async () => {
   const p = tmp();
-  record('review', 40, 't', { now: T('2026-11-10T09:00:00Z'), cfg: CFG, path: p.ledger }); // today: not in the report yet
+  record('review', 40, 't', { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-11-10T09:00:00Z'), cfg: CFG, path: p.ledger }); // today: not in the report yet
   const r = await run(stub({ cents: { [REV]: 3000 } }), p);
   assert.equal(r.ledger, 0);
   assert.match(r.line, /unexplained \$30/);
@@ -196,7 +196,7 @@ test('unavailable: key reader failure, HTTP failure, unknown workspace, bad shap
 
 test('the key never appears in output, argv-like fields or any file', async () => {
   const p = tmp();
-  record('review', 52, 't', { now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
+  record('review', 52, 't', { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
   const s = stub({ cents: { [REV]: 5200 } });
   const out = [];
   const env = { AC_ADMIN_KEY: KEY };
@@ -390,7 +390,7 @@ test('billing snapshot: usage, hourly and key-name failures are optional and lis
   assert.match(lines, /billed \$29\.00/);
 });
 
-const bk = (fx, cat, usd, at) => record(cat, usd, 't', { now: T(at), cfg: BCFG, path: join(fx.dir, 'led.json') });
+const bk = (fx, cat, usd, at) => record(cat, usd, 't', { apiKeySource: 'ANTHROPIC_API_KEY', now: T(at), cfg: BCFG, path: join(fx.dir, 'led.json') });
 const dB = (fx, cat, billing, cfg = BCFG, now = NOW) => decide(cat, { now, cfg, env: { AC_API_KEY: 'present' }, path: join(fx.dir, 'led.json'), billing });
 
 test('decide rests on billed spend: booked spend that never reached the API does not throttle it', async () => {
@@ -507,7 +507,7 @@ test('status without billing data: the figures are labelled booked only, not ver
 test('CLI: decide and status use the Admin API; without a key they fall back and say so', async () => {
   const fx = makeFixture();
   try {
-    record('review', 75, 'big', { now: T('2026-11-05T00:00:00Z'), cfg: BCFG }); record('review', 75, 'big', { now: T('2026-11-06T00:00:00Z'), cfg: BCFG });
+    record('review', 75, 'big', { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-11-05T00:00:00Z'), cfg: BCFG }); record('review', 75, 'big', { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-11-06T00:00:00Z'), cfg: BCFG });
     const s = mkBilling();
     const inj = { cfg: BCFG, env: { AC_API_KEY: 'present' }, billingFetch: s.fetchImpl, readKey: () => KEY, billingCachePath: join(fx.dir, 'bc.json') };
     const out = [];

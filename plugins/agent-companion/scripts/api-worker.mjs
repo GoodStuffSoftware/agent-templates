@@ -319,7 +319,7 @@ export function cliCredits(baseEnv = process.env, workspaceId = '') {
   return {
     decide: (category) => { const [decision, ...why] = call(['decide', category]); return { decision, reason: why.join(' ') }; },
     record: (category, usd, meta) => {
-      const [first] = call(['record', category, String(usd), meta]);
+      const [first] = call(['record', category, String(usd), meta, '--api-key-source', 'ANTHROPIC_API_KEY']);
       if (!/^recorded/.test(first || '')) throw new Error(String(first || 'no answer').slice(0, 80));
     },
   };
