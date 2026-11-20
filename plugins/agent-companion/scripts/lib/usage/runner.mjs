@@ -746,7 +746,7 @@ function buildLatest(res, reportPath) {
  *   days | from,to   explicit selection (YYYY-MM-DD);
  *   scenarios    restrict to these scenario ids; a restricted run is never persisted
  *   maxSeconds   wall-clock budget; the first day always runs
- *   force        recompute days whose digest is unchanged (the output is byte-identical)
+ *   force        recompute days whose digest is unchanged (the efficiency landings read git as it is now, so the output can differ from the first run)
  *   dryRun       compute, write nothing
  *   reportDir    where reports go (default <root>/reports/usage)
  *   metrics      id -> adapter | null (default: the registry entries that carry stat())

@@ -44,5 +44,6 @@ const tokens = r.allowancePct && r.allowanceTokens
   ? `Tokens: ${fmtTokens(r.totalTokens, 3)} used. The allowance is about ${fmtTokens(r.allowanceTokens)} at ${r.allowanceModel}'s usual mix; about ${fmtTokens(r.tokensLeft ?? 0)} left.`
   : `Tokens: ${fmtTokens(r.totalTokens, 3)} used.`;
 console.log(tokens);
-console.log(`Basis: ${rateLabel(r.rate)}, weights ${basis}; cache reads at API price. An estimate (${planWeights().updated || 'undated'} fit).`);
+// The default rate prints exactly as in 0.31.58; an account or plan rate says where it came from.
+console.log(`Basis: ${r.rate.basis === 'default' ? `${r.rate.value} units = 1%` : rateLabel(r.rate)}, weights ${basis}; cache reads at API price. An estimate (${planWeights().updated || 'undated'} fit).`);
 if (r.unknownCalls) console.log(`${r.unknownCalls} calls on an unrecognised model were counted at the Sonnet weight.`);

@@ -26,14 +26,14 @@
 // the same budget; nothing here runs them yet.
 //
 // Billing (0.31.55): the ledger holds only what runs booked for themselves, and booked spend
-// can be wrong (on 2026-11-15 it read $88.66 where Anthropic had billed $41.56). So `decide`
+// can be wrong (for example it can read $90.00 where Anthropic billed $40.00). So `decide`
 // and `status` take a billing snapshot (scripts/lib/api-spend.mjs fetches and caches it from
 // the Admin API; this file stays free of the network) and rest on BILLED spend, plus booked
 // spend only for the window after the last complete billed UTC day. Without a snapshot they
 // fall back to booked figures and say so (BOOKED_ONLY). Per-workspace monthly limits are a
 // config map because the API cannot read them back.
 
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, appendFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, appendFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { opt, stateFile } from '../../hooks/lib/context.mjs';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
@@ -344,11 +344,32 @@ export const REQUIRED_API_KEY_SOURCE = 'ANTHROPIC_API_KEY';
 export const rejectsPath = (path = ledgerPath()) => join(dirname(path), 'api-credits-rejects.jsonl');
 export class RecordRefused extends Error {}
 
+// The rejects log is capped: past REJECTS_MAX_BYTES (64 KiB) it is cut back to its newest lines that fit in REJECTS_KEEP_BYTES (32 KiB),
+// so a runaway caller cannot grow it without bound. The current cycle's count (rejectsInCycle) reads what is left.
+export const REJECTS_MAX_BYTES = 64 * 1024;
+export const REJECTS_KEEP_BYTES = 32 * 1024;
+
+function trimRejects(rp) {
+  if (statSync(rp).size <= REJECTS_MAX_BYTES) return;
+  const lines = readFileSync(rp, 'utf8').split(/\r?\n/).filter((l) => l.trim());
+  const keep = [];
+  let bytes = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    bytes += Buffer.byteLength(lines[i]) + 1;
+    if (bytes > REJECTS_KEEP_BYTES && keep.length) break;
+    keep.unshift(lines[i]);
+  }
+  const tmp = `${rp}.tmp`;
+  writeFileSync(tmp, `${keep.join('\n')}\n`);
+  renameSync(tmp, rp);
+}
+
 function logReject(path, now, category, usd, meta, reason) {
   try {
     const rp = rejectsPath(path);
     mkdirSync(dirname(rp), { recursive: true });
     appendFileSync(rp, `${JSON.stringify({ t: new Date(now).toISOString(), cat: String(category), usd: Number.isFinite(Number(usd)) ? Number(usd) : String(usd), meta: String(meta).slice(0, 200), reason })}\n`);
+    trimRejects(rp);
   } catch { /* the refusal still stands when the log cannot be written */ }
 }
 
@@ -534,8 +555,9 @@ export function billingGaps(snap, { cfg, cy, entries, now }) {
   if (Array.isArray(snap.hourly) && Number.isFinite(snap.hourlyFrom)) {
     out.checked = true;
     const have = new Set(snap.hourly.map((h) => `${h.ws}|${h.hour}`));
+    // The same grouping as the per-workspace check above: a category with no mapped workspace is held to the default workspace ('').
     const wsOfCat = {};
-    for (const [cat, ref] of Object.entries(cfg.categoryWorkspaces || {})) wsOfCat[cat] = resolveWorkspace(snap, ref);
+    for (const cat of CATEGORIES) { const ref = (cfg.categoryWorkspaces || {})[cat]; wsOfCat[cat] = ref ? resolveWorkspace(snap, ref) : ''; }
     for (const e of entries || []) {
       const at = tOf(e);
       const ws = wsOfCat[e.cat];

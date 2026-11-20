@@ -484,11 +484,11 @@ test('status gaps: booked over billed beyond the tolerance, and booked entries w
   bk(fx, 'review', 24, '2026-11-05T10:30:00Z'); // matched hour
   bk(fx, 'review', 30, '2026-11-06T03:10:00Z'); // no usage on reviewers that hour
   bk(fx, 'review', 1, '2026-11-05T11:05:00Z'); // the hour before (10:00) has usage: matched
-  bk(fx, 'overflow', 50, '2026-11-07T00:00:00Z'); // no workspace mapped: cannot be checked per hour, counted in the total
+  bk(fx, 'overflow', 50, '2026-11-07T00:00:00Z'); // no workspace mapped: held to the default workspace, which has no usage that hour either
   const text = billingStatusLines(sn, { cfg: BCFG, entries: readLedgerEntries(p.dir), now: NOW }).join('\n');
   assert.match(text, /GAP: all categories: booked \$105\.00 but billed \$29\.00/);
   assert.match(text, /GAP: workspace reviewers: booked \$55\.00 but billed \$25\.00/);
-  assert.match(text, /GAP: 1 booked entry \(\$30\.00\) with no usage on their workspace in that hour: 2026-11-06T03:10Z review \$30\.00/);
+  assert.match(text, /GAP: 2 booked entries \(\$80\.00\) with no usage on their workspace in that hour: 2026-11-06T03:10Z review \$30\.00, 2026-11-07T00:00Z overflow \$50\.00/);
   assert.ok(!/gaps: none/.test(text));
   // within the tolerance (max $1 or 10% of billed) there is no flag
   const q = tmp(); bk({ dir: q.dir }, 'review', 26.5, '2026-11-05T10:30:00Z');

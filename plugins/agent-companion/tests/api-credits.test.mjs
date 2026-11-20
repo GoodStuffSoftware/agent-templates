@@ -10,7 +10,7 @@ import { join, dirname } from 'node:path';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
 import {
   DEFAULT_SHARES, decide, record, recordFailure, recordFallback, reviewStats, summarizeReviews, reviewSummaryLine, status, summaryLine, cycleOf,
-  keyConfigured, rejectsPath, rejectsInCycle, billingStatusLines, billingGaps, parseKeySource, parseShares, sharesWarning,
+  keyConfigured, rejectsPath, rejectsInCycle, REJECTS_MAX_BYTES, billingStatusLines, billingGaps, parseKeySource, parseShares, sharesWarning,
 } from '../scripts/lib/api-credits.mjs';
 import { runApi, validKeyShape, isUnavailable, isWorkspaceMissing, isSpendLimit, hardUsdFrom, softUsdFrom, reviewLimits, reviewLimitsLine, OFFICIAL_ENDPOINT, SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
 import { makeTools } from '../scripts/lib/api-tools.mjs';
@@ -1266,5 +1266,49 @@ test('billing gaps: review and overflow both booked to the default workspace, bi
     const snap2 = { ...snap, cost: [{ day: '2026-11-10', ws: '', model: 'm', usd: 10 }, snap.cost[1]] };
     const e2 = status({ now, cfg, path }).ledger.entries;
     assert.deepEqual(billingGaps(snap2, { cfg, cy: cycleOf(now, cfg.cycleDay), entries: e2, now }).over, []);
+  } finally { fx.cleanup(); }
+});
+
+test('billing gaps: the hourly check holds a category with no mapped workspace to the default workspace, as the per-workspace check does', () => {
+  const fx = makeFixture();
+  try {
+    const path = ledgerIn(fx);
+    const cfg = { ...CFG, categoryWorkspaces: { workers: 'workers' }, workspaceLimits: {} };
+    const o = { now: T('2026-11-12T10:30:00Z'), cfg, path, apiKeySource: 'ANTHROPIC_API_KEY' };
+    record('overflow', 5, 'unmapped category', o); // no workspace mapped: the default workspace ('')
+    const now = T('2026-11-16T00:00:00Z');
+    const hour = T('2026-11-12T10:00:00Z');
+    const mk = (hourly) => ({ through: T('2026-11-15T00:00:00Z'), cost: [{ day: '2026-11-12', ws: '', model: 'm', usd: 5 }], usage: null, hourly, hourlyFrom: T('2026-11-10T00:00:00Z'), workspaces: { wrkspc_wrk: 'workers' }, keys: {}, missing: [] });
+    const entries = status({ now, cfg, path }).ledger.entries;
+    const gaps = (hourly) => billingGaps(mk(hourly), { cfg, cy: cycleOf(now, cfg.cycleDay), entries, now });
+    // only the workers workspace used the API in that hour: the unmapped overflow run has no usage on the default workspace
+    const none = gaps([{ hour, ws: 'wrkspc_wrk' }]);
+    assert.equal(none.checked, true);
+    assert.equal(none.unmatched.n, 1);
+    assert.equal(none.unmatched.usd, 5);
+    // the default workspace has usage in that hour: matched, no gap
+    assert.equal(gaps([{ hour, ws: '' }]).unmatched.n, 0);
+    // the hour before counts too (a run is booked when it ends)
+    assert.equal(gaps([{ hour: hour - 3600000, ws: '' }]).unmatched.n, 0);
+  } finally { fx.cleanup(); }
+});
+
+test('rejects log is capped: past 64 KiB it is cut back to its newest lines within 32 KiB', () => {
+  const fx = makeFixture();
+  try {
+    const path = ledgerIn(fx);
+    const big = 'x'.repeat(190);
+    for (let i = 0; i < 400; i++) assert.throws(() => record('review', i, `${big}${i}`, { cfg: CFG, path, now: T('2026-11-16T00:00:00Z') + i * 1000 }), /refused/);
+    assert.ok(statSync(rejectsPath(path)).size <= REJECTS_MAX_BYTES + 1024, 'the log stays near its cap');
+    const rej = readRejects(path);
+    assert.ok(rej.length < 400, 'old lines were dropped');
+    assert.ok(rej.length >= 1);
+    assert.equal(rej[rej.length - 1].usd, 399, 'the newest line is kept');
+    for (let i = 1; i < rej.length; i++) assert.ok(rej[i].usd > rej[i - 1].usd, 'order kept');
+    // a log under the cap is left alone
+    const small = join(dirname(path), 'other', 'api-credits.json');
+    assert.throws(() => record('review', 1, 'a', { cfg: CFG, path: small, now: T('2026-11-16T00:00:00Z') }), /refused/);
+    assert.throws(() => record('review', 2, 'b', { cfg: CFG, path: small, now: T('2026-11-16T00:00:01Z') }), /refused/);
+    assert.equal(readRejects(small).length, 2);
   } finally { fx.cleanup(); }
 });
