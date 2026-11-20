@@ -46,7 +46,7 @@ import { join, dirname, basename, relative } from 'node:path';
 import { stateDir, appendLog, classifyModel } from './context.mjs';
 import { priceUsage } from '../../scripts/lib/pricing.mjs';
 import { usageOf, queueNotice, safe } from './runaway.mjs';
-import { requestUnits, modelWeight, weeklyLimitUnits } from './plan-allowance.mjs';
+import { requestUnits, modelWeight, weeklyLimitUnits, currentRate, rateLabel } from './plan-allowance.mjs';
 
 export const SESSION_BUDGET_DEFAULT_UNITS = 350;
 const CHUNK_BYTES = 8 * 1024 * 1024;
@@ -55,9 +55,11 @@ const RECENT_KEYS = 64;
 const MAX_FILES = 2000;
 const STATE_TTL_MS = 7 * 86400000;
 
-// The weekly limit in plan units: 100 x the units per 1% in config/plan-weights.json (plus the user file).
-export function weeklyPlanUnits() {
-  return weeklyLimitUnits();
+// The weekly limit in plan units: 100 x the units per 1% of the account in use (hooks/lib/plan-allowance.mjs currentRate(): the
+// account's own rate, else its plan's, else the shipped default in config/plan-weights.json plus the user file). The plan units
+// themselves are the same for every account; only the size of the week differs. An account the plugin cannot tell uses the default.
+export function weeklyPlanUnits(rate = currentRate()) {
+  return weeklyLimitUnits(rate.value);
 }
 
 // Plan units for one usage record (lib/runaway.mjs usageOf shape).
@@ -244,10 +246,13 @@ export function scanSession({ sessionId, transcriptPath, deadline, state }) {
   return { total, files: paths.length, complete, estTurns, unpriced };
 }
 
-export function budgetNoticeText(total) {
+export function budgetNoticeText(total, rate = currentRate()) {
   const n = Math.round(total);
-  const pct = Math.round((total / weeklyPlanUnits()) * 100);
-  return `[agent-companion] This session, including its subagents, has used about ${n} plan units (~${pct}% of a ~${weeklyPlanUnits().toLocaleString('en-US')}-unit week). `
+  const week = weeklyPlanUnits(rate);
+  const pct = Math.round((total / week) * 100);
+  // The rate is named only when it is not the shipped default (the default week is what the text always said).
+  const basis = rate.basis === 'default' ? '' : `, at ${rateLabel(rate)}`;
+  return `[agent-companion] This session, including its subagents, has used about ${n} plan units (~${pct}% of a ~${week.toLocaleString('en-US')}-unit week${basis}). `
     + 'A hand-off to a fresh session does not save usage; let auto-compaction handle context. '
     + 'What cuts spend is fewer and smaller spawns: pick the lowest rung that fits, brief tightly, cap fan-out, and do not re-spawn for work a live worker can continue. '
     + 'Hand over only when a fresh session is required (a plugin version change) or the job ends.';
@@ -273,6 +278,7 @@ export function checkSessionBudget(p, { threshold, now = Date.now(), deadlineMs 
       state.level = level;
       if (claimLevel(p.session_id, level)) {
         fired = true;
+        const rate = currentRate();
         appendLog('session-budget.jsonl', {
           at: new Date(now).toISOString(),
           session_id: p.session_id,
@@ -280,13 +286,15 @@ export function checkSessionBudget(p, { threshold, now = Date.now(), deadlineMs 
           units: Math.round(r.total * 100) / 100,
           level,
           threshold,
-          week_pct: Math.round((r.total / weeklyPlanUnits()) * 1000) / 10,
+          week_pct: Math.round((r.total / weeklyPlanUnits(rate)) * 1000) / 10,
+          units_per_pct: rate.value,
+          rate_basis: rate.basis,
           transcripts: r.files,
           scan_complete: r.complete,
           estimated_turns: r.estTurns,
           unpriced_turns: r.unpriced,
         });
-        notify(p.session_id, budgetNoticeText(r.total));
+        notify(p.session_id, budgetNoticeText(r.total, rate));
       }
     }
     saveState(p.session_id, state);
