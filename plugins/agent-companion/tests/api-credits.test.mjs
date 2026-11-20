@@ -10,7 +10,7 @@ import { join, dirname } from 'node:path';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
 import {
   DEFAULT_SHARES, decide, record, recordFailure, recordFallback, reviewStats, summarizeReviews, reviewSummaryLine, status, summaryLine, cycleOf,
-  keyConfigured, rejectsPath, rejectsInCycle, billingStatusLines, parseKeySource, parseShares, sharesWarning,
+  keyConfigured, rejectsPath, rejectsInCycle, billingStatusLines, billingGaps, parseKeySource, parseShares, sharesWarning,
 } from '../scripts/lib/api-credits.mjs';
 import { runApi, validKeyShape, isUnavailable, isWorkspaceMissing, isSpendLimit, hardUsdFrom, softUsdFrom, reviewLimits, reviewLimitsLine, OFFICIAL_ENDPOINT, SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
 import { makeTools } from '../scripts/lib/api-tools.mjs';
@@ -1239,5 +1239,32 @@ test('billing gaps: a category booked this cycle with no billed cost on its work
     assert.match(text, /GAP: category overflow: booked \$5\.00 .*no workspace mapped, so the default one/);
     assert.doesNotMatch(text, /GAP: category review/);
     assert.doesNotMatch(text, /gaps: none/);
+  } finally { fx.cleanup(); }
+});
+
+test('billing gaps: review and overflow both booked to the default workspace, billed covers only review: the workspace is flagged', () => {
+  const fx = makeFixture();
+  try {
+    const path = ledgerIn(fx);
+    const cfg = { ...CFG, categoryWorkspaces: { workers: 'workers' }, workspaceLimits: {} };
+    const o = { now: T('2026-11-12T00:00:00Z'), cfg, path, apiKeySource: 'ANTHROPIC_API_KEY' };
+    record('review', 5, 'r', o); record('overflow', 5, 'o', o);
+    // The default workspace is billed for review only; other billed cost elsewhere keeps the all-categories total from flagging.
+    const snap = { through: T('2026-11-15T00:00:00Z'), cost: [{ day: '2026-11-10', ws: '', model: 'm', usd: 5 }, { day: '2026-11-10', ws: 'wrkspc_wrk', model: 'm', usd: 50 }], usage: null, hourly: null, hourlyFrom: null, workspaces: { wrkspc_wrk: 'workers' }, keys: {}, missing: [] };
+    const now = T('2026-11-16T00:00:00Z');
+    const entries = status({ now, cfg, path }).ledger.entries;
+    const g = billingGaps(snap, { cfg, cy: cycleOf(now, cfg.cycleDay), entries, now });
+    assert.deepEqual(g.over.map((x) => x.scope), ['workspace default']);
+    assert.equal(g.over[0].booked, 10);
+    assert.equal(g.over[0].billed, 5);
+    assert.deepEqual(g.unbilled, []);
+    const text = billingStatusLines(snap, { cfg, entries, now }).join('\n');
+    assert.match(text, /GAP: workspace default: booked \$10\.00 but billed \$5\.00/);
+    assert.doesNotMatch(text, /gaps: none/);
+    // Billed covering the booked spend is not flagged, and spend booked after the cut-off (the current, not yet billed day) is left out.
+    record('overflow', 7, 'today', { ...o, now: T('2026-11-15T12:00:00Z') });
+    const snap2 = { ...snap, cost: [{ day: '2026-11-10', ws: '', model: 'm', usd: 10 }, snap.cost[1]] };
+    const e2 = status({ now, cfg, path }).ledger.entries;
+    assert.deepEqual(billingGaps(snap2, { cfg, cy: cycleOf(now, cfg.cycleDay), entries: e2, now }).over, []);
   } finally { fx.cleanup(); }
 });

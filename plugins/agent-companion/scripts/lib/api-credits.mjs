@@ -498,20 +498,26 @@ const group = (rows, keyFn, valFn) => { const m = new Map(); for (const r of row
 const tokensOf = (r) => (r.input || 0) + (r.output || 0) + (r.cacheRead || 0) + (r.cacheWrite || 0);
 const model5 = (m) => String(m || 'unknown').replace(/^claude-/, '');
 
-// Gaps between what the ledger booked and what Anthropic billed. Tolerance: the larger of $1 and 10% of billed.
+// Gaps between what the ledger booked and what Anthropic billed. Tolerance (the total and each workspace): the larger of $1 and 10% of billed.
 export function billingGaps(snap, { cfg, cy, entries, now }) {
   const out = { over: [], unbilled: [], unmatched: { n: 0, usd: 0, examples: [] }, checked: false };
   const tol = (billed) => Math.max(1, 0.1 * billed);
   const booked = (cats) => bookedBetween(entries, cy.start, snap.through, cats);
   const total = { scope: 'all categories', booked: booked(null), billed: billedSince(snap, cy.start) };
   if (total.booked - total.billed > tol(total.billed)) out.over.push({ ...total, over: total.booked - total.billed });
-  const seen = new Set();
-  for (const [cat, ref] of Object.entries(cfg.categoryWorkspaces || {})) {
-    const id = resolveWorkspace(snap, ref);
-    if (id === null || seen.has(id)) continue;
-    seen.add(id);
-    const cats = Object.entries(cfg.categoryWorkspaces).filter(([, w]) => resolveWorkspace(snap, w) === id).map(([c]) => c);
-    const row = { scope: `workspace ${workspaceName(snap, id)}`, booked: booked(cats), billed: billedSince(snap, cy.start, id) };
+  // Per workspace: every category routed to it, mapped or not. A category with no mapped workspace (overflow and rater by default)
+  // is held to the default workspace, so its booked spend counts against that workspace's billed cost; comparing category by
+  // category let review's billed cost on the default workspace hide overflow booked next to it. Both sides stop at the snapshot
+  // cut-off (the end of the last complete UTC day), so the current day, which Console cost data has not reported yet, is left out.
+  const byWs = new Map();
+  for (const cat of CATEGORIES) {
+    const ref = (cfg.categoryWorkspaces || {})[cat];
+    const id = ref ? resolveWorkspace(snap, ref) : '';
+    if (id === null) continue;
+    byWs.set(id, [...(byWs.get(id) || []), cat]);
+  }
+  for (const [id, cats] of byWs) {
+    const row ={ scope: `workspace ${workspaceName(snap, id)}`, booked: booked(cats), billed: billedSince(snap, cy.start, id) };
     if (row.booked - row.billed > tol(row.billed)) out.over.push({ ...row, over: row.booked - row.billed });
   }
   // A category that booked spend this cycle (through the cut-off) while its workspace has no billed cost at all. A category with
