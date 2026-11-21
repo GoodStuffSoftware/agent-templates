@@ -567,11 +567,11 @@ test('self_review_expected: true on the rung carrying the protocol (nothing appe
 test('a self-reviewing TYPE on a ladder rung WITHOUT the block gets the generated protocol appended to its brief, sized to that rung', () => {
   const h = harness();
   try {
-    const r = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-max', prompt: 'TYPE: novel-design\nROLE: writer\nWARRANT: weight 5 - test\ndesign it' }));
+    const r = h.lead(bg({ subagent_type: 'agent-companion:ac-opus-max', prompt: 'TYPE: novel-design\nROLE: writer\nRung: test needs max\nWARRANT: weight 5 - test\ndesign it' }));
     assert.equal(r.decision, 'proceed', r.reason);
     assert.equal(r.row.self_review_expected, true);
     assert.equal(r.row.self_review_injected, true);
-    assert.match(r.prompt, /^TYPE: novel-design\nROLE: writer\nWARRANT: weight 5 - test\ndesign it\n\n---\n\(agent-companion: your definition does not carry the self-review protocol/);
+    assert.match(r.prompt, /^TYPE: novel-design\nROLE: writer\nRung: test needs max\nWARRANT: weight 5 - test\ndesign it\n\n---\n\(agent-companion: your definition does not carry the self-review protocol/);
     assert.match(r.prompt, /## Self-review before you return/);
     assert.match(r.prompt, /subagent_type: "agent-companion:ac-opus-max"/);
     assert.match(r.prompt, /^ {3}WRITER: opus\/max$/m);
