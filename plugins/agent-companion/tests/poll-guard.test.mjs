@@ -9,7 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeFixture, runHook, decisionOf } from './helpers.mjs';
+import { makeFixture, runHook, decisionOf, readJsonl } from './helpers.mjs';
 import {
   evaluate, priorCallsOf, trailingNoopStreak, trailingSameDescriptionStreak,
   hasInFlightLaunch, gatedMonitorStreak,
@@ -486,5 +486,36 @@ test('hook: thresholds are configurable via plugin options', () => {
     assert.match(res.json?.systemMessage || '', /one completion/i, 'a lowered streak threshold must fire on 1 prior noop');
   } finally {
     cleanup();
+  }
+});
+
+test('hook: a hint is logged to denials.jsonl as guard poll-guard, outcome warn; a silent pass writes nothing', () => {
+  const fx = makeFixture();
+  try {
+    const dir = fx.dir;
+    const call = { delaySeconds: 60, noop: true, reason: 'poll', prompt: 'x' };
+    const fireT = writeTranscript(dir, [
+      backgroundAgentLaunch('2026-01-01T00:00:00Z'),
+      assistantToolUse('ScheduleWakeup', call, '2026-01-01T00:00:05Z'),
+      assistantToolUse('ScheduleWakeup', call, '2026-01-01T00:01:05Z'),
+    ]);
+    const res = runHook('hooks/poll-guard.mjs', {
+      session_id: 'poll-guard-log-1', tool_name: 'ScheduleWakeup', tool_input: call, transcript_path: fireT,
+    });
+    assert.match(res.json?.systemMessage || '', /one completion/i);
+    const file = join(fx.stateDir, 'telemetry', 'denials.jsonl');
+    const rows = readJsonl(file);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].guard, 'poll-guard');
+    assert.equal(rows[0].outcome, 'warn');
+    assert.equal(rows[0].tool_name, 'ScheduleWakeup');
+    assert.equal(rows[0].session_id, 'poll-guard-log-1');
+    assert.match(rows[0].detail, /^schedule-wakeup-noop-streak: ScheduleWakeup$/);
+    // no history: no hint, no row
+    const quiet = writeTranscript(dir, []);
+    runHook('hooks/poll-guard.mjs', { session_id: 'poll-guard-log-2', tool_name: 'ScheduleWakeup', tool_input: call, transcript_path: quiet });
+    assert.equal(readJsonl(file).length, 1);
+  } finally {
+    fx.cleanup();
   }
 });

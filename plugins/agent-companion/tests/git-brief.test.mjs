@@ -12,7 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { makeFixture, runHook, runScript, readJsonl } from './helpers.mjs';
 import { cleanGitEnv } from '../scripts/lib/git-env.mjs';
-import { gitBrief, landed, runFetch, STAMP_FILE, FETCH_FRESH_MS, SQUASH_NOTE } from '../scripts/git-brief.mjs';
+import { gitBrief, landed, runFetch, findGitDir, STAMP_FILE, CACHE_FILE, CACHE_TTL_MS, FETCH_FRESH_MS, SQUASH_NOTE } from '../scripts/git-brief.mjs';
 
 const IDENT = {
   GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
@@ -470,18 +470,19 @@ test('hook: SessionStart and SubagentStart each inject one additionalContext lin
   assert.equal(rows[0].event, 'inject-session');
   assert.equal(rows[0].session_id, 'sess-1');
   assert.equal(rows[0].chars, text.length);
-  assert.equal(rows[0].fetched, true, 'the first start fetched');
+  assert.equal(rows[0].fetched, false, 'the hook never fetches (no network at agent start)');
   assert.equal(rows[1].event, 'inject-subagent');
   assert.equal(rows[1].agent_type, 'agent-companion:ac-sonnet-high');
-  assert.equal(rows[1].fetched, false, 'the second start was inside the window');
+  assert.equal(rows[1].fetched, false);
+  assert.equal(rows[0].cache, 'miss');
+  assert.equal(rows[1].cache, 'hit', 'the second start came from the per-worktree cache');
   assert.equal(typeof rows[1].duration_ms, 'number');
   assert.equal(rows[0].outcome, 'ok');
-  assert.equal(rows[0].fetch_outcome, 'ok');
-  assert.equal(rows[0].fetch_age_ms, null, 'no earlier stamp');
-  assert.equal(rows[1].fetch_outcome, 'fresh-skip');
-  assert.equal(typeof rows[1].fetch_age_ms, 'number');
+  assert.equal(rows[0].fetch_outcome, 'skipped');
+  assert.equal(rows[1].fetch_outcome, 'skipped');
   assert.equal(typeof rows[0].start_ms, 'number', 'hook start latency');
-  assert.ok(rows[0].steps_ms.fetch >= 0 && rows[0].steps_ms.status >= 0, 'time per git step');
+  assert.ok(rows[0].steps_ms.status >= 0, 'time per git step');
+  assert.deepEqual(rows[1].steps_ms, {}, 'a cache hit runs no git');
 }));
 
 test('hook: git_brief off (env CLAUDE_PLUGIN_OPTION_GIT_BRIEF=0) prints nothing, runs no git, writes no row', () => withRepos(({ work, fx }) => {
@@ -525,3 +526,75 @@ test('hooks.json registers the hook on SessionStart and SubagentStart; plugin.js
   assert.equal(plugin.userConfig.git_brief.type, 'boolean');
   assert.equal(plugin.userConfig.git_brief.default, true);
 });
+
+// --- speed: cache, deadline, no-repo path ---------------------------------------
+
+test('cache: the second call in the TTL runs no git and returns the same line; HEAD, index or TTL expiry invalidate', () => withRepos(({ work }) => {
+  const t = Date.now();
+  const a = gitBrief({ cwd: work, ...noFetch, cacheTtlMs: CACHE_TTL_MS, now: t });
+  assert.equal(a.cache, 'miss');
+  assert.ok(existsSync(join(work, '.git', CACHE_FILE)));
+  const b = gitBrief({ cwd: work, ...noFetch, cacheTtlMs: CACHE_TTL_MS, now: t + 1000 });
+  assert.equal(b.cache, 'hit');
+  assert.equal(b.line, a.line);
+  assert.deepEqual(b.steps_ms, {}, 'no git step ran');
+  // past the TTL
+  assert.equal(gitBrief({ cwd: work, ...noFetch, cacheTtlMs: CACHE_TTL_MS, now: t + CACHE_TTL_MS + 1 }).cache, 'miss');
+  // a new commit changes HEAD's ref
+  commit(work, 'z.txt', 'zed');
+  const c = gitBrief({ cwd: work, ...noFetch, cacheTtlMs: CACHE_TTL_MS, now: t + 2000 });
+  assert.equal(c.cache, 'miss');
+  assert.match(c.line, /ahead 1 behind 0 origin\/main/);
+  assert.match(c.line, /last [0-9a-f]+ zed/);
+  // a staged change moves the index mtime
+  assert.equal(gitBrief({ cwd: work, ...noFetch, cacheTtlMs: CACHE_TTL_MS, now: t + 2500 }).cache, 'hit');
+  writeFileSync(join(work, 'staged.txt'), 'x\n');
+  git(work, 'add', 'staged.txt');
+  const d = gitBrief({ cwd: work, ...noFetch, cacheTtlMs: CACHE_TTL_MS, now: t + 3000 });
+  assert.equal(d.cache, 'miss');
+  assert.match(d.line, /uncommitted 1/);
+  // without a TTL (the CLI) the cache is neither read nor written
+  assert.equal(gitBrief({ cwd: work, ...noFetch }).cache, undefined);
+}));
+
+test('cache: a linked worktree has its own cache in its own git directory', () => withRepos(({ work, fx }) => {
+  const wt = join(fx.dir, 'wt');
+  git(work, 'worktree', 'add', '-q', '-b', 'side', wt);
+  const gd = findGitDir(wt);
+  assert.ok(gd && gd !== join(work, '.git'));
+  assert.equal(gitBrief({ cwd: wt, ...noFetch, cacheTtlMs: CACHE_TTL_MS }).cache, 'miss');
+  assert.ok(existsSync(join(gd, CACHE_FILE)));
+  const again = gitBrief({ cwd: wt, ...noFetch, cacheTtlMs: CACHE_TTL_MS });
+  assert.equal(again.cache, 'hit');
+  assert.match(again.line, /^side \|/);
+}));
+
+test('deadline: a run that is out of time says nothing rather than waiting, and caches nothing', () => withRepos(({ work }) => {
+  // 1 ms: the first call cannot finish, so there is no line
+  const none = gitBrief({ cwd: work, ...noFetch, cacheTtlMs: CACHE_TTL_MS, deadlineMs: 1 });
+  assert.equal(none.line, null);
+  assert.equal(none.outcome, 'timeout');
+  assert.equal(existsSync(join(work, '.git', CACHE_FILE)), false, 'nothing cached');
+}));
+
+test('no-repo path: nothing is spawned, outcome not-repo, no cache written', () => {
+  const none = mkdtempSync(join(tmpdir(), 'ac-nogit-'));
+  try {
+    const r = gitBrief({ cwd: none, ...noFetch, cacheTtlMs: CACHE_TTL_MS });
+    assert.equal(r.line, null);
+    assert.equal(r.outcome, 'not-repo');
+    assert.equal(r.cache, 'none');
+    assert.deepEqual(r.steps_ms, {}, 'no git was run');
+    assert.equal(findGitDir(none), null);
+  } finally { rmSync(none, { recursive: true, force: true }); }
+});
+
+test('hook: a repeat start within the TTL is answered from the cache without git', () => withRepos(({ work, fx }) => {
+  const env = { AGENT_COMPANION_STATE_DIR: fx.stateDir };
+  const args = ['--event', 'subagent-start'];
+  const a = runHook(HOOK, { session_id: 's5', agent_id: 'a', cwd: work }, { env, args });
+  const b = runHook(HOOK, { session_id: 's5', agent_id: 'b', cwd: work }, { env, args });
+  assert.equal(a.json.hookSpecificOutput.additionalContext, b.json.hookSpecificOutput.additionalContext);
+  const rows = readJsonl(join(fx.stateDir, 'telemetry', 'git-brief.jsonl'));
+  assert.deepEqual(rows.map((r) => r.cache), ['miss', 'hit']);
+}));

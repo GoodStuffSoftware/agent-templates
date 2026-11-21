@@ -45,7 +45,7 @@ import {
 } from './days.mjs';
 import { unitsOfFacts, unitsFromTokens, SETTLE_MS } from './facts.mjs';
 import { getMetric, configMetricRegistry } from './metrics/index.mjs';
-import { readTelemetry, telemetryRecords, versionFirstSeen } from './telemetry.mjs';
+import { readTelemetry, telemetryRecords, versionFirstSeen, readRows, telemetryDirOf } from './telemetry.mjs';
 import { makeRoutineSource } from './routines.mjs';
 import { sessionRecordRoot } from '../routine-model-drift.mjs';
 import { homeRoot, claudeDir } from '../../../hooks/lib/context.mjs';
@@ -685,7 +685,7 @@ export function efficiencyPending(res) {
 
 /**
  * The readers the efficiency sections use, with the test seams in opts.efficiency (git, transcriptsRoot, accountHistory, rateFor,
- * spawnRows, settings, pluginVersion). Everything is read lazily and once per run. Of the settings only two values are read:
+ * spawnRows, handoffRows, settings, pluginVersion). Everything is read lazily and once per run. Of the settings only two values are read:
  * autoCompactWindow (through configuredWindow) and main_compact_floor_tokens (through opt); nothing else of them.
  */
 function makeEfficiencySeams({ root, hooks, nowT, opts, stop = null }) {
@@ -697,6 +697,7 @@ function makeEfficiencySeams({ root, hooks, nowT, opts, stop = null }) {
     for (const r of (tel && tel.spawns) || []) if (typeof r.tool_use_id === 'string') m.set(r.tool_use_id, r);
     return m;
   });
+  const handoffRows = lazy(() => (root ? readRows(join(telemetryDirOf(root), 'handoff-limit.jsonl')) : null));
   const history = lazy(() => accountHistory());
   const repoCache = new Map();
   return (day, prior, reuse = null) => {
@@ -708,6 +709,7 @@ function makeEfficiencySeams({ root, hooks, nowT, opts, stop = null }) {
       transcriptsRoot: e.transcriptsRoot || opts.transcriptsRoot || defaultTranscriptsRoot(),
       accountHistory: e.accountHistory !== undefined ? e.accountHistory : history(),
       rateFor: e.rateFor || ((acct) => unitsPerPercentFor({ account: acct })),
+      handoffRows: e.handoffRows !== undefined ? e.handoffRows : handoffRows(),
       spawnRows: e.spawnRows || rows() || new Map(),
       settings: e.settings || (() => ({ window: configuredWindow().tokens, floor: opt('main_compact_floor_tokens', 0) })),
       pluginVersion: e.pluginVersion !== undefined ? e.pluginVersion : pluginVersion(),

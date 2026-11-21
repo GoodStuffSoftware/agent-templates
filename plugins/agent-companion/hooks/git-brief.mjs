@@ -2,7 +2,8 @@
 // context so it does not spend turns on `git status` / `git fetch` /
 // `git rev-list` to find out where it is. The line comes from
 // scripts/git-brief.mjs, which also carries the freshness and timeout policy
-// for the fetch it does (5 minutes; 1.5 s cap; never prompts). The line names
+// for the fetch the script run does (5 minutes; 1.5 s cap; never prompts);
+// this hook itself never fetches (0.31.61). The line names
 // the refresh command, so a later question ("is X on main?") is one script
 // call, not a git sequence.
 //
@@ -28,7 +29,7 @@
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readStdin, opt, passthrough, appendLog, sessionIsSubagent } from './lib/context.mjs';
-import { gitBrief, briefTelemetry } from '../scripts/git-brief.mjs';
+import { gitBrief, briefTelemetry, CACHE_TTL_MS, HOOK_DEADLINE_MS } from '../scripts/git-brief.mjs';
 
 const startMs = Math.round(process.uptime() * 1000);
 const argv = process.argv.slice(2);
@@ -44,7 +45,9 @@ try {
   if (EVENT === 'session-start' && sessionIsSubagent(p)) passthrough();
   const t0 = Date.now();
   const cwd = typeof p.cwd === 'string' && p.cwd ? p.cwd : process.cwd();
-  const res = gitBrief({ cwd });
+  // Local state only (no fetch: the refresh command fetches), answered from a
+  // per-worktree cache for CACHE_TTL_MS, one deadline of HOOK_DEADLINE_MS.
+  const res = gitBrief({ cwd, fetch: false, cacheTtlMs: CACHE_TTL_MS, deadlineMs: HOOK_DEADLINE_MS });
 
   const root = (process.env.CLAUDE_PLUGIN_ROOT || dirname(dirname(fileURLToPath(import.meta.url)))).replace(/\\/g, '/');
   const text = res.line
@@ -59,6 +62,7 @@ try {
     chars: text.length,
     fetched: res.fetched,
     duration_ms: Date.now() - t0,
+    cache: res.cache,
     // Process start to the hook's first line (node start-up and imports): the
     // part of the start-up cost the duration above does not include.
     start_ms: startMs,

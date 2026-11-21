@@ -166,7 +166,11 @@ try {
     },
   });
 
-  if (result) hint(result.hint);
+  if (result) {
+    // Count the fire in denials.jsonl like the other guards (outcome warn: advice, the call runs).
+    try { recordDenial('poll-guard', p, `${result.kind || 'poll'}: ${toolName}`, 'warn'); } catch { /* telemetry never blocks */ }
+    hint(result.hint);
+  }
 } catch {
   // fail open — this guard is advice, not enforcement
 }

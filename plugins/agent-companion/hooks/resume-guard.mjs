@@ -22,7 +22,7 @@
 // own header in lib/resume-guard.mjs for why a passive mtime/meta check is
 // enough here).
 
-import { readStdin, opt, passthrough } from './lib/context.mjs';
+import { readStdin, opt, passthrough, recordDenial } from './lib/context.mjs';
 import { resolveTarget, lastActivityOf, ttlFor, cacheTtlFromDefinition, TTL_MS } from './lib/resume-guard.mjs';
 
 // The hint, and NO permissionDecision: "allow" would also skip the permission
@@ -74,6 +74,8 @@ try {
 
   const idleMin = Math.round(idleMs / 60000);
   const sizeK = Math.round(last.contextTokens / 1000);
+  // Count the fire in denials.jsonl like the other guards (outcome warn: advice, the call runs). The target name is not stored.
+  try { recordDenial('resume-guard', p, `idle ${idleMin}m past ${ttl} TTL, ~${sizeK}K tokens`, 'warn'); } catch { /* telemetry never blocks */ }
   hint(
     `agent-companion (resume guard): "${to}" has been idle ${idleMin}m, past its ${ttl} cache TTL — messaging it now ` +
     `will likely rewrite its whole context (~${sizeK}K tokens, not read from cache). Doctrine: resume only while the ` +

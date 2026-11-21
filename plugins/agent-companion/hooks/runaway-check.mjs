@@ -123,8 +123,11 @@ function handoffReturnCheck(p, path) {
   if (!p.agent_id || !p.session_id) return;
   const file = handoffReturnPath(p.last_assistant_message);
   if (!file || !claimOnce(`handoff-return-${p.agent_id}`)) return;
-  let model = null;
-  try { model = (readContextSignal(path) || {}).model || null; } catch { /* the type alone is enough */ }
+  let model = null; let sig = null;
+  try { sig = readContextSignal(path); model = (sig || {}).model || null; } catch { /* the type alone is enough */ }
+  try { // one row per continuation the lead is told to spawn (action `return`; tokens null when the transcript has no reading)
+    appendLog(HANDOFF_LOG, handoffRow(p, sig || {}, 'soft', 'return', opt('subagent_context_notice_tokens', CONTEXT_DEFAULT_TOKENS)));
+  } catch { /* logging never blocks the notice */ }
   queueNotice(p.session_id, handoffContinueText(p.agent_type, p.agent_id, file, model));
 }
 
