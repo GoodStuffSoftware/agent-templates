@@ -55,6 +55,13 @@ test('unit: the writing-type set is the writer types minus design and root-cause
   }
 });
 
+test('unit: ROLE: operate on a critical-change is the write leg (usage audit 2026-11-21); on any other type it is not', () => {
+  assert.equal(writerBasis('operate', 'critical-change'), 'type');
+  assert.equal(writerBasis('operate', 'large-refactor'), null);
+  assert.equal(writerBasis('operate', null), null);
+  assert.equal(writerBasis('other', 'critical-change'), null, 'ROLE: other stays the plan leg');
+});
+
 test('unit: writerBasis reads ROLE first, then TYPE only when there is no usable ROLE', () => {
   assert.equal(writerBasis('writer', null), 'role');
   assert.equal(writerBasis('fixer', 'code-review'), 'role');
@@ -124,6 +131,13 @@ test('no ROLE: the TYPE decides: writing types are rewritten, design and root-ca
       assert.equal(q.rows.length, 0, `${type} ${k}`);
     }
   }
+});
+
+test('TYPE: critical-change with ROLE: operate on Opus is rewritten to the Sonnet writer rung', () => {
+  const r = spawn({ subagent_type: OPUS_RUNG, prompt: 'TYPE: critical-change\nROLE: operate\nrun the migration and patch the config' }, { sid: 'sess-ow-crit-op' });
+  assert.equal(r.upd?.model, 'sonnet');
+  assert.equal(r.rows.length, 1);
+  assert.equal(r.rows[0].basis, 'type');
 });
 
 test('a reviewer, lookup, docs or operate spawn on Opus is left untouched', () => {

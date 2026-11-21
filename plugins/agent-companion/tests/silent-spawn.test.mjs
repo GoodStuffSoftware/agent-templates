@@ -194,3 +194,53 @@ test('the fixes ride one updatedInput: background, ROLE, rewrite and name togeth
   assert.deepEqual(r.row.silent_fixes.filter((s) => !s.startsWith('fit_over_rewrite')).sort(), ['background_set', 'role_inserted:writer']);
   assert.equal(r.row.gate1_action, 'fix');
 });
+
+// --- effort fit and lookup routing (0.31.61, option effort_fit_policy) ---
+const HI = { subagent_type: 'agent-companion:ac-sonnet-high', model: 'sonnet', name: 'w', run_in_background: true };
+
+test('effort fit: a rung one step above the table is rewritten silently to the table rung and logged', () => {
+  const r = spawn({ ...HI, prompt: 'TYPE: research\nROLE: other\nread x and summarise' }, { started: RUNGS });
+  assert.equal(r.ui?.subagent_type, 'agent-companion:ac-sonnet-medium');
+  assert.equal(r.ui?.model, 'sonnet');
+  assert.doesNotMatch(`${r.msg}${r.ctx}`, /over-provisioned|effort fit/i);
+  assert.equal(r.row.fit_before_fix, 'over');
+  assert.ok(r.row.silent_fixes.includes('effort_fit_rewrite:agent-companion:ac-sonnet-high->agent-companion:ac-sonnet-medium'));
+});
+
+test('effort fit: a Rung: reason, policy off, policy warn, and a rung below the table are never rewritten', () => {
+  const brief = 'TYPE: research\nROLE: other\nread x and summarise';
+  const stated = spawn({ ...HI, prompt: `Rung: the sources conflict, needs depth\n${brief}` }, { started: RUNGS });
+  assert.notEqual(stated.ui?.subagent_type, 'agent-companion:ac-sonnet-medium');
+  assert.equal(stated.out.permissionDecision, undefined, 'a stated rung is not denied either');
+  const off = spawn({ ...HI, prompt: brief }, { started: RUNGS, env: { CLAUDE_PLUGIN_OPTION_EFFORT_FIT_POLICY: 'off' } });
+  assert.notEqual(off.ui?.subagent_type, 'agent-companion:ac-sonnet-medium');
+  const warn = spawn({ ...HI, prompt: brief }, { started: RUNGS, env: { CLAUDE_PLUGIN_OPTION_EFFORT_FIT_POLICY: 'warn' } });
+  assert.notEqual(warn.ui?.subagent_type, 'agent-companion:ac-sonnet-medium');
+  assert.equal(warn.out.permissionDecision, undefined, 'warn never denies');
+  const below = spawn({ ...HI, subagent_type: 'agent-companion:ac-sonnet-low', prompt: brief }, { started: RUNGS });
+  assert.notEqual(below.ui?.subagent_type, 'agent-companion:ac-sonnet-medium');
+});
+
+test('lookup routing: the default (warn) only logs; rewrite re-routes a declared ROLE: lookup under TYPE research; an inserted role never does', () => {
+  const med = { subagent_type: 'agent-companion:ac-sonnet-medium', model: 'sonnet', name: 'w', run_in_background: true };
+  const brief = 'TYPE: research\nROLE: lookup\nfind where x is defined';
+  const dflt = spawn({ ...med, prompt: brief }, { started: RUNGS });
+  assert.notEqual(dflt.ui?.subagent_type, 'agent-companion:ac-haiku', 'warn: no rewrite');
+  assert.equal(dflt.out.permissionDecision, undefined, 'warn never denies');
+  assert.doesNotMatch(`${dflt.msg}${dflt.ctx}`, /effort fit|over-provisioned/i, 'warn is log only: no note');
+  assert.ok(dflt.row.silent_fixes.some((x) => x.startsWith('lookup_role_logged:')), 'logged');
+  assert.ok(!dflt.row.silent_fixes.some((x) => x.startsWith('lookup_role_rewrite:')));
+  const REW = { CLAUDE_PLUGIN_OPTION_LOOKUP_ROLE_POLICY: 'rewrite' };
+  const r = spawn({ ...med, prompt: brief }, { started: RUNGS, env: REW });
+  assert.equal(r.ui?.subagent_type, 'agent-companion:ac-haiku');
+  assert.ok(r.row.silent_fixes.some((x) => x.startsWith('lookup_role_rewrite:')));
+  const off = spawn({ ...med, prompt: brief }, { started: RUNGS, env: { CLAUDE_PLUGIN_OPTION_LOOKUP_ROLE_POLICY: 'off' } });
+  assert.notEqual(off.ui?.subagent_type, 'agent-companion:ac-haiku');
+  assert.ok(!(off.row.silent_fixes || []).some((x) => x.startsWith('lookup_role_')), 'off: nothing logged');
+  const plain = spawn({ ...med, prompt: 'TYPE: research\nread x and summarise' }, { started: RUNGS, env: REW });
+  assert.notEqual(plain.ui?.subagent_type, 'agent-companion:ac-haiku', 'no ROLE line: the guard-inserted lookup role never re-routes');
+  const stated = spawn({ ...med, prompt: `Rung: needs judgement\n${brief}` }, { started: RUNGS, env: REW });
+  assert.notEqual(stated.ui?.subagent_type, 'agent-companion:ac-haiku');
+  const effOff = spawn({ ...med, prompt: brief }, { started: RUNGS, env: { ...REW, CLAUDE_PLUGIN_OPTION_EFFORT_FIT_POLICY: 'off' } });
+  assert.equal(effOff.ui?.subagent_type, 'agent-companion:ac-haiku', 'effort_fit_policy off does not switch lookup routing off');
+});

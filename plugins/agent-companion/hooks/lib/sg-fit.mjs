@@ -4,7 +4,7 @@
 // the locals it declares or reassigns that later phases read.
 
 import {
-  classifyEffort, classifyModel, effortSupported, evaluateFit, modelTiers, opt, rungFor,
+  classifyEffort, classifyModel, effortSupported, evaluateFit, modelTiers, opt, resolveRoute, rungFor,
 } from './context.mjs';
 import { isParityType, selfReviewConfig, writerFromCaller } from './self-review.mjs';
 import { definitionPinExempt, ladderRewriteTarget } from './sg-helpers.mjs';
@@ -15,7 +15,7 @@ export function fitAndParity({
   loadedAtMs, input, updatedInput, ladderRewrite, spawnAlias, routeMatchesModel, isPremiumForSpawn,
   silentFixes, fromDef, declared, parityYardstick, writer, routeLabel, modelTakesEffort, callerEffort,
   writerProblem, writerRaw, writerInferred, writerInferProblem, declaredType, callerDeclaredType,
-  subagentCaller, callerObserved,
+  subagentCaller, callerObserved, declaredRole,
 }) {
 
   // With no route, the plain grid is the yardstick only for a weight the
@@ -25,8 +25,27 @@ export function fitAndParity({
   // its warrant's weight was DENIED with an empty route in the message
   // ("TYPE: code-review" + "WARRANT: weight 4 — ..." on opus, 0.29.18).
   const gridYardstick = declaredWeight !== null && !(typeIsParity && !weightLineExplicit);
+  // Effort fit and lookup routing (0.31.61; usage audit 2026-11-21).
+  // effort_fit_policy (rewrite | warn | off): a rung one effort step above the table is rewritten, noted or left.
+  // lookup_role_policy (warn | rewrite | off): a spawn that DECLARES ROLE: lookup under another TYPE is judged against the
+  // lookup route (when cheaper than the TYPE's own). warn (default) only logs `lookup_role_logged`; the rewrite is held until
+  // a quality check of haiku on research-style lookups. A `Rung: <reason>` line opts out of both.
+  // Only a ROLE line the brief itself carries counts (declaredRole), never the role the guard inserts for a missing one.
+  const effortPolicy = String(opt('effort_fit_policy', 'rewrite')).toLowerCase();
+  const lookupPolicy = String(opt('lookup_role_policy', 'warn')).toLowerCase();
+  const rungDeclared = !!(decls.RUNG && String(decls.RUNG.rest || '').replace(/[\s*_`]/g, ''));
+  let fitRoute = route;
+  let lookupRouted = false;
+  if (lookupPolicy !== 'off' && declaredRole === 'lookup' && !rungDeclared && route && !typeIsParity && !pinned
+    && !['lookup', 'explore'].includes(String(declaredType || ''))) {
+    try {
+      const rk = (r) => classifyModel(r.model).rank * 10 + classifyEffort(r.effort || 'low').rank;
+      const lr = resolveRoute({ type: 'lookup' });
+      if (lr && lr.model && rk(lr) < rk(route)) { fitRoute = lr; lookupRouted = true; }
+    } catch { /* table unreadable: no lookup routing */ }
+  }
   let fit = null;
-  if (fitOn && model && !autofilled && (route || gridYardstick)) {
+  if (fitOn && model && !autofilled && (fitRoute || gridYardstick)) {
     try {
       fit = evaluateFit({
         model, effort: def?.effort || '', weight: declaredWeight,
@@ -35,12 +54,17 @@ export function fitAndParity({
         // included) — pass it through as `expected` so evaluateFit() judges
         // against it directly instead of recomputing an override-blind
         // default from the plain grid.
-        expected: route,
+        expected: fitRoute, effortOverAt: effortPolicy === 'off' ? 2 : 1,
         // Reviewer parity: effort above the writer's is allowed (never
         // "over"), below it is "under" with the parity reason.
         parity: parityRoute,
       });
     } catch { /* table unreadable: the audit reports that separately */ }
+  }
+  // One step of effort (or a lookup re-route) is a soft over: rewritten or noted, never denied.
+  if (fit && fit.verdict === 'over' && (lookupRouted || (fit.effortOnly && fit.effortDelta < 2))) {
+    fit = rungDeclared && fit.effortOnly ? { ...fit, verdict: 'fit', statedRung: true } : { ...fit, soft: lookupRouted ? 'lookup' : 'effort' };
+    if (fit.soft === 'lookup' && lookupPolicy !== 'rewrite') silentFixes.push(`lookup_role_logged:${fitRoute.model}/${fitRoute.effort || ''}`);
   }
 
   // F1 on a critical parity-sized spawn (see parityFloor above): under only. Judged
@@ -68,21 +92,22 @@ export function fitAndParity({
   const premiumDeclared = !!(decls.PREMIUM && String(decls.PREMIUM.rest || '').replace(/[\s*_`]/g, ''));
   let fitBeforeFix = null;
   if (fit?.verdict === 'over' && typeReqIsRung && !parityRoute && !pinned && !autofilled && !premiumDeclared
-    && !(rewriteState && rewriteState.ignored) && route?.model && opt('fit_over_autofix', true) && opt('fit_autofill_ladder', true)) {
+    && !(rewriteState && rewriteState.ignored) && fitRoute?.model && opt('fit_over_autofix', true) && opt('fit_autofill_ladder', true)
+    && (!fit.soft || (fit.soft === 'lookup' ? lookupPolicy === 'rewrite' : effortPolicy === 'rewrite'))) {
     try {
-      const rung = rungFor(route.model, route.effort || null);
+      const rung = rungFor(fitRoute.model, fitRoute.effort || null);
       const pick = rung ? ladderRewriteTarget(sid, rung.agent, p.cwd, loadedAtMs, input.subagent_type) : null;
       if (pick && pick.target && pick.target !== input.subagent_type) {
-        updatedInput = { ...(updatedInput || input), subagent_type: pick.target, ...(input.model ? { model: route.model } : {}) };
+        updatedInput = { ...(updatedInput || input), subagent_type: pick.target, ...(input.model ? { model: fitRoute.model } : {}) };
         ladderRewrite = { from: input.subagent_type || null, to: pick.target };
         def = pick.def;
-        model = route.model;
+        model = fitRoute.model;
         spawnAlias = classifyModel(model).alias;
         routeMatchesModel = true;
         isPremiumForSpawn = false;
         fitBeforeFix = fit.verdict;
         fit = { ...fit, verdict: 'fit' };
-        silentFixes.push(`fit_over_rewrite:${ladderRewrite.from}->${pick.target}`);
+        silentFixes.push(`${fit.soft === 'lookup' ? 'lookup_role_rewrite' : fit.soft === 'effort' ? 'effort_fit_rewrite' : 'fit_over_rewrite'}:${ladderRewrite.from}->${pick.target}`);
       }
     } catch { /* fail open: nothing rewritten */ }
   }

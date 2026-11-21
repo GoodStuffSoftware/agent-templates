@@ -55,7 +55,8 @@ const READONLY_BUILTIN = new Set(['explore', 'plan', 'claude-code-guide']);
 // (OPUS_NON_WRITING_TYPES included: novel-design, debug-root-cause) is the WRITE leg unless the brief says it is the plan leg: Opus
 // must not end up writing, so an unmarked spawn is rewritten to Sonnet, where the self-review protocol lives.
 export function writerBasis(role, type, planMarked = false) {
-  if (role) return OPUS_WRITER_ROLES.includes(role) ? 'role' : null;
+  // Usage audit 2026-11-21: a critical-change spawn that says ROLE: operate still edits code; it is the write leg.
+  if (role) return OPUS_WRITER_ROLES.includes(role) ? 'role' : (role === 'operate' && type === 'critical-change' ? 'type' : null);
   if (!type || (planMarked && legsOf(type))) return null; // the plan-leg exemption is only for a type that has a plan leg
   if (OPUS_WRITING_TYPES.includes(type)) return 'type';
   return OPUS_NON_WRITING_TYPES.includes(type) && legsOf(type) ? 'type' : null;
