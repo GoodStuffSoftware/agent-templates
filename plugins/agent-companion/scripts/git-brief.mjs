@@ -20,7 +20,9 @@
 // Cross-machine branch state is the coordination server's `branch_status` MCP tool; this
 // script only reads the repository it runs in (plus one fetch of origin).
 //
-// FETCH POLICY. Before reading, the one-line brief fetches origin's default
+// FETCH POLICY. Since 0.31.61 the SubagentStart/SessionStart hook never fetches
+// (it reads local refs and a 20 s per-worktree cache); the script run and
+// `landed` do. Before reading, the one-line script run fetches origin's default
 // branch (and only that), unless a fetch ran in this repository within
 // FETCH_FRESH_MS (5 minutes; a worktree shares its repository's stamp, so ten
 // agents starting together cause one fetch, not ten). `landed` is an explicit

@@ -2,7 +2,8 @@
 // context so it does not spend turns on `git status` / `git fetch` /
 // `git rev-list` to find out where it is. The line comes from
 // scripts/git-brief.mjs, which also carries the freshness and timeout policy
-// for the fetch it does (5 minutes; 1.5 s cap; never prompts). The line names
+// for the fetch the script run does (5 minutes; 1.5 s cap; never prompts);
+// this hook itself never fetches (0.31.61). The line names
 // the refresh command, so a later question ("is X on main?") is one script
 // call, not a git sequence.
 //

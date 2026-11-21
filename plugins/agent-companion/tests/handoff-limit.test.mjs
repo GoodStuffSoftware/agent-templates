@@ -237,6 +237,8 @@ test('a worker that ends "DONE: partial, handoff at <path>": the lead is told on
     assert.match(t, /A new spawn, not a resume/);
     endRun(lead, msg);
     assert.equal(drain().stdout.trim(), '', 'once per worker');
+    assert.deepEqual(rows().map((x) => x.action), ['return'], 'one return row per continuation told to the lead');
+    assert.equal(rows()[0].agent_id, AGENT);
     // the same text reaches the lead right after a foreground Agent call
     const fx2 = makeFixture();
     try {

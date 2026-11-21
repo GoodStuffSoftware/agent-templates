@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
   rowUnits, median, repoOf, landingRef, countLandings, landingsOf, compactionRecords, leadCompactionsOf, isWriterSpawn, opusSharesOf,
-  accountsOf, markerValues, changedMarkers, computeEfficiency,
+  accountsOf, markerValues, changedMarkers, computeEfficiency, handoffOf,
 } from '../scripts/lib/usage/efficiency.mjs';
 import { runAnalysis, readResult, efficiencyPending } from '../scripts/lib/usage/runner.mjs';
 import { efficiencyLines, renderReport } from '../scripts/lib/usage/report.mjs';
@@ -432,4 +432,27 @@ test('rowUnits prices main and subagent tokens with the day file\'s weights', ()
   assert.equal(rowUnits(r, USED, 'm'), 4);
   assert.equal(rowUnits(r, USED, 's'), 6);
   assert.equal(rowUnits(r, {}), 0);
+});
+
+test('handoff counts: notices, repeats, denies, send-backs, continuations, and distinct subagents over the limit, only the day\'s rows', () => {
+  const at = (h) => `2026-11-18T${h}:00:00.000Z`;
+  const rows = [
+    { at: at('09'), agent_id: 'a1', action: 'notice', limit: 'soft', limit_tokens: 100000, tokens: 101000 },
+    { at: at('10'), agent_id: 'a1', action: 'repeat', limit: 'soft', limit_tokens: 100000, tokens: 131000 },
+    { at: at('11'), agent_id: 'a1', action: 'deny', limit: 'hard', limit_tokens: 150000, tokens: 151000 },
+    { at: at('12'), agent_id: 'a1', action: 'deny', limit: 'hard', limit_tokens: 150000, tokens: 160000 },
+    { at: at('13'), agent_id: 'a2', action: 'end-block', limit: 'soft', limit_tokens: 100000, tokens: 120000 },
+    { at: at('14'), agent_id: 'a2', action: 'return', limit: 'soft', limit_tokens: 100000, tokens: 120000 },
+    { at: at('15'), agent_id: 'a3', action: 'notice', limit: 'soft', limit_tokens: 100000, tokens: 102000 },
+    { at: '2026-11-17T09:00:00.000Z', agent_id: 'a4', action: 'deny', limit: 'hard', limit_tokens: 150000, tokens: 190000 }, // another day
+  ];
+  const h = handoffOf({ rows, fromMs: FROM, toMs: TO });
+  assert.deepEqual([h.softNotices, h.repeats, h.hardDenies, h.endBlocks, h.continuations, h.overLimit, h.rows], [2, 1, 2, 1, 1, 1, 7]);
+  assert.ok(handoffOf({ rows: null, fromMs: FROM, toMs: TO }).gap);
+  const eff = computeEfficiency({ f: { weightsUsed: USED, rows: [], spawns: [] }, fromMs: FROM, toMs: TO, seams: { transcriptsRoot: null, handoffRows: rows } });
+  assert.equal(eff.handoff.continuations, 1);
+  const text = efficiencyLines(eff).join('\n');
+  assert.match(text, /2 soft notices \(1 repeats\), 2 hard denies, 1 end-of-run send-backs, 1 continuations the lead was told to spawn; 1 subagents went over the hard limit anyway/);
+  assert.match(efficiencyLines({ ...eff, handoff: undefined }).join('\n'), /computed before handoff counts existed/);
+  assert.match(efficiencyLines({ ...eff, handoff: { gap: 'no handoff-limit.jsonl' } }).join('\n'), /Not measured: no handoff-limit\.jsonl/);
 });

@@ -316,6 +316,33 @@ export function opusSharesOf({ rows, spawns, used, spawnRows = new Map() }) {
   };
 }
 
+// ----------------------------------------------------------------- handoffs --
+
+/**
+ * Handoff counts of the day from handoff-limit.jsonl rows: soft notices (action notice; repeats counted apart), hard denies (deny),
+ * end-of-run send-backs (end-block), continuations the lead was told to spawn (return), and distinct subagents that went over their
+ * hard limit (default 150000) anyway. Only rows dated inside [fromMs, toMs). `rows` null: { gap }.
+ */
+export function handoffOf({ rows, fromMs, toMs }) {
+  if (!Array.isArray(rows)) return { gap: 'no handoff-limit.jsonl' };
+  const c = { softNotices: 0, repeats: 0, hardDenies: 0, endBlocks: 0, continuations: 0 };
+  const over = new Set();
+  let n = 0;
+  for (const r of rows) {
+    const t = typeof r.at === 'string' ? Date.parse(r.at) : NaN;
+    if (!Number.isFinite(t) || t < fromMs || t >= toMs) continue;
+    n += 1;
+    if (r.action === 'notice') c.softNotices += 1;
+    else if (r.action === 'repeat') c.repeats += 1;
+    else if (r.action === 'deny') c.hardDenies += 1;
+    else if (r.action === 'end-block') c.endBlocks += 1;
+    else if (r.action === 'return') c.continuations += 1;
+    const hard = r.limit === 'hard' && typeof r.limit_tokens === 'number' && r.limit_tokens > 0 ? r.limit_tokens : 150000;
+    if (typeof r.tokens === 'number' && r.tokens > hard) over.add(nonEmpty(r.agent_id) || `${r.session_id}|${r.at}`);
+  }
+  return { ...c, overLimit: over.size, rows: n };
+}
+
 // ----------------------------------------------------------------- accounts --
 
 const UNATTRIBUTED = Symbol('unattributed');
@@ -395,7 +422,7 @@ const safe = (fn) => { try { return fn(); } catch (e) { return { gap: `could not
 
 /**
  * The efficiency block of one day's result. `f` is the day's facts, `seams` the injectable readers:
- *   git, transcriptsRoot, accountHistory (array), rateFor(acct), spawnRows (Map), settings() -> { window, floor }, pluginVersion,
+ *   handoffRows (array or function -> array of handoff-limit.jsonl rows, null when the file is absent), git, transcriptsRoot, accountHistory (array), rateFor(acct), spawnRows (Map), settings() -> { window, floor }, pluginVersion,
  *   prev (the previous day's stored markers or null), prior (this day's earlier stored markers or null), nowT, lateAfterMs,
  *   stop() (true once the run's time budget is used up: the slow parts, lead compactions and landings, then say so and are completed by
  *   the next run), reuse (this day's earlier efficiency block when its inputs are unchanged: a part of it that was measured is kept).
@@ -411,6 +438,7 @@ export function computeEfficiency({ f, fromMs, toMs, seams = {} }) {
     : { gap: 'no transcripts folder' }));
   const landings = kept('landings') || safe(() => landingsOf({ rows, used, fromMs, toMs, git: seams.git || defaultGit, repoCache: seams.repoCache || new Map(), stop }));
   const opus = safe(() => opusSharesOf({ rows, spawns, used, spawnRows: seams.spawnRows || new Map() }));
+  const handoff = safe(() => handoffOf({ rows: typeof seams.handoffRows === 'function' ? seams.handoffRows() : seams.handoffRows, fromMs, toMs }));
   const accounts = safe(() => (Array.isArray(seams.accountHistory)
     ? accountsOf({ rows, used, history: seams.accountHistory, rateFor: seams.rateFor || (() => null) }) : { single: true }));
   const markers = safe(() => {
@@ -422,5 +450,5 @@ export function computeEfficiency({ f, fromMs, toMs, seams = {} }) {
     const late = Number.isFinite(seams.nowT) && seams.nowT - toMs > (seams.lateAfterMs ?? 36 * HOUR_MS);
     return { values, changed: changedMarkers(seams.prev, values), prevDay: seams.prev ? seams.prevDay || null : null, late };
   });
-  return { landings, compactions: comp, opus, accounts, markers };
+  return { landings, compactions: comp, opus, handoff, accounts, markers };
 }
