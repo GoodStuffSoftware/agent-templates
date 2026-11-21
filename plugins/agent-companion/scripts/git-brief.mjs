@@ -92,8 +92,8 @@ function gitEnv() {
 // there is exactly one): the deadline, the time spent per git subcommand, and
 // whether a LOCAL git call timed out (an answer built on one is not trusted).
 let RUN = null;
-function startRun(deadlineOverride) {
-  RUN = { deadline: Date.now() + (deadlineOverride ?? deadlineMs()), steps: {}, localTimedOut: false, timedOut: false };
+function startRun(deadlineArg) {
+  RUN = { deadline: Date.now() + (deadlineArg ?? deadlineMs()), steps: {}, localTimedOut: false, timedOut: false };
   return RUN;
 }
 const addStep = (name, ms) => { if (RUN) RUN.steps[name] = (RUN.steps[name] || 0) + ms; };
@@ -353,7 +353,7 @@ function cacheKey(cwd, gitDir) {
 // The one-line brief, or null (not a repo / nothing readable). Never throws.
 // `cacheTtlMs` > 0 (the hook): an answer saved under CACHE_FILE in the git
 // directory is reused while its key (cacheKey) matches and it is younger than the
-// TTL; outside a repository nothing is spawned. `deadlineMs` overrides the deadline.
+// TTL; outside a repository nothing is spawned. `deadlineMs` replaces the deadline.
 export function gitBrief({ cwd = process.cwd(), fetch = true, force = false, now = Date.now(), cacheTtlMs = 0, deadlineMs: dl } = {}) {
   const t0 = Date.now();
   let cacheFile = null; let key = null;
