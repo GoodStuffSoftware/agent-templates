@@ -205,7 +205,7 @@ test('spawn guard: the self-review text appended to a sonnet writer names the re
       assert.match(p, /sonnet\/xhigh, not your own rung/);
     }
     // sonnet/xhigh already is the floor: its own rung.
-    const x = spawn('ac-sonnet-xhigh', brief);
+    const x = spawn('ac-sonnet-xhigh', brief + '\nRung: the floor rung itself under test');
     assert.match(x, /subagent_type: "agent-companion:ac-sonnet-xhigh"/);
     assert.doesNotMatch(x, /not your own rung/);
     // A critical consequence (stated, or implied by TYPE: critical-change) names the opus reviewer the recommender picks.

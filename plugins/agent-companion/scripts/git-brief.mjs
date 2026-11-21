@@ -20,7 +20,9 @@
 // Cross-machine branch state is the coordination server's `branch_status` MCP tool; this
 // script only reads the repository it runs in (plus one fetch of origin).
 //
-// FETCH POLICY. Before reading, the one-line brief fetches origin's default
+// FETCH POLICY. Since 0.31.61 the SubagentStart/SessionStart hook never fetches
+// (it reads local refs and a 20 s per-worktree cache); the script run and
+// `landed` do. Before reading, the one-line script run fetches origin's default
 // branch (and only that), unless a fetch ran in this repository within
 // FETCH_FRESH_MS (5 minutes; a worktree shares its repository's stamp, so ten
 // agents starting together cause one fetch, not ten). `landed` is an explicit
@@ -47,14 +49,20 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { readFileSync, writeFileSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const FETCH_FRESH_MS = 5 * 60 * 1000;
 export const FAIL_BACKOFF_MS = 60 * 1000;
 export const FETCH_TIMEOUT_MS = 1500;
 export const LOCAL_TIMEOUT_MS = 1000;
+// The hook (SessionStart / SubagentStart) reads local state only, answers from a
+// per-worktree cache for CACHE_TTL_MS, and gives up at HOOK_DEADLINE_MS with what
+// it has (a call that hit the deadline leaves its field as "?").
+export const CACHE_TTL_MS = 20 * 1000;
+export const HOOK_DEADLINE_MS = 1500;
+export const CACHE_FILE = 'ac-git-brief-cache.json';
 
 // Both caps can be raised with AC_GIT_BRIEF_FETCH_TIMEOUT_MS and
 // AC_GIT_BRIEF_LOCAL_TIMEOUT_MS (read at call time) for a slow machine or a
@@ -84,8 +92,8 @@ function gitEnv() {
 // there is exactly one): the deadline, the time spent per git subcommand, and
 // whether a LOCAL git call timed out (an answer built on one is not trusted).
 let RUN = null;
-function startRun() {
-  RUN = { deadline: Date.now() + deadlineMs(), steps: {}, localTimedOut: false, timedOut: false };
+function startRun(deadlineArg) {
+  RUN = { deadline: Date.now() + (deadlineArg ?? deadlineMs()), steps: {}, localTimedOut: false, timedOut: false };
   return RUN;
 }
 const addStep = (name, ms) => { if (RUN) RUN.steps[name] = (RUN.steps[name] || 0) + ms; };
@@ -265,6 +273,14 @@ function parseStatus(out) {
   return st;
 }
 
+// The `unpushed` field: the upstream's ahead count, else commits on no remote.
+function unpushedOf(cwd, st, hasCommit) {
+  if (!hasCommit) return '0';
+  if (st.ahead !== null) return String(st.ahead);
+  const u = git(cwd, ['rev-list', '--count', 'HEAD', '--not', '--remotes']);
+  return u.ok && /^\d+$/.test(u.out) ? `${u.out} (no upstream)` : '?';
+}
+
 function repoFacts(cwd) {
   const r = git(cwd, ['rev-parse', '--is-bare-repository', '--show-toplevel', '--git-common-dir']);
   if (!r.ok) return null;
@@ -303,11 +319,75 @@ function fetchFields(f) {
   return { fetched: f ? f.attempted : false, fetch_outcome: f ? f.outcome : 'skipped', fetch_age_ms: f ? f.age_ms : null };
 }
 
+// The git directory of the worktree at or above `cwd`, found without spawning
+// git: a `.git` directory, or a `.git` file ("gitdir: <path>", a linked worktree
+// or a submodule). null = not inside a repository.
+export function findGitDir(cwd) {
+  try {
+    let dir = resolve(cwd);
+    for (;;) {
+      const dot = join(dir, '.git');
+      let st = null;
+      try { st = statSync(dot); } catch { /* none here */ }
+      if (st?.isDirectory()) return dot;
+      if (st?.isFile()) {
+        const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(dot, 'utf8'));
+        return m ? resolve(dir, m[1].trim()) : null;
+      }
+      const up = dirname(dir);
+      if (up === dir) return null;
+      dir = up;
+    }
+  } catch { return null; }
+}
+
+const mtime = (p) => { try { return statSync(p).mtimeMs; } catch { return 0; } };
+const readText = (p) => { try { return readFileSync(p, 'utf8').trim(); } catch { return ''; } };
+
+// What the cached line is valid for: the worktree, HEAD (its text, and the loose
+// ref it names, else packed-refs' mtime), the index mtime, and origin's default
+// branch refs. Everything is a file read: no process spawn.
+function cacheKey(cwd, gitDir) {
+  const head = readText(join(gitDir, 'HEAD'));
+  const ref = /^ref:\s*(.+)$/.exec(head)?.[1];
+  let common = gitDir;
+  const cd = readText(join(gitDir, 'commondir'));
+  if (cd) common = resolve(gitDir, cd);
+  const tip = ref ? (readText(join(common, ref)) || `packed:${mtime(join(common, 'packed-refs'))}`) : '';
+  const origin = ['main', 'master'].map((b) => readText(join(common, 'refs', 'remotes', 'origin', b)) || mtime(join(common, 'packed-refs'))).join(',');
+  return [resolve(cwd), head, tip, mtime(join(gitDir, 'index')), origin].join('|');
+}
+
 // The one-line brief, or null (not a repo / nothing readable). Never throws.
-export function gitBrief({ cwd = process.cwd(), fetch = true, force = false, now = Date.now() } = {}) {
+// `cacheTtlMs` > 0 (the hook): an answer saved under CACHE_FILE in the git
+// directory is reused while its key (cacheKey) matches and it is younger than the
+// TTL; outside a repository nothing is spawned. `deadlineMs` replaces the deadline.
+export function gitBrief({ cwd = process.cwd(), fetch = true, force = false, now = Date.now(), cacheTtlMs = 0, deadlineMs: dl } = {}) {
   const t0 = Date.now();
-  const run = startRun();
-  const res = (extra) => ({ ms: Date.now() - t0, steps_ms: { ...run.steps }, fetched: false, fetch_outcome: 'skipped', fetch_age_ms: null, ...extra });
+  let cacheFile = null; let key = null;
+  if (cacheTtlMs > 0) {
+    const gd = findGitDir(cwd);
+    if (!gd) return { ms: Date.now() - t0, steps_ms: {}, fetched: false, fetch_outcome: 'skipped', fetch_age_ms: null, line: null, outcome: 'not-repo', cache: 'none' };
+    cacheFile = join(gd, CACHE_FILE);
+    key = cacheKey(cwd, gd);
+    try {
+      const c = JSON.parse(readFileSync(cacheFile, 'utf8'));
+      const sf = c && c.stable;
+      if (sf && c.key === key && typeof sf.branch === 'string' && now - c.at >= 0 && now - c.at < cacheTtlMs) {
+        // Only the stable fields are cached; the working-tree and upstream counts are always fresh (one status spawn).
+        const hrun = startRun(dl);
+        const hs = git(cwd, ['status', '--porcelain=v2', '--branch']);
+        if (hs.ok) {
+          const hst = parseStatus(hs.out);
+          const hHas = hst.oid && hst.oid !== '(initial)';
+          const line = [sf.branch, sf.vs, `uncommitted ${hst.dirty}`, `worktree ${sf.top}`, `last ${sf.last}`, `unpushed ${unpushedOf(cwd, hst, hHas)}`].join(' | ');
+          return { ms: Date.now() - t0, steps_ms: { ...hrun.steps }, fetched: false, fetch_outcome: 'skipped', fetch_age_ms: null, line, outcome: 'ok', cache: 'hit' };
+        }
+      }
+    } catch { /* no cache, or unreadable: compute */ }
+  }
+  const run = startRun(dl);
+  const res = (extra) => ({ ms: Date.now() - t0, steps_ms: { ...run.steps }, fetched: false, fetch_outcome: 'skipped', fetch_age_ms: null, ...(cacheFile ? { cache: 'miss' } : {}), ...extra });
   try {
     const f = repoFacts(cwd);
     if (!f) return res({ line: null, outcome: run.timedOut ? 'timeout' : 'not-repo' });
@@ -317,6 +397,7 @@ export function gitBrief({ cwd = process.cwd(), fetch = true, force = false, now
 
     const s = git(cwd, ['status', '--porcelain=v2', '--branch']);
     if (!s.ok) return res({ line: null, ...ff, outcome: s.timedOut || run.timedOut ? 'timeout' : 'git-error' });
+    const partial = () => run.timedOut; // a later call hit the deadline: what is left reads "?"
     const st = parseStatus(s.out);
     const hasCommit = st.oid && st.oid !== '(initial)';
     const branch = st.head === '(detached)' ? `detached@${hasCommit ? st.oid.slice(0, 7) : '?'}` : (st.head || '?');
@@ -326,6 +407,7 @@ export function gitBrief({ cwd = process.cwd(), fetch = true, force = false, now
       const c = git(cwd, ['rev-list', '--left-right', '--count', `refs/remotes/origin/${dflt}...HEAD`]);
       const m = c.ok && /^(\d+)\s+(\d+)$/.exec(c.out);
       if (m) vs = `ahead ${m[2]} behind ${m[1]} origin/${dflt}`;
+      else if (partial()) vs = 'ahead ? behind ?';
     }
 
     let last = 'no commits';
@@ -334,19 +416,17 @@ export function gitBrief({ cwd = process.cwd(), fetch = true, force = false, now
       if (l.ok && l.out) {
         const [sha, ...subj] = l.out.split('\t');
         last = `${sha} ${trunc(subj.join('\t'), SUBJECT_MAX)}`;
-      }
+      } else if (partial()) last = `${st.oid.slice(0, 7)} ?`;
     }
 
-    let unpushed = '?';
-    if (!hasCommit) unpushed = '0';
-    else if (st.ahead !== null) unpushed = String(st.ahead);
-    else {
-      const u = git(cwd, ['rev-list', '--count', 'HEAD', '--not', '--remotes']);
-      if (u.ok && /^\d+$/.test(u.out)) unpushed = `${u.out} (no upstream)`;
-    }
+    const unpushed = unpushedOf(cwd, st, hasCommit);
 
     const line = [branch, vs, `uncommitted ${st.dirty}`, `worktree ${f.top}`, `last ${last}`, `unpushed ${unpushed}`].join(' | ');
-    return res({ line, ...ff, outcome: 'ok', defaultBranch: dflt });
+    // A complete answer is cached; one cut short by the deadline is not.
+    if (cacheFile && !run.timedOut) {
+      try { writeFileSync(cacheFile, JSON.stringify({ key, at: now, stable: { branch, vs, top: f.top, last } })); } catch { /* read-only: just uncached */ }
+    }
+    return res({ line, ...ff, outcome: run.timedOut ? 'partial' : 'ok', defaultBranch: dflt });
   } catch {
     return res({ line: null, outcome: 'error' });
   } finally { RUN = null; }

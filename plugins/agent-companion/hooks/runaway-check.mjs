@@ -121,10 +121,13 @@ function contextCheck(p, path) {
 // foreground Agent call returns: hooks/runaway-notice.mjs). Never blocks the worker's own end.
 function handoffReturnCheck(p, path) {
   if (!p.agent_id || !p.session_id) return;
-  const file = handoffReturnPath(p.last_assistant_message);
+  const file = handoffReturnPath(p.last_assistant_message, p.cwd);
   if (!file || !claimOnce(`handoff-return-${p.agent_id}`)) return;
-  let model = null;
-  try { model = (readContextSignal(path) || {}).model || null; } catch { /* the type alone is enough */ }
+  let model = null; let sig = null;
+  try { sig = readContextSignal(path); model = (sig || {}).model || null; } catch { /* the type alone is enough */ }
+  try { // one row per continuation the lead is told to spawn (action `return`; tokens null when the transcript has no reading)
+    appendLog(HANDOFF_LOG, handoffRow(p, sig || {}, 'soft', 'return', opt('subagent_context_notice_tokens', CONTEXT_DEFAULT_TOKENS)));
+  } catch { /* logging never blocks the notice */ }
   queueNotice(p.session_id, handoffContinueText(p.agent_type, p.agent_id, file, model));
 }
 
@@ -135,7 +138,7 @@ function handoffStopGuard(p, path) {
   const hc = handoffConfig(soft);
   if (!p.agent_id || !(soft > 0) || !handoffActive(hc, p.agent_type)) return null;
   const msg = typeof p.last_assistant_message === 'string' ? p.last_assistant_message : '';
-  if (finalIsComplete(msg) || handoffReturnPath(msg)) return null;
+  if (finalIsComplete(msg) || handoffReturnPath(msg, p.cwd)) return null;
   const sig = readContextSignal(path);
   if (!sig || typeof sig.ctx !== 'number' || sig.ctx < soft) return null;
   if (handoffFileWritten(path) || !claimOnce(`handoff-end-block-${p.agent_id}`)) return null;

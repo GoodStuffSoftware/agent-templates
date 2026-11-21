@@ -163,6 +163,19 @@
         ]
       },
       {
+        "matcher": "^(Write|Edit|MultiEdit|NotebookEdit)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/opus-code-edit.mjs"
+            ],
+            "timeout": 5
+          }
+        ]
+      },
+      {
         "matcher": "^mcp__.*spawn_task$",
         "hooks": [
           {

@@ -37,7 +37,7 @@ function readText(file) {
   } catch { return null; }
 }
 
-function readRows(file) {
+export function readRows(file) {
   const text = readText(file);
   if (text === null) return null;
   const rows = [];

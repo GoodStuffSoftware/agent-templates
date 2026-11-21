@@ -130,7 +130,7 @@ const MARKER_ORDER = [
 const pctText = (x, d = 1) => (num(x) ? `${fmt(x, d)}%` : 'n/a');
 const gapLine = (g) => `Not measured: ${cell(g.gap)}.`;
 
-/** The efficiency sections (landings, lead compactions, Opus share, accounts, setting markers) and their definitions. Lines; [] for a result without any. */
+/** The efficiency sections (landings, lead compactions, Opus share, handoffs, accounts, setting markers) and their definitions. Lines; [] for a result without any. */
 export function efficiencyLines(eff) {
   if (!isObj(eff)) return [];
   const L = [];
@@ -177,6 +177,13 @@ export function efficiencyLines(eff) {
   }
   L.push('');
 
+  L.push('### Subagent handoffs', '');
+  const ho = eff.handoff;
+  if (ho === undefined) L.push('Not measured: this day was computed before handoff counts existed.');
+  else if (!ho || ho.gap) L.push(gapLine(ho || { gap: 'not computed' }));
+  else L.push(`${fmt(ho.softNotices, 0)} soft notices (${fmt(ho.repeats, 0)} repeats), ${fmt(ho.hardDenies, 0)} hard denies, ${fmt(ho.endBlocks, 0)} end-of-run send-backs, ${fmt(ho.continuations, 0)} continuations the lead was told to spawn; ${fmt(ho.overLimit, 0)} subagents went over the hard limit anyway.`);
+  L.push('');
+
   L.push('### Accounts', '');
   const ac = eff.accounts;
   if (!ac || ac.gap) L.push(gapLine(ac || { gap: 'not computed' }));
@@ -206,6 +213,7 @@ export function efficiencyLines(eff) {
   L.push('- Landing: a commit on the repository\'s default branch (or its merge target, git config guard.mergeTarget; origin\'s copy when there is one), counted along the first parent, committed during the day. A merged branch or a squash is one landing; the commits inside a merged branch are not. Repositories: those a session of the day worked in (the session\'s working directory, a linked worktree resolving to its main repository). Units per landing: the units of those sessions in that repository / its landings.');
   L.push('- Lead compaction: a compact_boundary record in a main-thread transcript; the tokens are its preTokens (context just before compacting). Lead sessions: those with main-thread requests that day.');
   L.push('- Opus writer: a spawn on an Opus model whose declared ROLE (spawn guard, spawns.jsonl declared_role) is writer, fixer or lander, or which has no ROLE and a writing task type. Reviewers, plan legs and lookup, operate or docs roles that wrote notes, plans or scratch files are not writers. Shares are of the day\'s subagent units.');
+  L.push('- Subagent handoffs: counts of handoff-limit.jsonl rows dated in the day. Soft notice: a worker was told its context passed the soft limit (repeats apart). Hard deny: a tool call refused at the hard limit. Send-back: a worker past the soft limit ended without a handoff and was asked once to write it. Continuation: a worker ended with "DONE: partial, handoff at <path>" and the lead was told to spawn a fresh one. Over the limit anyway: distinct workers with a logged context above the hard limit (150000 unless the row says otherwise).');
   L.push('- Accounts: each session-hour is attributed to the account active at the start of that hour; % of its week uses that account\'s units per 1%. An hour inside a stretch whose switch time is unknown (one account was last seen, another first seen, nothing dated in between) is shown as unattributed, never guessed.');
   L.push('- Setting markers: Claude Code build (from the lead transcripts), agent-companion version (the spawn guard\'s version on the day\'s spawns), autoCompactWindow and main_compact_floor_tokens (read when the day was computed). A value that differs from the previous day\'s report is marked CHANGED.');
   L.push('');

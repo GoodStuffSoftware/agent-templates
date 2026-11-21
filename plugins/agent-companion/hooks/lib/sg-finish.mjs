@@ -111,7 +111,7 @@ export async function finishSpawn({
     suffix += namegateSuffix || '';
 
     if (!suffix && !roleInserted) return baseInput;
-    return { ...(baseInput || input), prompt: `${roleInserted ? `ROLE: ${roleInserted}\n` : ''}${sentBrief || ''}${suffix}` };
+    return { ...(baseInput || input), prompt: `${roleInserted ? `ROLE: ${roleInserted} (inferred)\n` : ''}${sentBrief || ''}${suffix}` };
   }
 
   let projectRouteNote = null; // warn mode only (project_route_guard), set below
@@ -144,7 +144,9 @@ export async function finishSpawn({
     // Logged only for a ladder rung (silent_fixes: fit_under_logged, and fit in the row). Any other
     // agent type still says it out loud: a weight-4 task on haiku is the failure that ships wrong code.
     note =`agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is under-provisioned — ${fit.reason}${routeLayerNote}. ${fit.action}.`;
-  } else if (fit?.verdict === 'over' && !isPremiumForSpawn && !typeReqIsRung) {
+  } else if (fit?.verdict === 'over' && fit.soft === 'effort' && String(opt('effort_fit_policy', 'rewrite')).toLowerCase() === 'warn') {
+    note = `agent-companion (effort fit): spawning ${who} at ${model}${def?.effort ? '/' + def.effort : ''} runs above the table's ${fit.expected.model}${fit.expected.effort ? '/' + fit.expected.effort : ''}: ${fit.reason}. Spawn the table's rung, or add a line "Rung: <why>" to the brief. Not blocking.`;
+  } else if (fit?.verdict === 'over' && !fit.soft && !isPremiumForSpawn && !typeReqIsRung) {
     note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}${routeLayerNote}. Re-spawn there unless the weight is understated.`;
   }
   // Haiku-trial leak, advisory only (0.31.17, operator 2026-10-13): the resolved route
@@ -274,7 +276,7 @@ export async function finishSpawn({
   // parity route: reviewer parity is a note in this release (a mis-read
   // WRITER line must not block a review), so a reviewer above its writer is
   // said out loud by the parity note instead.
-  if (fit?.verdict === 'over' && !parityRoute && !pinned && !premiumDeclared) {
+  if (fit?.verdict === 'over' && !fit.soft && !parityRoute && !pinned && !premiumDeclared) {
     recordDenial('fit', p, `${model} requested for declared weight ${declaredWeight}; table says ${routeLabel}`);
     deny(
       `Best fit: this spawn requests "${model}" but declares weight ${declaredWeight}` +

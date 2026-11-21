@@ -17,7 +17,8 @@
 // longest workers ran 135-206 calls up to 209-217K context before the auto-compaction).
 // Every notice and every deny is one row in telemetry handoff-limit.jsonl; the daily usage report's Efficiency block counts them.
 
-import { openSync, fstatSync, readSync, closeSync } from 'node:fs';
+import { openSync, fstatSync, readSync, closeSync, existsSync } from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
 import { opt } from './context.mjs';
 import { readStamp, writeStamp, HANDOFF_RETURN, HANDOFF_FIELDS, kTokens } from './subagent-context.mjs';
 
@@ -278,11 +279,16 @@ export const allowedAtHard = (p) => refusal(p) === null;
 // The path in a final message that ends "DONE: partial, handoff at <path>" (the last such line wins), else null. The text is the worker's own,
 // so it goes into the lead's context cleaned: control characters removed, at most 300 characters.
 export const HANDOFF_PATH_MAX = 300;
-export function handoffReturnPath(msg) {
-  const m = [...String(msg || '').matchAll(/DONE:\s*partial,\s*handoff at\s+([^\r\n]+)/gi)].pop();
+// 0.31.61 review: only the final non-empty line counts (a quoted rule mid-message never does), the path has no <>"'|*? and ends in .md,
+// is a handoff file (isHandoffPath), and exists on disk (a relative path resolves against cwd).
+export function handoffReturnPath(msg, cwd) {
+  const lines = String(msg || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const last = lines[lines.length - 1] || '';
+  const m = /^(?:\*\*)?DONE:\s*partial,\s*handoff at\s+`?([^`<>"'|*?\r\n]+?\.md)`?\.?(?:\*\*)?$/i.exec(last);
   if (!m) return null;
-  const path = m[1].replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim().replace(/^[`"'<(]+|[`"'>).\s]+$/g, '').slice(0, HANDOFF_PATH_MAX);
-  return path && path !== 'path' ? path : null;
+  const path = m[1].replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim().slice(0, HANDOFF_PATH_MAX);
+  if (!isHandoffPath(path)) return null;
+  try { return existsSync(isAbsolute(path) ? path : resolve(cwd || process.cwd(), path)) ? path : null; } catch { return null; }
 }
 
 // What the lead is told, once, when that worker ends: continue at once, with a fresh worker, no resume.

@@ -78,7 +78,7 @@ test('a brief without ROLE: is allowed, gets a ROLE line inserted (0.31.36), no 
   assert.equal(without.out?.hookSpecificOutput?.additionalContext, undefined, 'no nudge');
   assert.doesNotMatch(without.out?.systemMessage || '', /ROLE/, 'no ROLE message');
   const sent = without.out?.hookSpecificOutput?.updatedInput?.prompt || '';
-  assert.ok(sent.startsWith('ROLE: lookup\nTYPE: explore\ndo it'), `ROLE inferred from TYPE and inserted first: ${sent.slice(0, 60)}`);
+  assert.ok(sent.startsWith('ROLE: lookup (inferred)\nTYPE: explore\ndo it'), `ROLE inferred from TYPE and inserted first: ${sent.slice(0, 60)}`);
   assert.ok((without.row.silent_fixes || []).includes('role_inserted:lookup'));
   // The role line changes no routing or decision.
   for (const k of ['declared_type', 'route_layer', 'fit', 'fit_expected', 'denied']) {
@@ -92,7 +92,7 @@ test('an invalid ROLE value records null and gets a valid line inserted; it neve
   assert.equal(res.status, 0, res.stderr);
   assert.equal(row.declared_role, null);
   assert.equal(out?.hookSpecificOutput?.additionalContext, undefined);
-  assert.ok((out?.hookSpecificOutput?.updatedInput?.prompt || '').startsWith('ROLE: lookup\n'));
+  assert.ok((out?.hookSpecificOutput?.updatedInput?.prompt || '').startsWith('ROLE: lookup (inferred)\n'));
   assert.notEqual(out?.hookSpecificOutput?.permissionDecision, 'deny');
 });
 
