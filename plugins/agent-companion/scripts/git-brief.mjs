@@ -273,6 +273,14 @@ function parseStatus(out) {
   return st;
 }
 
+// The `unpushed` field: the upstream's ahead count, else commits on no remote.
+function unpushedOf(cwd, st, hasCommit) {
+  if (!hasCommit) return '0';
+  if (st.ahead !== null) return String(st.ahead);
+  const u = git(cwd, ['rev-list', '--count', 'HEAD', '--not', '--remotes']);
+  return u.ok && /^\d+$/.test(u.out) ? `${u.out} (no upstream)` : '?';
+}
+
 function repoFacts(cwd) {
   const r = git(cwd, ['rev-parse', '--is-bare-repository', '--show-toplevel', '--git-common-dir']);
   if (!r.ok) return null;
@@ -364,8 +372,17 @@ export function gitBrief({ cwd = process.cwd(), fetch = true, force = false, now
     key = cacheKey(cwd, gd);
     try {
       const c = JSON.parse(readFileSync(cacheFile, 'utf8'));
-      if (c && c.key === key && typeof c.line === 'string' && now - c.at >= 0 && now - c.at < cacheTtlMs) {
-        return { ms: Date.now() - t0, steps_ms: {}, fetched: false, fetch_outcome: 'skipped', fetch_age_ms: null, line: c.line, outcome: 'ok', cache: 'hit' };
+      const sf = c && c.stable;
+      if (sf && c.key === key && typeof sf.branch === 'string' && now - c.at >= 0 && now - c.at < cacheTtlMs) {
+        // Only the stable fields are cached; the working-tree and upstream counts are always fresh (one status spawn).
+        const hrun = startRun(dl);
+        const hs = git(cwd, ['status', '--porcelain=v2', '--branch']);
+        if (hs.ok) {
+          const hst = parseStatus(hs.out);
+          const hHas = hst.oid && hst.oid !== '(initial)';
+          const line = [sf.branch, sf.vs, `uncommitted ${hst.dirty}`, `worktree ${sf.top}`, `last ${sf.last}`, `unpushed ${unpushedOf(cwd, hst, hHas)}`].join(' | ');
+          return { ms: Date.now() - t0, steps_ms: { ...hrun.steps }, fetched: false, fetch_outcome: 'skipped', fetch_age_ms: null, line, outcome: 'ok', cache: 'hit' };
+        }
       }
     } catch { /* no cache, or unreadable: compute */ }
   }
@@ -402,18 +419,12 @@ export function gitBrief({ cwd = process.cwd(), fetch = true, force = false, now
       } else if (partial()) last = `${st.oid.slice(0, 7)} ?`;
     }
 
-    let unpushed = '?';
-    if (!hasCommit) unpushed = '0';
-    else if (st.ahead !== null) unpushed = String(st.ahead);
-    else {
-      const u = git(cwd, ['rev-list', '--count', 'HEAD', '--not', '--remotes']);
-      if (u.ok && /^\d+$/.test(u.out)) unpushed = `${u.out} (no upstream)`;
-    }
+    const unpushed = unpushedOf(cwd, st, hasCommit);
 
     const line = [branch, vs, `uncommitted ${st.dirty}`, `worktree ${f.top}`, `last ${last}`, `unpushed ${unpushed}`].join(' | ');
     // A complete answer is cached; one cut short by the deadline is not.
     if (cacheFile && !run.timedOut) {
-      try { writeFileSync(cacheFile, JSON.stringify({ key, at: now, line })); } catch { /* read-only: just uncached */ }
+      try { writeFileSync(cacheFile, JSON.stringify({ key, at: now, stable: { branch, vs, top: f.top, last } })); } catch { /* read-only: just uncached */ }
     }
     return res({ line, ...ff, outcome: run.timedOut ? 'partial' : 'ok', defaultBranch: dflt });
   } catch {

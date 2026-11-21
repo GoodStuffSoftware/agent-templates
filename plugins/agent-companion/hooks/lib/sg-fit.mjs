@@ -93,7 +93,7 @@ export function fitAndParity({
   let fitBeforeFix = null;
   if (fit?.verdict === 'over' && typeReqIsRung && !parityRoute && !pinned && !autofilled && !premiumDeclared
     && !(rewriteState && rewriteState.ignored) && fitRoute?.model && opt('fit_over_autofix', true) && opt('fit_autofill_ladder', true)
-    && (!fit.soft || (fit.soft === 'lookup' ? lookupPolicy === 'rewrite' : effortPolicy === 'rewrite'))) {
+    && (!fit.soft || (fit.soft === 'lookup' ? lookupPolicy === 'rewrite' : (effortPolicy === 'rewrite' && !typeIsParity)))) {
     try {
       const rung = rungFor(fitRoute.model, fitRoute.effort || null);
       const pick = rung ? ladderRewriteTarget(sid, rung.agent, p.cwd, loadedAtMs, input.subagent_type) : null;

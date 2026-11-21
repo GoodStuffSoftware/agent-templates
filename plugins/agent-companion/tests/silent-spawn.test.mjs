@@ -98,12 +98,12 @@ test('ROLE insert: each TYPE class gets its inferred ROLE line first, silently; 
   ];
   for (const [head, role] of cases) {
     const r = spawn({ ...GP, name: 'w', run_in_background: true, prompt: `${head}\nwork` });
-    assert.ok((r.ui?.prompt || '').startsWith(`ROLE: ${role}\n${head}`), `${head}: ${(r.ui?.prompt || '').slice(0, 50)}`);
+    assert.ok((r.ui?.prompt || '').startsWith(`ROLE: ${role} (inferred)\n${head}`), `${head}: ${(r.ui?.prompt || '').slice(0, 50)}`);
     assert.ok(r.row.silent_fixes.includes(`role_inserted:${role}`), head);
     assert.doesNotMatch(`${r.msg}${r.ctx}`, /ROLE/, `${head}: no message about it`);
   }
   const none = spawn({ ...GP, name: 'w', run_in_background: true, prompt: 'just do the thing' });
-  assert.ok((none.ui?.prompt || '').startsWith('ROLE: other\n'));
+  assert.ok((none.ui?.prompt || '').startsWith('ROLE: other (inferred)\n'));
   const own = spawn({ ...GP, name: 'w', run_in_background: true, prompt: 'ROLE: fixer\nTYPE: bounded-feature\nwork' });
   assert.equal((own.ui?.prompt || '').match(/^ROLE:/gm)?.length, 1, 'no second ROLE line');
   assert.ok((own.ui?.prompt || '').startsWith('ROLE: fixer\n'));
@@ -190,7 +190,7 @@ test('the fixes ride one updatedInput: background, ROLE, rewrite and name togeth
   assert.equal(r.ui?.run_in_background, true);
   assert.equal(r.ui?.subagent_type, 'agent-companion:ac-sonnet-low');
   assert.ok(r.ui?.name, 'namegate names it, silently');
-  assert.ok(r.ui.prompt.startsWith('ROLE: writer\n'));
+  assert.ok(r.ui.prompt.startsWith('ROLE: writer (inferred)\n'));
   assert.deepEqual(r.row.silent_fixes.filter((s) => !s.startsWith('fit_over_rewrite')).sort(), ['background_set', 'role_inserted:writer']);
   assert.equal(r.row.gate1_action, 'fix');
 });
@@ -219,6 +219,12 @@ test('effort fit: a Rung: reason, policy off, policy warn, and a rung below the 
   assert.equal(warn.out.permissionDecision, undefined, 'warn never denies');
   const below = spawn({ ...HI, subagent_type: 'agent-companion:ac-sonnet-low', prompt: brief }, { started: RUNGS });
   assert.notEqual(below.ui?.subagent_type, 'agent-companion:ac-sonnet-medium');
+});
+
+test('effort fit: a parity-typed brief (a reviewer, even with a WEIGHT line) is never rewritten', () => {
+  const r = spawn({ ...HI, prompt: 'TYPE: code-review\nROLE: reviewer\nWEIGHT: 2\nreview the diff' }, { started: RUNGS });
+  assert.ok(!(r.row.silent_fixes || []).some((x) => x.startsWith('effort_fit_rewrite:')), JSON.stringify(r.row.silent_fixes));
+  assert.notEqual(r.ui?.subagent_type, 'agent-companion:ac-sonnet-medium');
 });
 
 test('lookup routing: the default (warn) only logs; rewrite re-routes a declared ROLE: lookup under TYPE research; an inserted role never does', () => {

@@ -338,7 +338,7 @@ test('novel-design and debug-root-cause with no ROLE on an Opus rung: sent as th
     const r = spawn({ subagent_type: rung, prompt: `TYPE: ${type}\nWARRANT: weight 5 - design\nfigure it out and implement it` }, { sid: `sess-fix-${type}` });
     assert.equal(r.upd.subagent_type, RUNG, type);
     assert.equal(r.upd.model, 'sonnet', type);
-    assert.match(r.upd.prompt, /^ROLE: writer\n/, `${type}: the inserted ROLE is writer`);
+    assert.match(r.upd.prompt, /^ROLE: writer \(inferred\)\n/, `${type}: the inserted ROLE is writer`);
     assert.ok(r.upd.prompt.includes(WRITER_MARKER), type);
     assert.equal(r.row.self_review_expected, true, `${type}: the Sonnet rung carries the protocol`);
     assert.equal(r.rows.length, 1, type);
@@ -371,7 +371,7 @@ test('the plan leg is sent no writer clause: no scope, writer or tier clause, an
   }
   // The inserted ROLE for a plan-marked brief with no ROLE line is other.
   const marked = spawn({ subagent_type: OPUS_RUNG, prompt: 'TYPE: novel-design\nWARRANT: weight 5 - plan leg\nRead-only. Write task-plan.md.' }, { sid: 'sess-fix-plan-role' });
-  assert.match(marked.upd.prompt, /^ROLE: other\n/);
+  assert.match(marked.upd.prompt, /^ROLE: other \(inferred\)\n/);
   // The write leg still gets all three.
   const write = spawn({ subagent_type: RUNG, prompt: 'TYPE: large-refactor\nROLE: writer\nbuild it' }, { sid: 'sess-fix-plan-write' });
   for (const m of [WRITER_MARKER, SCOPE_MARKER, TIER_MARKER]) assert.ok(write.upd.prompt.includes(m), m);
@@ -409,7 +409,7 @@ test('a plan-marked Opus brief whose TYPE has no plan leg is still rewritten to 
   const r = spawn({ subagent_type: OPUS_RUNG, prompt: 'TYPE: bounded-feature\nWARRANT: weight 5 - feature\nimplement per docs/foo-plan.md; keep fixtures read-only' }, { sid: 'sess-nolegs-plan' });
   assert.equal(r.upd?.model, 'sonnet');
   assert.equal(r.rows.length, 1);
-  assert.match(r.upd?.prompt || '', /^ROLE: writer\n/);
+  assert.match(r.upd?.prompt || '', /^ROLE: writer \(inferred\)\n/);
   assert.equal(writerBasis(null, 'bounded-feature', true), 'type');
   assert.equal(writerBasis(null, 'novel-design', true), null, 'a type with legs keeps the plan-leg exemption');
 });

@@ -47,7 +47,7 @@ test('opus-code-edit: an Opus helper with ROLE: operate or other is denied a sou
   try {
     const d = repoDir(fx);
     for (const [i, role] of ['operate', 'other'].entries()) {
-      for (const tool of ['Edit', 'Write']) {
+      for (const tool of ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']) {
         const r = edit(fx, { brief: `TYPE: debug-root-cause\nROLE: ${role}\n\nfind the cause`, file: join(d, 'src', 'a.mjs'), tool, agentId: `d${i}${tool}` });
         assert.equal(r.status, 0, r.stderr);
         assert.equal(decisionOf(r.json), 'deny', `${role} ${tool}`);
@@ -76,7 +76,7 @@ test('opus-code-edit: never denied - .md, detail, handoff and plan files, outsid
     ok('md', edit(fx, { brief, file: join(d, 'docs', 'notes.md'), tool: 'Write' }));
     ok('plan md', edit(fx, { brief, file: join(d, 'fix-plan.md'), tool: 'Write' }));
     ok('detail json', edit(fx, { brief, file: join(d, 'fix-detail.json'), tool: 'Write' }));
-    ok('handoff', edit(fx, { brief, file: join(d, 'fix-handoff.txt'), tool: 'Write' }));
+    ok('handoff', edit(fx, { brief, file: join(d, 'fix-handoff.md'), tool: 'Write' }));
     ok('outside a repo', edit(fx, { brief, file: join(fx.dir, 'elsewhere', 'a.mjs'), tool: 'Write' }));
     ok('sonnet helper', edit(fx, { brief, model: 'claude-sonnet-5-5', agentType: 'agent-companion:ac-sonnet-high', file: join(d, 'src', 'a.mjs') }));
     ok('writer role', edit(fx, { brief: 'TYPE: bounded-feature\nROLE: writer\n\nbuild it', file: join(d, 'src', 'a.mjs') }));
@@ -84,6 +84,17 @@ test('opus-code-edit: never denied - .md, detail, handoff and plan files, outsid
     ok('no role', edit(fx, { brief: 'fix the bug', file: join(d, 'src', 'a.mjs') }));
     ok('the lead (no agent_id)', edit(fx, { brief, file: join(d, 'src', 'a.mjs'), lead: true }));
     ok('Read-like tool', edit(fx, { brief, file: join(d, 'src', 'a.mjs'), tool: 'Read' }));
+  } finally { fx.cleanup(); }
+});
+
+test('opus-code-edit: an Opus worker whose brief had no ROLE (the guard inserted ROLE: other (inferred)) is not denied; a source file with handoff in its name is', () => {
+  const fx = makeFixture();
+  try {
+    const d = repoDir(fx);
+    const r = edit(fx, { brief: 'ROLE: other (inferred)\nTYPE: debug-root-cause\nfix it', file: join(d, 'src', 'a.mjs') });
+    assert.equal(decisionOf(r.json), null);
+    const h = edit(fx, { brief: 'ROLE: other\nfind it', file: join(d, 'src', 'handoff-limit.mjs'), agentId: 'h1' });
+    assert.equal(decisionOf(h.json), 'deny');
   } finally { fx.cleanup(); }
 });
 
@@ -97,19 +108,21 @@ test('opus-code-edit: opus_writer_policy allow turns the guard off', () => {
 });
 
 test('opus-code-edit: unit - exempt files and the judged roles', () => {
-  for (const f of ['a.md', 'B.MD', 'x/notes.mdx', 'x-detail.json', 'run-handoff.txt', 'task-plan.json']) assert.ok(isExemptFile(f), f);
-  for (const f of ['a.mjs', 'src/plan.ts', 'x/detail.json', 'README.txt']) assert.ok(!isExemptFile(f), f);
+  for (const f of ['a.md', 'B.MD', 'x/notes.mdx', 'x-detail.json', 'run-handoff.md', 'task-plan.json']) assert.ok(isExemptFile(f), f);
+  for (const f of ['a.mjs', 'src/plan.ts', 'x/detail.json', 'README.txt', 'hooks/lib/handoff-limit.mjs', 'handoff.js', 'foo-plan.mjs', 'run-handoff.txt']) assert.ok(!isExemptFile(f), f);
+  assert.equal(briefJudgedRole('ROLE: other (inferred)\nTYPE: x'), null, 'the guard\'s inserted line is not a declared role');
+  assert.equal(briefJudgedRole('ROLE: operate (inferred)\nx'), null);
   assert.equal(briefJudgedRole('TYPE: x\nROLE: operate\n'), 'operate');
   assert.equal(briefJudgedRole('ROLE: other'), 'other');
   assert.equal(briefJudgedRole('ROLE: writer'), null);
   assert.equal(briefJudgedRole('no role here'), null);
 });
 
-test('hooks.json registers opus-code-edit on Write and Edit', async () => {
+test('hooks.json registers opus-code-edit on Write, Edit, MultiEdit and NotebookEdit', async () => {
   const { readFileSync } = await import('node:fs');
   const { fileURLToPath } = await import('node:url');
   const cfg = JSON.parse(readFileSync(fileURLToPath(new URL('../hooks/hooks.json', import.meta.url)), 'utf8'));
   const entry = cfg.hooks.PreToolUse.find((e) => e.hooks.some((h) => h.args.some((a) => a.endsWith('/hooks/opus-code-edit.mjs'))));
   assert.ok(entry, 'registered');
-  assert.equal(entry.matcher, '^(Write|Edit)$');
+  assert.equal(entry.matcher, '^(Write|Edit|MultiEdit|NotebookEdit)$');
 });

@@ -5,7 +5,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeFixture, runHook, readJsonl } from './helpers.mjs';
 import { telemetryDir, stateDir } from '../hooks/lib/context.mjs';
@@ -228,11 +229,13 @@ test('a worker that ends "DONE: partial, handoff at <path>": the lead is told on
   try {
     const { lead, agentFile } = layout(fx);
     writeFileSync(agentFile, user('go') + turn('r1', 100000));
-    const msg = 'STATUS: partial\nDONE: partial, handoff at C:/work/docs/task-handoff.md';
+    const hf = join(fx.dir, 'task-handoff.md').replace(/\\/g, '/');
+    writeFileSync(hf, '# handoff\n');
+    const msg = `STATUS: partial\nDONE: partial, handoff at ${hf}`;
     assert.equal(endRun(lead, msg).stdout.trim(), '', 'the worker is not blocked');
     const drain = (e = {}) => runHook('hooks/runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: SID, transcript_path: lead, prompt: 'go', ...e }, { env: ON });
     const t = text(drain());
-    assert.match(t, /handed off: "DONE: partial, handoff at C:\/work\/docs\/task-handoff\.md"/);
+    assert.ok(t.includes(`handed off: "DONE: partial, handoff at ${hf}"`), t);
     assert.match(t, /Spawn a fresh worker of the same agent type \(ac-sonnet-high\) and model \(claude-sonnet-5-5\) right away, with that file as its brief/);
     assert.match(t, /A new spawn, not a resume/);
     endRun(lead, msg);
@@ -272,10 +275,11 @@ test('SubagentStop: no block for a finished run, a handoff return, a handoff fil
   try {
     const { lead, agentFile } = layout(fx);
     const big = user('go') + turn('r1', 120000);
+    writeFileSync(join(fx.dir, 't-handoff.md'), '# handoff\n');
     const cases = [
       ['STATUS: done', big, ON],
       ['Finished.\nDONE: all green', big, ON],
-      ['STATUS: partial\nDONE: partial, handoff at /w/t-handoff.md', big, ON],
+      [`STATUS: partial\nDONE: partial, handoff at ${join(fx.dir, 't-handoff.md').replace(/\\/g, '/')}`, big, ON],
       ['STATUS: partial', big + writeCall('/w/task-handoff.md'), ON],
       ['STATUS: partial', user('go') + turn('r1', 90000), ON],
       ['STATUS: partial', big, { ...ON, CLAUDE_PLUGIN_OPTION_SUBAGENT_HANDOFF_LIMITS: 'false' }],
@@ -297,7 +301,17 @@ test('unit: gitOnly, isHandoffPath, handoffReturnPath, finalIsComplete', () => {
   assert.equal(isHandoffPath('C:\\a\\HANDOFF.md'), true);
   assert.equal(isHandoffPath('/a/handoff/app.js'), false, 'the file name counts, not the folder');
   assert.equal(isHandoffPath(undefined), false);
-  assert.equal(handoffReturnPath('x\nDONE: partial, handoff at /w/a-handoff.md\n'), '/w/a-handoff.md');
+  const d = mkdtempSync(join(tmpdir(), 'hrp-'));
+  try {
+    const f = join(d, 'a-handoff.md').replace(/\\/g, '/');
+    writeFileSync(f, '# handoff\n');
+    assert.equal(handoffReturnPath(`x\nDONE: partial, handoff at ${f}\n`), f, 'a real last line with an existing file');
+    assert.equal(handoffReturnPath('x\nDONE: partial, handoff at a-handoff.md', d), 'a-handoff.md', 'relative path resolves against cwd');
+    assert.equal(handoffReturnPath(`DONE: partial, handoff at ${join(d, 'gone-handoff.md').replace(/\\/g, '/')}`), null, 'a file that is not there');
+    assert.equal(handoffReturnPath(`DONE: partial, handoff at ${f}\nand then some more text`), null, 'not the final line');
+    assert.equal(handoffReturnPath('Rule: "DONE: partial, handoff at <path>" gets a fresh same-rung continuation, not a resume'), null, 'the injected rule text, mid-message');
+    assert.equal(handoffReturnPath('x\nRule: "DONE: partial, handoff at <path>" gets a fresh same-rung continuation, not a resume'), null, 'the rule text as the last line');
+  } finally { rmSync(d, { recursive: true, force: true }); }
   assert.equal(handoffReturnPath('DONE: partial, handoff at <path>'), null);
   assert.equal(handoffReturnPath('DONE: all good'), null);
   assert.equal(finalIsComplete('STATUS: done'), true);
@@ -431,8 +445,13 @@ test('SubagentStop: a Read of the handoff file does not stand in for writing it;
 test('finalIsComplete also accepts a reviewer verdict; handoffReturnPath is capped and cleaned', () => {
   for (const m of ['VERDICT: PASS', ['x', 'VERDICT: FIX', '- blocker'].join('\n'), 'verdict: pass', 'STATUS: done']) assert.equal(finalIsComplete(m), true, m);
   for (const m of ['VERDICT:', 'VERDICTS pass', 'STATUS: partial']) assert.equal(finalIsComplete(m), false, m);
-  const long = `/w/${'a'.repeat(500)}-handoff.md`;
-  assert.equal(handoffReturnPath(`DONE: partial, handoff at ${long}`).length, 300);
-  assert.equal(handoffReturnPath('DONE: partial, handoff at /w/a\u0007b\u001b[31m-handoff.md'), '/w/ab[31m-handoff.md');
+  const d = mkdtempSync(join(tmpdir(), 'hrp-'));
+  try {
+    const long = `${d.replace(/\\/g, '/')}/${'a'.repeat(500)}-handoff.md`;
+    assert.equal(handoffReturnPath(`DONE: partial, handoff at ${long}`), null, 'an over-long path cannot exist');
+    writeFileSync(join(d, 'ab[31m-handoff.md'), '# handoff\n');
+    const dirty = `${d.replace(/\\/g, '/')}/a\u0007b\u001b[31m-handoff.md`;
+    assert.equal(handoffReturnPath(`DONE: partial, handoff at ${dirty}`), `${d.replace(/\\/g, '/')}/ab[31m-handoff.md`, 'control characters removed');
+  } finally { rmSync(d, { recursive: true, force: true }); }
   assert.equal(handoffReturnPath('DONE: partial, handoff at \u0007\u001b'), null);
 });

@@ -111,7 +111,7 @@ export async function finishSpawn({
     suffix += namegateSuffix || '';
 
     if (!suffix && !roleInserted) return baseInput;
-    return { ...(baseInput || input), prompt: `${roleInserted ? `ROLE: ${roleInserted}\n` : ''}${sentBrief || ''}${suffix}` };
+    return { ...(baseInput || input), prompt: `${roleInserted ? `ROLE: ${roleInserted} (inferred)\n` : ''}${sentBrief || ''}${suffix}` };
   }
 
   let projectRouteNote = null; // warn mode only (project_route_guard), set below

@@ -482,7 +482,7 @@ test('hook: SessionStart and SubagentStart each inject one additionalContext lin
   assert.equal(rows[1].fetch_outcome, 'skipped');
   assert.equal(typeof rows[0].start_ms, 'number', 'hook start latency');
   assert.ok(rows[0].steps_ms.status >= 0, 'time per git step');
-  assert.deepEqual(rows[1].steps_ms, {}, 'a cache hit runs no git');
+  assert.deepEqual(Object.keys(rows[1].steps_ms), ['status'], 'a cache hit runs only the one status call');
 }));
 
 test('hook: git_brief off (env CLAUDE_PLUGIN_OPTION_GIT_BRIEF=0) prints nothing, runs no git, writes no row', () => withRepos(({ work, fx }) => {
@@ -529,7 +529,7 @@ test('hooks.json registers the hook on SessionStart and SubagentStart; plugin.js
 
 // --- speed: cache, deadline, no-repo path ---------------------------------------
 
-test('cache: the second call in the TTL runs no git and returns the same line; HEAD, index or TTL expiry invalidate', () => withRepos(({ work }) => {
+test('cache: the second call in the TTL runs only git status and returns the same line; HEAD, index or TTL expiry invalidate', () => withRepos(({ work }) => {
   const t = Date.now();
   const a = gitBrief({ cwd: work, ...noFetch, cacheTtlMs: CACHE_TTL_MS, now: t });
   assert.equal(a.cache, 'miss');
@@ -537,7 +537,7 @@ test('cache: the second call in the TTL runs no git and returns the same line; H
   const b = gitBrief({ cwd: work, ...noFetch, cacheTtlMs: CACHE_TTL_MS, now: t + 1000 });
   assert.equal(b.cache, 'hit');
   assert.equal(b.line, a.line);
-  assert.deepEqual(b.steps_ms, {}, 'no git step ran');
+  assert.deepEqual(Object.keys(b.steps_ms), ['status'], 'only the status step ran');
   // past the TTL
   assert.equal(gitBrief({ cwd: work, ...noFetch, cacheTtlMs: CACHE_TTL_MS, now: t + CACHE_TTL_MS + 1 }).cache, 'miss');
   // a new commit changes HEAD's ref
@@ -555,6 +555,17 @@ test('cache: the second call in the TTL runs no git and returns the same line; H
   assert.match(d.line, /uncommitted 1/);
   // without a TTL (the CLI) the cache is neither read nor written
   assert.equal(gitBrief({ cwd: work, ...noFetch }).cache, undefined);
+}));
+
+test('cache: a hit inside the TTL shows a fresh uncommitted count and a fresh unpushed count', () => withRepos(({ work }) => {
+  const t = Date.now();
+  const a = gitBrief({ cwd: work, ...noFetch, cacheTtlMs: CACHE_TTL_MS, now: t });
+  assert.match(a.line, /uncommitted 0/);
+  writeFileSync(join(work, 'a.txt'), 'edited\n'); // an edit and an untracked file change neither HEAD nor the index
+  writeFileSync(join(work, 'untracked.txt'), 'x\n');
+  const b = gitBrief({ cwd: work, ...noFetch, cacheTtlMs: CACHE_TTL_MS, now: t + 1000 });
+  assert.equal(b.cache, 'hit');
+  assert.match(b.line, /uncommitted 2/);
 }));
 
 test('cache: a linked worktree has its own cache in its own git directory', () => withRepos(({ work, fx }) => {
@@ -589,7 +600,7 @@ test('no-repo path: nothing is spawned, outcome not-repo, no cache written', () 
   } finally { rmSync(none, { recursive: true, force: true }); }
 });
 
-test('hook: a repeat start within the TTL is answered from the cache without git', () => withRepos(({ work, fx }) => {
+test('hook: a repeat start within the TTL is answered from the cache with one git status', () => withRepos(({ work, fx }) => {
   const env = { AGENT_COMPANION_STATE_DIR: fx.stateDir };
   const args = ['--event', 'subagent-start'];
   const a = runHook(HOOK, { session_id: 's5', agent_id: 'a', cwd: work }, { env, args });

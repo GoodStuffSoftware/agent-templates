@@ -4,8 +4,8 @@
 // This check runs at the Write or Edit itself: an Opus-model SUBAGENT whose brief declares ROLE: operate or other, writing a
 // source file inside a git repo, is denied with "code edits go to a Sonnet writer".
 //
-// Never denied: a .md file, a <task>-detail.* / *handoff* / *-plan.* file, a path outside a git repo, a non-Opus subagent,
-// a brief with another or no ROLE line, the lead (no agent_id). opus_writer_policy "allow" turns it off. Fails open.
+// Never denied: a .md file, a <task>-detail.* file, a *handoff*.md file, a *-plan.(md|json|txt) file, a path outside a git repo, a non-Opus subagent,
+// a brief with another or no ROLE line of its own (the guard's inserted "ROLE: x (inferred)" line is not the brief's), the lead (no agent_id). opus_writer_policy "allow" turns it off. Fails open.
 
 import { existsSync } from 'node:fs';
 import { isAbsolute, resolve, basename, dirname, join } from 'node:path';
@@ -20,7 +20,7 @@ export const OPUS_CODE_EDIT_REASON = 'Code edits go to a Sonnet writer: report w
 // 'operate' | 'other' | null: the ROLE the brief declares, when it is one this guard judges.
 export function briefJudgedRole(brief) {
   try {
-    const rm = declarationValue(briefDeclarations(String(brief || '')), 'ROLE', `(${BRIEF_ROLES.join('|')})\\b`);
+    const rm = declarationValue(briefDeclarations(String(brief || '')), 'ROLE', `(${BRIEF_ROLES.join('|')})\\b(?![ \\t]*\\(inferred\\))`);
     const role = rm ? rm[1].toLowerCase() : null;
     return OPUS_CODE_EDIT_ROLES.includes(role) ? role : null;
   } catch { return null; }
@@ -29,7 +29,7 @@ export function briefJudgedRole(brief) {
 // Is the file one an Opus worker may always write (notes, plans, handoffs)?
 export function isExemptFile(abs) {
   const base = basename(String(abs));
-  return /\.mdx?$/i.test(base) || /-detail\.[A-Za-z0-9]+$/i.test(base) || /handoff/i.test(base) || /-plan\.[A-Za-z0-9]+$/i.test(base);
+  return /\.mdx?$/i.test(base) || /-detail\.[A-Za-z0-9]+$/i.test(base) || /handoff[^/\\]*\.md$/i.test(base) || /-plan\.(md|json|txt)$/i.test(base);
 }
 
 // Is the path inside a git work tree (a .git directory or file in it or an ancestor)?
@@ -59,7 +59,7 @@ export function subagentOnOpus(p, transcriptPath) {
 export function checkOpusCodeEdit(p) {
   const pass = { action: 'pass' };
   try {
-    const filePath = p && p.tool_input && p.tool_input.file_path;
+    const filePath = p && p.tool_input && (p.tool_input.file_path || p.tool_input.notebook_path);
     if (!p || !p.agent_id || typeof filePath !== 'string' || !filePath) return pass;
     const abs = isAbsolute(filePath) ? filePath : resolve(p.cwd || process.cwd(), filePath);
     if (isExemptFile(abs) || !inGitRepo(abs)) return pass;
