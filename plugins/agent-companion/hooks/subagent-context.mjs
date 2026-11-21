@@ -50,7 +50,7 @@ import {
 import {
   CEILING_DEFAULT_TOKENS, CEILING_REPEAT_DEFAULT_TOKENS, CEILING_LOG, ceilingCheck,
 } from './lib/context-ceiling.mjs';
-import { HANDOFF_LOG, handoffConfig, handoffActive, noteFirst, repeatDue, hardCheck, handoffRow, denyText } from './lib/handoff-limit.mjs';
+import { HANDOFF_LOG, handoffConfig, handoffActive, noteFirst, repeatDue, hardCheck, handoffRow, denyText, noteDeny, clearDeny, streakPrefix } from './lib/handoff-limit.mjs';
 import { STEP_LOG, stepBudgetCheck, readBrief } from './lib/step-budget.mjs';
 import { longRunCheck, logLongRun } from './lib/long-run.mjs';
 import { allowanceNote, allowanceWatch } from './lib/plan-allowance.mjs';
@@ -94,8 +94,9 @@ try {
   if (hard) {
     appendLog(HANDOFF_LOG, hard.row);
     recordDenial('handoff-hard-limit', p, `${p.tool_name} at ${sig.ctx} tokens, limit ${hcfg.hard}`);
-    deny(denyText(sig.ctx, hcfg.hard, noticeVariant(readBrief(path), p.agent_type)));
+    deny(streakPrefix(noteDeny(p.agent_id)) + denyText(sig.ctx, hcfg.hard, noticeVariant(readBrief(path), p.agent_type), hard.why));
   }
+  if (handoffOn && sig && hcfg.hard > 0 && sig.ctx >= hcfg.hard) clearDeny(p.agent_id); // a call the limit let through ends the streak
 
   // The soft long-run note: at 150 tool calls and every further 100, once. Never denies; counted before the step
   // budget so a call that budget denies is still counted.
