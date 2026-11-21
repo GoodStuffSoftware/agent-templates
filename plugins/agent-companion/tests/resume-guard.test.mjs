@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { makeFixture, runHook, decisionOf } from './helpers.mjs';
+import { makeFixture, runHook, decisionOf, readJsonl } from './helpers.mjs';
 import {
   resolveTarget, lastActivityOf, ttlFor, normalizeTo, TTL_MS, cacheTtlFromDefinition,
 } from '../hooks/lib/resume-guard.mjs';
@@ -491,5 +491,38 @@ test('hook latency: well under its 10s hook timeout on a realistic fixture', () 
   } finally {
     cleanup();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('hook: a fire is logged to denials.jsonl as guard resume-guard, outcome warn; a passthrough writes nothing', () => {
+  const fx = makeFixture();
+  const root = mkdtempSync(join(tmpdir(), 'ac-rg-'));
+  const root2 = mkdtempSync(join(tmpdir(), 'ac-rg-w-'));
+  try {
+    const now = Date.now();
+    const { mainTranscriptPath } = makeAgentFixture(root, {
+      lines: [assistantLine({ ts: now - 10 * 60 * 1000, cacheRead: 100000, cacheWrite5m: 100000 })],
+    });
+    const res = callHook(root, { mainTranscriptPath });
+    assert.ok(res.json?.systemMessage, 'the hint fired');
+    const file = join(fx.stateDir, 'telemetry', 'denials.jsonl');
+    const rows = readJsonl(file);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].guard, 'resume-guard');
+    assert.equal(rows[0].outcome, 'warn');
+    assert.equal(rows[0].tool_name, 'SendMessage');
+    assert.equal(rows[0].session_id, 'sid-1');
+    assert.match(rows[0].detail, /idle \d+m past 5m TTL, ~\d+K tokens/);
+    assert.equal(rows[0].detail.includes('worker-x'), false, 'the target name is not stored');
+    // still warm: nothing more is logged
+    const warm = makeAgentFixture(root2, {
+      lines: [assistantLine({ ts: Date.now() - 1000, cacheRead: 100000, cacheWrite5m: 100000 })],
+    });
+    assert.equal(callHook(root2, { mainTranscriptPath: warm.mainTranscriptPath }).json, null);
+    assert.equal(readJsonl(file).length, 1);
+  } finally {
+    fx.cleanup();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(root2, { recursive: true, force: true });
   }
 });
