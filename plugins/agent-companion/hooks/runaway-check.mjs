@@ -22,9 +22,15 @@
 // its last turn, or made no tool call) is read once more and recorded with
 // phase "stop".
 //
-// Silent on every path: this hook never writes stdout. Fails open.
+// Silent on every path except one: a worker past the soft limit that ends with no completed STATUS and no handoff file gets ONE
+// `decision: block` asking it to write the handoff first (handoffStopGuard below; once per agent id). Fails open.
 
 import { readStdin, opt, passthrough, appendLog } from './lib/context.mjs';
+import {
+  HANDOFF_LOG, handoffConfig, handoffActive, handoffReturnPath, handoffContinueText, finalIsComplete, handoffFileWritten, endGuardText, handoffRow,
+} from './lib/handoff-limit.mjs';
+import { noticeVariant } from './lib/subagent-context.mjs';
+import { readBrief } from './lib/step-budget.mjs';
 import {
   measureTranscript, runawayReasons, claimAgentOnce, queueNotice, resolveAgentTranscript, pruneRunawayState,
   RUNAWAY_DEFAULT_TURNS, RUNAWAY_DEFAULT_USD,
@@ -80,7 +86,8 @@ function contextCheck(p, path) {
   if (!(threshold > 0) || !p.agent_id) return;
 
   const sig = readContextSignal(path);
-  const kinds = claimSignals(p.agent_id, sig, threshold, { fresh: false });
+  const hc = handoffConfig(threshold); // switch off or an exempt agent type: no size notice (the compaction note stays)
+  const kinds = claimSignals(p.agent_id, sig, handoffActive(hc, p.agent_type) ? threshold : 0, { fresh: false });
   const at = new Date().toISOString();
   for (const kind of kinds) {
     const row = {
@@ -108,10 +115,43 @@ function contextCheck(p, path) {
     + 'If it returned "DONE: partial, handoff at <path>", start a fresh worker on the same rung from that file (not a resume); otherwise split what it left into smaller briefs. Row in subagent-context.jsonl.');
 }
 
+// A worker that ended with "DONE: partial, handoff at <path>" (the handoff the context notice and the hard limit ask for): tell the lead,
+// once, to spawn a fresh worker of the same agent type and model at once with that file as its brief. Same delivery as the lines above
+// (queued here, drained into the lead's context on its next prompt, a background worker's task notification included, or right after a
+// foreground Agent call returns: hooks/runaway-notice.mjs). Never blocks the worker's own end.
+function handoffReturnCheck(p, path) {
+  if (!p.agent_id || !p.session_id) return;
+  const file = handoffReturnPath(p.last_assistant_message);
+  if (!file || !claimOnce(`handoff-return-${p.agent_id}`)) return;
+  let model = null;
+  try { model = (readContextSignal(path) || {}).model || null; } catch { /* the type alone is enough */ }
+  queueNotice(p.session_id, handoffContinueText(p.agent_type, p.agent_id, file, model));
+}
+
+// The one thing this hook can say to a worker: a worker past the soft limit that ends with no completed STATUS and no handoff file is
+// asked ONCE to write the handoff first (decision: block, then it ends again). The claim per agent id means a second end is never blocked.
+function handoffStopGuard(p, path) {
+  const soft = opt('subagent_context_notice_tokens', CONTEXT_DEFAULT_TOKENS);
+  const hc = handoffConfig(soft);
+  if (!p.agent_id || !(soft > 0) || !handoffActive(hc, p.agent_type)) return null;
+  const msg = typeof p.last_assistant_message === 'string' ? p.last_assistant_message : '';
+  if (finalIsComplete(msg) || handoffReturnPath(msg)) return null;
+  const sig = readContextSignal(path);
+  if (!sig || typeof sig.ctx !== 'number' || sig.ctx < soft) return null;
+  if (handoffFileWritten(path) || !claimOnce(`handoff-end-block-${p.agent_id}`)) return null;
+  appendLog(HANDOFF_LOG, handoffRow(p, sig, 'soft', 'end-block', soft));
+  return { decision: 'block', reason: endGuardText(noticeVariant(readBrief(path), p.agent_type)) };
+}
+
 try {
   const p = readStdin();
   const path = resolveAgentTranscript(p);
+  try { handoffReturnCheck(p, path); } catch { /* fail open */ }
   try { runawayCheck(p, path); } catch { /* fail open */ }
   try { contextCheck(p, path); } catch { /* fail open */ }
+  try {
+    const blockOut = handoffStopGuard(p, path);
+    if (blockOut) { process.stdout.write(JSON.stringify(blockOut)); process.exit(0); }
+  } catch { /* fail open */ }
 } catch { /* fail open */ }
 passthrough();

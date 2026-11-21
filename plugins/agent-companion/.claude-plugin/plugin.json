@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.59",
+  "version": "0.31.60",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -928,6 +928,30 @@
       "title": "Subagent context ceiling: second notice tokens",
       "description": "A subagent that was nudged at subagent_ceiling_tokens and keeps growing to this many tokens gets one second and last nudge. Default 0 = off (the handoff nudge fires once per worker); only used when subagent_ceiling_tokens is on. Set a line above the ceiling (for example 200000) to turn the second notice on.",
       "default": 0
+    },
+    "subagent_handoff_limits": {
+      "type": "boolean",
+      "title": "Worker handoff limits: on/off",
+      "description": "On (default): the PreToolUse hook inside each subagent (never the lead) enforces the worker handoff. At subagent_context_notice_tokens (the soft limit, 110000) the worker is told to finish the step, commit and push its WIP to its branch, write <task>-handoff.md (done, remaining, files touched, branch and sha, the exact next step) and end with \"DONE: partial, handoff at <path>\"; the notice repeats every subagent_context_notice_repeat_tokens while the context keeps growing; at subagent_context_hard_tokens (the hard limit, 150000) every tool call except the handoff is DENIED. Off: none of that happens (the compaction note is separate and unchanged). Each notice and each deny is a row in handoff-limit.jsonl, counted in the Efficiency block of the daily usage report. Note: subagent_context_notice_tokens 0 (an explicit value in your settings) switches the notice off; the hard limit still applies unless this switch is off or subagent_context_hard_tokens is 0.",
+      "default": true
+    },
+    "subagent_context_notice_repeat_tokens": {
+      "type": "number",
+      "title": "Worker handoff: repeat the notice every N tokens",
+      "description": "After the first handoff notice at subagent_context_notice_tokens, a worker that keeps growing is told again each time its context is this many tokens above the level of its last notice (not on every call). 0 = tell it once. Default 15000 (operator decision 2026-11).",
+      "default": 15000
+    },
+    "subagent_context_hard_tokens": {
+      "type": "number",
+      "title": "Worker handoff: hard limit tokens",
+      "description": "Past this many tokens of a subagent's own context (input + cache read + cache write of its latest request) the hook denies every tool call except: Write, Edit or Read of a file whose name contains \"handoff\"; and Bash or PowerShell commands that are only git add, commit, push, status, diff or log. Agent spawns are denied. The worker can still give its final reply. 0 = no hard limit. Default 150000. Shipped default and why: operator decision 2026-11; usage review of that week: calls made at over 150K of context were about 40% of subagent cost, and the longest workers ran 135-206 calls up to 209-217K context, where auto-compaction fires, because a subagent cannot see its own token count and nothing made it hand off. Change it for a setup where workers are cheap or short.",
+      "default": 150000
+    },
+    "subagent_handoff_exempt_types": {
+      "type": "string",
+      "title": "Worker handoff: exempt agent types",
+      "description": "Comma-separated agent types (with or without the plugin prefix, for example \"ac-haiku,my-agent\") that the handoff limits never touch: no notice, no repeat, no deny. Empty by default.",
+      "default": ""
     },
     "step_budget": {
       "type": "boolean",

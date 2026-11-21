@@ -2,6 +2,10 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.60 — 2026-11-21
+
+- **Workers hand off at a size limit, enforced.** The size notice used to be advice, sent once, and off wherever `subagent_context_notice_tokens` was 0, so long workers ran past 300K and lost their context to compaction. Now (subagents only; the size is read from the worker's own transcript, fail-soft): the soft limit (`subagent_context_notice_tokens`, 110000) sends the handoff notice, repeated every +15000 (`subagent_context_notice_repeat_tokens`); at the hard limit (`subagent_context_hard_tokens`, 150000; 0 = none) a PreToolUse deny lets through only the handoff file (Write/Edit/Read) and git add, commit, push, status, diff and log, so the worker writes its handoff and ends with `DONE: partial, handoff at <path>`. A worker that ends past the soft limit with no completed STATUS and no handoff file gets one `decision: block` per agent id asking it to write the handoff first. The lead is told to spawn a fresh worker of the same agent type and model with the handoff file. New options: `subagent_handoff_limits` (switch, default on), `subagent_context_notice_repeat_tokens`, `subagent_context_hard_tokens`, `subagent_handoff_exempt_types` (empty). An explicit 0 in user config is honoured. The step-150 "carry on" marker is not sent to a worker the hard limit governs. The brevity contract gains a handoff line that shares its file fields with the writer clause. Rows go to `handoff-limit.jsonl` (docs/TELEMETRY.md); the daily-report Efficiency counts are not part of this release.
+
 ## 0.31.59 — 2026-11-20
 
 - **The API ledger refuses unproven records.** `api-credits.mjs record` (all four categories: review, overflow, rater, workers; every one is API-billed) now requires `--api-key-source ANTHROPIC_API_KEY` (library: `apiKeySource`). Without it: exit 2, one line, nothing booked, and the attempt goes to `api-credits-rejects.jsonl` beside the ledger; the plugin's own runners pass the proof. Old ledgers load unchanged. `recordSpend()` (internal per-turn booking, library only) is unchanged.

@@ -223,7 +223,7 @@ test('unit: the writer clause carries the handoff and test wording, and staging 
   }
   assert.ok(!c4.includes(STAGING_SENTENCE), 'four deliverables: no staging clause');
   assert.ok(c5.endsWith(STAGING_SENTENCE), 'five deliverables: staging clause appended');
-  assert.match(HANDOFF_SENTENCE, /context handoff notice, finish the current step, commit and push WIP, write <task>-handoff\.md \(done \/ left \/ first next action\), and return "DONE: partial, handoff at <path>"/);
+  assert.match(HANDOFF_SENTENCE, /context handoff notice, finish the current step, commit and push WIP, write <task>-handoff\.md \(done, remaining, files touched, branch and sha, the exact next step\), and return "DONE: partial, handoff at <path>"/);
   assert.match(TEST_SENTENCE, /^While fixing, run only the affected test files; run the full suite once at the end, in the background/);
   assert.equal(STAGING_SENTENCE, 'Work in stages in the brief\'s order; commit after each stage; at the handoff notice, stop at the next stage boundary.');
   for (const c of [c4, c5]) assert.doesNotMatch(c, /15\+|edit worker|self-chosen/);
