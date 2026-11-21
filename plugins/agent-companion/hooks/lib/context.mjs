@@ -3124,7 +3124,7 @@ export function writeJsonAtomic(file, value) {
 // "is what is running right?" — the same table, read in the other direction.
 // Model dominates: a wrong tier is the finding, effort refines it. Pass
 // `expected` directly for reviewer parity, else it resolves from the task.
-export function evaluateFit({ model, effort = '', weight, kind = 'bounded', consequence = 'routine', expected = null, parity = false }) {
+export function evaluateFit({ model, effort = '', weight, kind = 'bounded', consequence = 'routine', expected = null, parity = false, effortOverAt = 1 }) {
   const exp = expected || effortFor(weight, kind, consequence);
   const a = classifyModel(model);
   const e = classifyModel(exp.model);
@@ -3153,7 +3153,7 @@ export function evaluateFit({ model, effort = '', weight, kind = 'bounded', cons
     reason = parity
       ? `reviewer effort ${eff} is below the parity route's ${exp.effort}; a reviewer may exceed the route's effort but must not drop below it`
       : `right model, effort too low: ${eff} where the table says ${exp.effort}`;
-  } else if (effortDelta !== null && effortDelta > 1 && !parity) {
+  } else if (effortDelta !== null && effortDelta >= effortOverAt && !parity) {
     verdict = 'over'; reason = `right tier; effort ${eff} is ${effortDelta} steps above ${exp.effort}`;
   } else {
     verdict = 'fit'; reason = `${a.alias || model}${eff ? '/' + eff : ''} matches the table (${expLabel})`;
@@ -3174,6 +3174,7 @@ export function evaluateFit({ model, effort = '', weight, kind = 'bounded', cons
 
   return {
     verdict, reason, action, modelDelta, effortDelta, effortNote: effortNote || null,
+    effortOnly: verdict === 'over' && modelDelta === 0,
     expected: exp,
     actual: { model, alias: a.alias, effort: eff || null, premium: a.premium },
   };

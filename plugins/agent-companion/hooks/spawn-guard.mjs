@@ -125,7 +125,7 @@ try {
     loadedAtMs, input, updatedInput, ladderRewrite, spawnAlias, routeMatchesModel, isPremiumForSpawn,
     silentFixes, fromDef, declared, parityYardstick, writer, routeLabel, modelTakesEffort, callerEffort,
     writerProblem, writerRaw, writerInferred, writerInferProblem, declaredType, callerDeclaredType,
-    subagentCaller, callerObserved,
+    subagentCaller, callerObserved, declaredRole,
   });
   const {
     premiumDeclared, routed, capCounts, parityRungName, writerNote, writerInferredNote, writerInferNote,
