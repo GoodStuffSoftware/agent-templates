@@ -137,7 +137,7 @@
         ]
       },
       {
-        "matcher": "^(Write|Edit|MultiEdit|NotebookEdit)$",
+        "matcher": "^(Write|Edit)$",
         "hooks": [
           {
             "type": "command",

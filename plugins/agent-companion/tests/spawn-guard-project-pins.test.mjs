@@ -237,7 +237,7 @@ test('6. role rules still apply to a pinned spawn: contract, standing rules, ROL
     // No ROLE line (0.31.36): one is inserted silently, no nudge.
     const nr = spawn(fx, { type: 'proj-architect', prompt: 'TYPE: bounded-feature\ndo it' });
     assert.doesNotMatch(nr.ctx, /no `ROLE:` line/);
-    assert.match(nr.updated?.prompt || '', /^ROLE: writer\nTYPE: bounded-feature\ndo it/);
+    assert.match(nr.updated?.prompt || '', /^ROLE: writer \(inferred\)\nTYPE: bounded-feature\ndo it/);
     assert.equal(nr.row.declared_role, null);
     assert.equal(nr.row.project_pinned, true);
   } finally { fx.cleanup(); }
