@@ -24,7 +24,7 @@
 // 300000, so the compaction signal is the one that usually fires.
 //
 // The size notice is the HANDOFF notice (0.31.54): finish the step, commit and push WIP, write
-// <task>-handoff.md (done / left / first next action) and return "DONE: partial, handoff at <path>", so the lead
+// <task>-handoff.md (done, remaining, files touched, branch and sha, the exact next step) and return "DONE: partial, handoff at <path>", so the lead
 // continues from the file with a fresh worker on the same rung. Default 110000, from operator data of 2026-11-13: long
 // workers averaged 133k tokens of context per call, and every call re-reads it; at the old 300000 default the size
 // notice almost never fired, because a worker compacts first.
@@ -242,18 +242,23 @@ export function noticeVariant(brief, agentType = '') {
   } catch { return 'writer'; }
 }
 
-// The text the subagent sees. A compaction alone is informative only: workers compact and keep
-// going (operator decision 2026-10-27), so no wrap-up and no return is asked. The size notice is the
-// handoff request, and so is a size-plus-compaction message.
-export function subagentNoticeText(kinds, threshold, variant = 'writer') {
+// What a handoff file holds, in the one wording the notice, the deny reason and the writer clause share.
+export const HANDOFF_FIELDS = 'done, remaining, files touched, branch and sha, the exact next step';
+export const kTokens = (n) => `${Math.round(Number(n) / 1000)}K`;
+
+// The text the subagent sees. A compaction alone is informative only: workers compact and keep going (operator decision
+// 2026-10-27), so no wrap-up and no return is asked. The size notice is the handoff request (0.31.60 wording: "Context at <N>K,
+// limit <hard>K: ..."), and so is a size-plus-compaction message. `info` = { ctx, hard }: the worker's context now and the hard limit
+// (0 or absent: no limit is named).
+export function subagentNoticeText(kinds, threshold, variant = 'writer', info = {}) {
   if (!kinds.includes('size')) {
     return '[agent-companion] You compacted; re-read only what the next step needs and continue.';
   }
-  const what = kinds.includes('compaction')
-    ? 'You just compacted'
-    : `Your context is past ${fmtTokens(threshold)} tokens`;
+  const ctx = Number.isFinite(info.ctx) ? info.ctx : threshold;
+  const hard = Number(info.hard) > 0 ? Number(info.hard) : 0;
+  const lead = `[agent-companion] ${kinds.includes('compaction') ? 'You just compacted. ' : ''}Context at ${kTokens(ctx)}${hard ? `, limit ${kTokens(hard)}` : ''}: finish the current step, `;
   if (variant === 'readonly') {
-    return `[agent-companion] ${what}. Finish the current step, write your findings so far to your detail file (or the plan file your brief names), and return them with what is left. You edit nothing in the repo, so there is nothing to hand off but the findings.`;
+    return `${lead}write your findings so far to your detail file (or the plan file your brief names) and return them with what is left; you edit nothing in the repo, so there is nothing to hand off but the findings.`;
   }
-  return `[agent-companion] ${what}. Finish the current step, commit and push your WIP, write <task>-handoff.md (done / left / first next action), and return "${HANDOFF_RETURN}".`;
+  return `${lead}commit and push any work in progress to your branch, write a handoff file <task>-handoff.md next to your detail file (${HANDOFF_FIELDS}), then end with "${HANDOFF_RETURN}".`;
 }

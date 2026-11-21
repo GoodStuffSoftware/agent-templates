@@ -279,7 +279,7 @@ test('the existing compaction/size notice is unchanged and combines with the cei
     const { lead, agentFile } = layout(fx);
     writeFileSync(agentFile, user('go') + turn('r1', 320000));
     const both = ctxText(run(lead, { ...ON, CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' }));
-    assert.match(both, /Your context is past 300,000 tokens/);
+    assert.match(both, /Context at 320K: finish the current step/);
     assert.match(both, /Handoff checkpoint/);
     // Ceiling not yet active: only the original text, byte for byte.
     const fx2 = makeFixture();
@@ -287,7 +287,7 @@ test('the existing compaction/size notice is unchanged and combines with the cei
       const l2 = layout(fx2);
       writeFileSync(l2.agentFile, user('go') + turn('r1', 320000));
       const only = ctxText(run(l2.lead, { ...ON, AGENT_COMPANION_FAKE_NOW: '2026-10-01T00:00:00Z', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' }));
-      assert.equal(only, '[agent-companion] Your context is past 300,000 tokens. Finish the current step, commit and push your WIP, write <task>-handoff.md (done / left / first next action), and return "DONE: partial, handoff at <path>".');
+      assert.equal(only, '[agent-companion] Context at 320K: finish the current step, commit and push any work in progress to your branch, write a handoff file <task>-handoff.md next to your detail file (done, remaining, files touched, branch and sha, the exact next step), then end with "DONE: partial, handoff at <path>".');
     } finally { fx2.cleanup(); }
   } finally { fx.cleanup(); }
 });
@@ -362,7 +362,7 @@ test('the 300K size notice still fires for a low rung, unchanged', () => {
     const { lead, agentFile } = layout(fx);
     writeFileSync(agentFile, user('go') + turn('r1', 320000));
     const out = ctxText(run(lead, { ...ON, CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' }, { agent_type: 'ac-haiku' }));
-    assert.equal(out, '[agent-companion] Your context is past 300,000 tokens. Finish the current step, commit and push your WIP, write <task>-handoff.md (done / left / first next action), and return "DONE: partial, handoff at <path>".');
+    assert.equal(out, '[agent-companion] Context at 320K: finish the current step, commit and push any work in progress to your branch, write a handoff file <task>-handoff.md next to your detail file (done, remaining, files touched, branch and sha, the exact next step), then end with "DONE: partial, handoff at <path>".');
     assert.equal(existsSync(join(telemetryDir(), 'context-ceiling.jsonl')), false);
   } finally { fx.cleanup(); }
 });

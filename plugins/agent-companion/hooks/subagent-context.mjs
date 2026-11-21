@@ -16,6 +16,12 @@
 // is set). Gated by the rollout schedule; reuses the
 // transcript reading below, so it adds no read. Advice only, never a deny.
 //
+// The WORKER HANDOFF LIMITS (0.31.60, lib/handoff-limit.mjs) ride on the same reading: the size notice above is the soft limit and
+// repeats every subagent_context_notice_repeat_tokens (15000) while the context keeps growing; at subagent_context_hard_tokens (150000) this
+// hook DENIES every call except the handoff itself (Write, Edit or Read of a file whose name contains "handoff"; Bash that is only git add,
+// commit, push, status, diff or log). Switch subagent_handoff_limits, exemptions subagent_handoff_exempt_types; rows in handoff-limit.jsonl.
+// Like the step-budget deny below, this is a deny only on that setting (on by default), and every error fails open.
+//
 // The STEP BUDGET rides on the same hook (lib/step-budget.mjs). Since 0.31.50 it is not a cap by default: a brief with no `BUDGET: <n>` line
 // gets no step note; a brief with one gets a single checkpoint note at n (worded as a progress marker). Only with step_budget_deny on
 // (opt-in, default off) does the old cap return: the warning at 80% of the stop and a DENY of every call but a report or detail write past
@@ -44,6 +50,7 @@ import {
 import {
   CEILING_DEFAULT_TOKENS, CEILING_REPEAT_DEFAULT_TOKENS, CEILING_LOG, ceilingCheck,
 } from './lib/context-ceiling.mjs';
+import { HANDOFF_LOG, handoffConfig, handoffActive, noteFirst, repeatDue, hardCheck, handoffRow, denyText, noteDeny, clearDeny, streakPrefix } from './lib/handoff-limit.mjs';
 import { STEP_LOG, stepBudgetCheck, readBrief } from './lib/step-budget.mjs';
 import { longRunCheck, logLongRun } from './lib/long-run.mjs';
 import { allowanceNote, allowanceWatch } from './lib/plan-allowance.mjs';
@@ -55,11 +62,16 @@ try {
   const ceiling = opt('subagent_ceiling_tokens', CEILING_DEFAULT_TOKENS);
   const repeat = opt('subagent_ceiling_repeat_tokens', CEILING_REPEAT_DEFAULT_TOKENS);
   const stepsOn = opt('step_budget', true);
+  const hcfg = handoffConfig(threshold);
+  const handoffOn = handoffActive(hcfg, p.agent_type); // false: switch off or an exempt agent type; the compaction note is unaffected
 
   const path = resolveAgentTranscript(p);
-  const wantCtx = threshold > 0 || ceiling > 0 || stepsOn; // the step budget counts compactions itself
+  const wantCtx = threshold > 0 || ceiling > 0 || stepsOn || (handoffOn && hcfg.hard > 0); // the step budget counts compactions itself
   const sig = wantCtx ? readContextSignal(path) : null;
-  const kinds = threshold > 0 ? claimSignals(p.agent_id, sig, threshold, { fresh: true }) : [];
+  const sizeLine = handoffOn ? threshold : 0;
+  const kinds = threshold > 0 ? claimSignals(p.agent_id, sig, sizeLine, { fresh: true }) : [];
+  const repeatNote = handoffOn && sizeLine > 0 && sig && !kinds.includes('size') && !(sig.boundary && sig.turnsAfterBoundary === 0)
+    && repeatDue(p.agent_id, sig.ctx, sizeLine, hcfg.repeat);
   const nudge = ceilingCheck(p, sig, { ceiling, repeat });
 
   const at = new Date().toISOString();
@@ -73,7 +85,18 @@ try {
     recordEvent(p.agent_id, row);
   }
   if (nudge) appendLog(CEILING_LOG, nudge.row);
-  if (kinds.length || nudge) pruneContextState();
+  if (kinds.includes('size')) { noteFirst(p.agent_id, sig.ctx); appendLog(HANDOFF_LOG, handoffRow(p, sig, 'soft', 'notice', sizeLine)); }
+  if (repeatNote) appendLog(HANDOFF_LOG, handoffRow(p, sig, 'soft', 'repeat', sizeLine));
+  if (kinds.length || nudge || repeatNote) pruneContextState();
+
+  // The hard limit: past it, only the handoff itself goes through (lib/handoff-limit.mjs allowedAtHard).
+  const hard = hardCheck(p, sig, { ...hcfg, on: handoffOn });
+  if (hard) {
+    appendLog(HANDOFF_LOG, hard.row);
+    recordDenial('handoff-hard-limit', p, `${p.tool_name} at ${sig.ctx} tokens, limit ${hcfg.hard}`);
+    deny(streakPrefix(noteDeny(p.agent_id)) + denyText(sig.ctx, hcfg.hard, noticeVariant(readBrief(path), p.agent_type), hard.why));
+  }
+  if (handoffOn && sig && hcfg.hard > 0 && sig.ctx >= hcfg.hard) clearDeny(p.agent_id); // a call the limit let through ends the streak
 
   // The soft long-run note: at 150 tool calls and every further 100, once. Never denies; counted before the step
   // budget so a call that budget denies is still counted.
@@ -99,7 +122,9 @@ try {
   const allowance = planOn ? allowanceNote(p, { transcript: path, sig, noticePct }) : null;
   const nearLimit = planOn && noticePct > 0 ? allowanceWatch(p, { noticePct }) : null;
 
-  const text = [kinds.length ? subagentNoticeText(kinds, threshold, kinds.includes('size') ? noticeVariant(readBrief(path), p.agent_type) : 'writer') : '', nudge ? nudge.text : '', step ? step.warn : '', longRun ? longRun.text : '', allowance || '', nearLimit || '']
+  const variant = (kinds.includes('size') || repeatNote) ? noticeVariant(readBrief(path), p.agent_type) : 'writer';
+  const info = { ctx: sig ? sig.ctx : undefined, hard: handoffOn ? hcfg.hard : 0 };
+  const text = [kinds.length ? subagentNoticeText(kinds, threshold, variant, info) : '', repeatNote ? subagentNoticeText(['size'], threshold, variant, info) : '', nudge ? nudge.text : '', step ? step.warn : '', longRun ? longRun.text : '', allowance || '', nearLimit || '']
     .filter(Boolean).join('\n');
   if (!text) passthrough();
   process.stdout.write(JSON.stringify({

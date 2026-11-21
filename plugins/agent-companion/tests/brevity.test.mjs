@@ -556,7 +556,8 @@ test('contract states the ~300 token cap and the no-interim-notice rule, within 
     assert.match(text, /final message \(max ~300 tokens\)/);
     assert.match(text, /Detail beyond that: write <task>-detail\.md/);
     assert.match(text, /No interim notices for planned background waits; only blockers and the final message wake the lead/);
-    assert.ok(text.length <= 720, `contract is ${text.length} chars`);
+    assert.match(text, /A hook will tell you when to hand off, and how\./); // 0.31.60
+    assert.ok(text.length <= 800, `contract is ${text.length} chars`); // 720 before the 0.31.60 handoff line
   } finally {
     cleanup();
   }

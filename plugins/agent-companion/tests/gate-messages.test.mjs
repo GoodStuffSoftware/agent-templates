@@ -224,7 +224,7 @@ test('subagent-context.mjs on a ~300K-token, ~64 MB subagent transcript: tail-bo
     const r = runHook('hooks/subagent-context.mjs', payload, { env: { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' } });
     const hookMs = Date.now() - t1;
     assert.equal(r.status, 0);
-    assert.match(r.json.hookSpecificOutput.additionalContext, /past 300,000 tokens/);
+    assert.match(r.json.hookSpecificOutput.additionalContext, /Context at 310K: finish the current step/);
     assert.ok(hookMs < 2500, `the hook took ${hookMs} ms (limit 5000) on a ${Math.round(size / 1048576)} MB transcript`);
 
     // The steady state, which is nearly every call: nothing to say.

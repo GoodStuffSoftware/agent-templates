@@ -439,6 +439,23 @@ Written by `hooks/subagent-context.mjs` each time it tells a sonnet/high-or-abov
 | `rung_class` | string | `sonnet-high+` or `opus` |
 | `ceiling`, `repeat` | number | the two thresholds as set |
 
+### `handoff-limit.jsonl` — one record per handoff notice, repeat, hard deny and end-of-run request (0.31.60)
+
+Written by `hooks/subagent-context.mjs` (and, for `end-block`, `hooks/runaway-check.mjs`) for the worker handoff limits (README, "Worker handoff"). Subagents only; never the lead. No rows while `subagent_handoff_limits` is off.
+
+| field | type | meaning |
+|---|---|---|
+| `v` | number | schema version |
+| `at` | string | UTC time (ISO 8601) |
+| `session_id` | string | the lead's session |
+| `agent_id`, `agent_type` | string | the subagent and its type |
+| `model` | string or null | model of its latest request |
+| `tokens` | number | its context size at that request (input + cache read + cache write) |
+| `limit` | string | `soft` or `hard` |
+| `limit_tokens` | number | that limit as set |
+| `action` | string | `notice` (first soft notice), `repeat` (a later one, every +`subagent_context_notice_repeat_tokens`), `deny` (hard limit, with `tool`), `end-block` (the one end-of-run request to write the handoff) |
+| `tool` | string | only on `deny`: the tool that was denied |
+
 ### `long-runs.jsonl` (in `state/`, not `telemetry/`) — one record per long-run crossing, plus one summary per ended long run
 
 Written by `hooks/lib/long-run.mjs` when a subagent's tool-call count first reaches 150 and each further 100. It is a record, not a cap: nothing is stopped. Fields: `ts` (ISO), `sessionId`, `agentId`, `agentType` (string or null), `steps` (number), `startedAt` (ISO or null, the transcript's first timestamp), `durationMin` (number or null), `description` (first line of the brief, or null), `transcriptPath` (string or null). The lead session is told once per crossing from this log (the `Long run: ...` line, never shown to the worker).

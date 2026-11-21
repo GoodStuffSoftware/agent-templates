@@ -29,6 +29,7 @@ import { stateDir, modelTiers } from './context.mjs';
 import { claimOnce } from './subagent-context.mjs';
 import { readBrief, briefAllowanceOnly, briefStepInfo } from './step-budget.mjs';
 import { safe } from './runaway.mjs';
+import { handoffConfig, handoffActive } from './handoff-limit.mjs';
 
 export const LONG_RUN_FIRST = 150;
 export const LONG_RUN_EVERY = 100;
@@ -143,7 +144,11 @@ export function longRunCheck(p, { transcript = null, now = new Date() } = {}) {
     const quiet = !!transcript && briefAllowanceOnly(readBrief(transcript));
     // The worker hears it once per run, at the first mark (a marker per further 100 would be a drumbeat); the lead is told at every mark.
     // The second claim keeps it to one line per run even when a call races past 150 before the exact number is seen.
-    const tell = !quiet && t === LONG_RUN_FIRST && claimOnce(`long-run-note-${p.agent_id}`);
+    // 0.31.60: not while the handoff hard limit governs this worker. "Nothing will interrupt your run" would be false there (a hard limit
+    // denies every call but the handoff), and the handoff notice already tells it what to do. The crossing is still logged.
+    const hc = handoffConfig(0);
+    const governed = hc.hard > 0 && handoffActive(hc, p.agent_type);
+    const tell = !quiet && !governed && t === LONG_RUN_FIRST && claimOnce(`long-run-note-${p.agent_id}`);
     return { text: tell ? longRunText(n) : '', row: longRunRow(p, n, transcript, now) };
   } catch {
     return null;
