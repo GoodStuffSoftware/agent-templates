@@ -221,13 +221,26 @@ test('effort fit: a Rung: reason, policy off, policy warn, and a rung below the 
   assert.notEqual(below.ui?.subagent_type, 'agent-companion:ac-sonnet-medium');
 });
 
-test('lookup routing: a declared ROLE: lookup under TYPE research routes as TYPE lookup; an inserted role does not', () => {
+test('lookup routing: the default (warn) only logs; rewrite re-routes a declared ROLE: lookup under TYPE research; an inserted role never does', () => {
   const med = { subagent_type: 'agent-companion:ac-sonnet-medium', model: 'sonnet', name: 'w', run_in_background: true };
-  const r = spawn({ ...med, prompt: 'TYPE: research\nROLE: lookup\nfind where x is defined' }, { started: RUNGS });
+  const brief = 'TYPE: research\nROLE: lookup\nfind where x is defined';
+  const dflt = spawn({ ...med, prompt: brief }, { started: RUNGS });
+  assert.notEqual(dflt.ui?.subagent_type, 'agent-companion:ac-haiku', 'warn: no rewrite');
+  assert.equal(dflt.out.permissionDecision, undefined, 'warn never denies');
+  assert.doesNotMatch(`${dflt.msg}${dflt.ctx}`, /effort fit|over-provisioned/i, 'warn is log only: no note');
+  assert.ok(dflt.row.silent_fixes.some((x) => x.startsWith('lookup_role_logged:')), 'logged');
+  assert.ok(!dflt.row.silent_fixes.some((x) => x.startsWith('lookup_role_rewrite:')));
+  const REW = { CLAUDE_PLUGIN_OPTION_LOOKUP_ROLE_POLICY: 'rewrite' };
+  const r = spawn({ ...med, prompt: brief }, { started: RUNGS, env: REW });
   assert.equal(r.ui?.subagent_type, 'agent-companion:ac-haiku');
-  assert.ok(r.row.silent_fixes.some((s) => s.startsWith('lookup_role_rewrite:')));
-  const plain = spawn({ ...med, prompt: 'TYPE: research\nread x and summarise' }, { started: RUNGS });
+  assert.ok(r.row.silent_fixes.some((x) => x.startsWith('lookup_role_rewrite:')));
+  const off = spawn({ ...med, prompt: brief }, { started: RUNGS, env: { CLAUDE_PLUGIN_OPTION_LOOKUP_ROLE_POLICY: 'off' } });
+  assert.notEqual(off.ui?.subagent_type, 'agent-companion:ac-haiku');
+  assert.ok(!(off.row.silent_fixes || []).some((x) => x.startsWith('lookup_role_')), 'off: nothing logged');
+  const plain = spawn({ ...med, prompt: 'TYPE: research\nread x and summarise' }, { started: RUNGS, env: REW });
   assert.notEqual(plain.ui?.subagent_type, 'agent-companion:ac-haiku', 'no ROLE line: the guard-inserted lookup role never re-routes');
-  const stated = spawn({ ...med, prompt: 'Rung: needs judgement\nTYPE: research\nROLE: lookup\nfind x' }, { started: RUNGS });
+  const stated = spawn({ ...med, prompt: `Rung: needs judgement\n${brief}` }, { started: RUNGS, env: REW });
   assert.notEqual(stated.ui?.subagent_type, 'agent-companion:ac-haiku');
+  const effOff = spawn({ ...med, prompt: brief }, { started: RUNGS, env: { ...REW, CLAUDE_PLUGIN_OPTION_EFFORT_FIT_POLICY: 'off' } });
+  assert.equal(effOff.ui?.subagent_type, 'agent-companion:ac-haiku', 'effort_fit_policy off does not switch lookup routing off');
 });

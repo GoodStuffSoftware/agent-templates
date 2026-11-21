@@ -144,8 +144,8 @@ export async function finishSpawn({
     // Logged only for a ladder rung (silent_fixes: fit_under_logged, and fit in the row). Any other
     // agent type still says it out loud: a weight-4 task on haiku is the failure that ships wrong code.
     note =`agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is under-provisioned — ${fit.reason}${routeLayerNote}. ${fit.action}.`;
-  } else if (fit?.verdict === 'over' && fit.soft && opt('effort_fit_policy', 'rewrite') === 'warn') {
-    note = `agent-companion (effort fit): spawning ${who} at ${model}${def?.effort ? '/' + def.effort : ''} runs above the table's ${fit.expected.model}${fit.expected.effort ? '/' + fit.expected.effort : ''}${fit.soft === 'lookup' ? ' (ROLE: lookup routes as TYPE lookup)' : ''}: ${fit.reason}. Spawn the table's rung, or add a line "Rung: <why>" to the brief. Not blocking.`;
+  } else if (fit?.verdict === 'over' && fit.soft === 'effort' && opt('effort_fit_policy', 'rewrite') === 'warn') {
+    note = `agent-companion (effort fit): spawning ${who} at ${model}${def?.effort ? '/' + def.effort : ''} runs above the table's ${fit.expected.model}${fit.expected.effort ? '/' + fit.expected.effort : ''}: ${fit.reason}. Spawn the table's rung, or add a line "Rung: <why>" to the brief. Not blocking.`;
   } else if (fit?.verdict === 'over' && !fit.soft && !isPremiumForSpawn && !typeReqIsRung) {
     note = `agent-companion: spawning ${who} at ${model} for declared weight ${declaredWeight} is over-provisioned — ${fit.reason}; the table says ${routeLabel}${routeLayerNote}. Re-spawn there unless the weight is understated.`;
   }

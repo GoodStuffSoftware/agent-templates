@@ -25,15 +25,18 @@ export function fitAndParity({
   // its warrant's weight was DENIED with an empty route in the message
   // ("TYPE: code-review" + "WARRANT: weight 4 — ..." on opus, 0.29.18).
   const gridYardstick = declaredWeight !== null && !(typeIsParity && !weightLineExplicit);
-  // Effort fit and lookup routing (0.31.61, option effort_fit_policy: rewrite | warn | off; usage audit 2026-11-21).
-  // A rung one effort step above the table, or a spawn that DECLARES ROLE: lookup under another TYPE, is judged
-  // against the table's rung (the lookup route, when it is cheaper than the TYPE's own). A `Rung: <reason>` line opts out.
+  // Effort fit and lookup routing (0.31.61; usage audit 2026-11-21).
+  // effort_fit_policy (rewrite | warn | off): a rung one effort step above the table is rewritten, noted or left.
+  // lookup_role_policy (warn | rewrite | off): a spawn that DECLARES ROLE: lookup under another TYPE is judged against the
+  // lookup route (when cheaper than the TYPE's own). warn (default) only logs `lookup_role_logged`; the rewrite is held until
+  // a quality check of haiku on research-style lookups. A `Rung: <reason>` line opts out of both.
   // Only a ROLE line the brief itself carries counts (declaredRole), never the role the guard inserts for a missing one.
   const effortPolicy = String(opt('effort_fit_policy', 'rewrite')).toLowerCase();
+  const lookupPolicy = String(opt('lookup_role_policy', 'warn')).toLowerCase();
   const rungDeclared = !!(decls.RUNG && String(decls.RUNG.rest || '').replace(/[\s*_`]/g, ''));
   let fitRoute = route;
   let lookupRouted = false;
-  if (effortPolicy !== 'off' && declaredRole === 'lookup' && !rungDeclared && route && !typeIsParity && !pinned
+  if (lookupPolicy !== 'off' && declaredRole === 'lookup' && !rungDeclared && route && !typeIsParity && !pinned
     && !['lookup', 'explore'].includes(String(declaredType || ''))) {
     try {
       const rk = (r) => classifyModel(r.model).rank * 10 + classifyEffort(r.effort || 'low').rank;
@@ -61,6 +64,7 @@ export function fitAndParity({
   // One step of effort (or a lookup re-route) is a soft over: rewritten or noted, never denied.
   if (fit && fit.verdict === 'over' && (lookupRouted || (fit.effortOnly && fit.effortDelta < 2))) {
     fit = rungDeclared && fit.effortOnly ? { ...fit, verdict: 'fit', statedRung: true } : { ...fit, soft: lookupRouted ? 'lookup' : 'effort' };
+    if (fit.soft === 'lookup' && lookupPolicy !== 'rewrite') silentFixes.push(`lookup_role_logged:${fitRoute.model}/${fitRoute.effort || ''}`);
   }
 
   // F1 on a critical parity-sized spawn (see parityFloor above): under only. Judged
@@ -89,7 +93,7 @@ export function fitAndParity({
   let fitBeforeFix = null;
   if (fit?.verdict === 'over' && typeReqIsRung && !parityRoute && !pinned && !autofilled && !premiumDeclared
     && !(rewriteState && rewriteState.ignored) && fitRoute?.model && opt('fit_over_autofix', true) && opt('fit_autofill_ladder', true)
-    && (!fit.soft || effortPolicy === 'rewrite')) {
+    && (!fit.soft || (fit.soft === 'lookup' ? lookupPolicy === 'rewrite' : effortPolicy === 'rewrite'))) {
     try {
       const rung = rungFor(fitRoute.model, fitRoute.effort || null);
       const pick = rung ? ladderRewriteTarget(sid, rung.agent, p.cwd, loadedAtMs, input.subagent_type) : null;
