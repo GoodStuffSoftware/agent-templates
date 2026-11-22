@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import './isolate.mjs';
-import { existsSync, writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { resourceStatus, formatResourceStatus, isPidAlive, sweepLedger, budgetDir } from '../scripts/ci-budget.mjs';
@@ -938,8 +938,33 @@ test('a heartbeat after a clear does not put the lease back, even after 300 s', 
     resourceStatus({ ...w.opts });
     assert.equal(w.leases().length, 0, 'cleared');
     w.t += 6 * 60_000;
+    // The old orphan pass aged files by real mtime: age the tombstone's, so the 300 s rule would fire on it.
+    for (const n of w.files(/\.cleared$/)) { const old = new Date(Date.now() - 600_000); utimesSync(join(w.dir, n), old, old); }
     sweepLedger({ ...w.opts }); // the tombstone survives while pid 903 lives
     a.beat();
     assert.equal(w.leases().length, 0, 'not resurrected');
+  } finally { w.done(); }
+});
+
+test('two concurrent sweeps of one dead lease write exactly one clears row, and only the winner reports it', async () => {
+  const w = makeWorld();
+  try {
+    await w.acq({ pid: 7777, resources: { 'app-e2e': 1 }, label: 'doomed' });
+    w.dead.add(7777);
+    // Process B has read the entry and asks whether its pid lives; at that moment process A sweeps the same entry first.
+    let raced = false;
+    const optsB = {
+      ...w.opts,
+      isAlive: (pid) => {
+        if (!raced) { raced = true; sweepLedger({ ...w.opts }); }
+        return !w.dead.has(pid);
+      },
+    };
+    const reclaimedB = sweepLedger(optsB);
+    assert.equal(raced, true, 'the race happened');
+    assert.equal(w.clears().length, 1, 'one row, not one per sweeper');
+    assert.equal(w.clears()[0].rule, 'pid-dead');
+    assert.equal(reclaimedB.length, 0, 'the loser reports nothing');
+    assert.equal(w.leases().length, 0);
   } finally { w.done(); }
 });

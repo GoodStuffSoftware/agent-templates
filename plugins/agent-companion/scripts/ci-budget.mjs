@@ -404,14 +404,18 @@ function writeAtomic(ctx, file, obj) {
   }
 }
 
-// Move aside first: of several reclaimers, only one rename succeeds.
+// Move aside first: of several reclaimers, only one rename succeeds. Returns true only for that one (this process removed
+// the entry), so a caller logs the clear once, not once per poller that saw the same stale entry.
 function dropFile(file, ...extra) {
+  let won = false;
   try {
     const aside = `${file}.stale-${newId()}`;
     renameSync(file, aside);
+    won = true;
     tryUnlink(aside);
   } catch { /* lost the race, or already gone */ }
   for (const f of extra) tryUnlink(f);
+  return won;
 }
 
 function readJson(file) {
@@ -663,10 +667,12 @@ export function readState(ctx, { reclaim = true, cheap = false } = {}) {
         staleEntries.push({ ...e, type: 'lease', stale: why });
         // A cheap sweep (status, heartbeat) never asks the process table: a stale heartbeat with a live pid is left for a full sweep.
         if (reclaim && !(cheap && why === 'heartbeat is stale')) {
-          dropFile(file, hbFile, e.actFile, liveFile);
+          const won = dropFile(file, hbFile, e.actFile, liveFile);
           endedLeases.push(e);
-          reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why });
-          noteClear(ctx, e, 'lease', ruleFor(why, 'lease'), { why, pid: e.pid });
+          if (won) { // only the process that removed it reports and logs it
+            reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why });
+            noteClear(ctx, e, 'lease', ruleFor(why, 'lease'), { why, pid: e.pid });
+          }
         }
       } else {
         // Live pid, fresh heartbeat: the config rules (max-hold, idle) may still clear it.
@@ -688,11 +694,11 @@ export function readState(ctx, { reclaim = true, cheap = false } = {}) {
         if (v && !v.keep && reclaim) {
           // The tombstone first, so the owner's heartbeat does not put the lease back.
           writeTombstone(ctx, m[1], e.pid);
-          dropFile(file, hbFile, e.actFile, liveFile);
+          const won = dropFile(file, hbFile, e.actFile, liveFile);
           endedLeases.push(e);
-          reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why: `rule ${v.rule}` });
-          noteClear(ctx, e, 'lease', v.rule, v.evidence);
-          ctx.log(v.rule === 'live-holder-ceiling'
+          if (won) reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why: `rule ${v.rule}` });
+          if (won) noteClear(ctx, e, 'lease', v.rule, v.evidence);
+          if (won) ctx.log(v.rule === 'live-holder-ceiling'
             ? `resource-queue: RELEASED the lease of LIVE pid ${e.pid} (${e.label || e.worktree}) held ${Math.round(v.evidence.heldMs / 60_000)} min, past the ${Math.round(v.evidence.ceilingMs / 60_000)} min live-holder ceiling (flagged by ${v.evidence.flaggedBy}); the process is NOT touched and may still be running. Logged in clears.jsonl as live-holder-ceiling.`
             : `resource-queue: cleared the lease of pid ${e.pid} (${e.label || e.worktree}) by rule ${v.rule}; the process is not touched.`);
         } else leases.push(e);
@@ -727,8 +733,10 @@ export function readState(ctx, { reclaim = true, cheap = false } = {}) {
       if (why) {
         staleEntries.push({ ...e, type: 'ticket', stale: why });
         if (reclaim) {
-          dropFile(file, e.pausedFile, e.passedFile); reclaimed.push({ type: 'ticket', pid: e.pid, worktree: e.worktree, why });
-          noteClear(ctx, e, 'ticket', ruleFor(why, 'ticket'), { why, pid: e.pid });
+          if (dropFile(file, e.pausedFile, e.passedFile)) {
+            reclaimed.push({ type: 'ticket', pid: e.pid, worktree: e.worktree, why });
+            noteClear(ctx, e, 'ticket', ruleFor(why, 'ticket'), { why, pid: e.pid });
+          }
         }
       } else tickets.push(e);
       continue;
@@ -742,9 +750,10 @@ export function readState(ctx, { reclaim = true, cheap = false } = {}) {
       if (!rule) { reservations.push(r); continue; }
       staleEntries.push({ ...r, type: 'reservation', stale: rule });
       if (reclaim) {
-        dropFile(file, activeFile(ctx.dir, r.id));
-        reclaimed.push({ type: 'reservation', pid: r.owner.pid, worktree: '', why: rule });
-        noteReservationClear(ctx, r, rule);
+        if (dropFile(file, activeFile(ctx.dir, r.id))) {
+          reclaimed.push({ type: 'reservation', pid: r.owner.pid, worktree: '', why: rule });
+          noteReservationClear(ctx, r, rule);
+        }
       }
     }
   }
@@ -763,8 +772,9 @@ export function readState(ctx, { reclaim = true, cheap = false } = {}) {
       if (!lapseMs) continue;
       const since = Math.max(r.createdAt, last);
       if (now - since < lapseMs) continue;
-      dropFile(r.file, activeFile(ctx.dir, r.id));
+      const wonLapse = dropFile(r.file, activeFile(ctx.dir, r.id));
       reservations.splice(reservations.indexOf(r), 1);
+      if (!wonLapse) continue;
       reclaimed.push({ type: 'reservation', pid: r.owner.pid, worktree: '', why: 'reservation-idle-lapse' });
       noteReservationClear(ctx, r, 'reservation-idle-lapse', null, {
         idleMinutes: Math.round(((now - since) / 60_000) * 10) / 10, lastMatchAt: since, lapseMinutes: lapseMs / 60_000,
@@ -2038,8 +2048,8 @@ export function releaseLease(opts = {}) {
   const e = uniq[0];
   const wasAlive = ctx.isAlive(e.pid) || (e.boundPid > 0 && ctx.isAlive(e.boundPid));
   writeTombstone(ctx, e.id, e.pid);
-  dropFile(e.file, e.hbFile, e.actFile, join(ctx.dir, `lease-${e.id}.live`));
-  noteClear(ctx, e, 'lease', 'manual', {
+  const won = dropFile(e.file, e.hbFile, e.actFile, join(ctx.dir, `lease-${e.id}.live`));
+  if (won) noteClear(ctx, e, 'lease', 'manual', {
     by: 'manual', session: ctx.session || null, byPid: num(ctx.env.CLAUDE_PID) || null, wasAlive,
     heldMs: Math.max(0, ctx.now() - num(e.startedAt)), pid: e.pid,
   });
