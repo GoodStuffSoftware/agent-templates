@@ -64,6 +64,35 @@ export function removeLink(p) {
   try { lstatSync(p); return false; } catch { return true; }
 }
 
+const norm = (p) => {
+  const s = resolve(p).replace(/\\/g, '/').replace(/\/+$/, '');
+  return process.platform === 'win32' ? s.toLowerCase() : s;
+};
+
+/**
+ * The registered worktree git would act on for `arg`, found the way git finds it (a unique path suffix
+ * first, then the path itself), as { path, main, bare, locked } | null (none, or ambiguous). Asks git;
+ * never guesses from the typed text.
+ */
+export function findWorktree(arg, { cwd, dir = null, git = 'git' } = {}) {
+  const r = spawnSync(git, [...(dir ? ['-C', dir] : []), 'worktree', 'list', '--porcelain'], { cwd, encoding: 'utf8', windowsHide: true });
+  if (r.status !== 0) return null;
+  const list = [];
+  for (const block of String(r.stdout).split(/\r?\n\r?\n/)) {
+    const lines = block.split(/\r?\n/);
+    const wt = lines.find((l) => l.startsWith('worktree '));
+    if (!wt) continue;
+    list.push({ path: wt.slice(9), main: list.length === 0, bare: lines.includes('bare'), locked: lines.some((l) => l === 'locked' || l.startsWith('locked ')) });
+  }
+  const want = String(arg).replace(/\\/g, '/').replace(/\/+$/, '');
+  const bySuffix = list.filter((w) => { const p = w.path.replace(/\\/g, '/'); return p === want || p.endsWith(`/${want}`); });
+  if (bySuffix.length === 1) return bySuffix[0];
+  if (bySuffix.length > 1) return null;
+  const abs = norm(resolve(dir ? resolve(cwd, dir) : cwd, arg));
+  const byPath = list.filter((w) => norm(w.path) === abs);
+  return byPath.length === 1 ? byPath[0] : null;
+}
+
 /** Parse `[-C dir] [--force|-f]... <path>`: { dir, forces, path } or null. */
 export function parseArgs(argv) {
   let dir = null;
@@ -87,12 +116,23 @@ export function run(argv, { cwd = process.cwd(), out = (s) => process.stdout.wri
     process.stderr.write('usage: worktree-remove-safe.mjs [-C <repo>] [--force|-f] <path>\n');
     return { removed: [], status: 2 };
   }
-  const base = a.dir ? resolve(cwd, a.dir) : cwd;
-  const tree = resolve(base, a.path);
   const removed = [];
-  let isDir = false;
-  try { const st = lstatSync(tree); isDir = st.isDirectory() && !st.isSymbolicLink(); } catch { /* missing: git reports it */ }
-  if (isDir) {
+  // Unlink only what git itself would go on to remove: a registered, non-main worktree, not locked unless
+  // forced twice, and clean unless forced. Anything else goes straight to git, which refuses it with its
+  // own message and leaves the links in place.
+  const wt = findWorktree(a.path, { cwd, dir: a.dir, git });
+  let tree = null;
+  if (wt && !wt.main && !wt.bare && !(wt.locked && a.forces < 2)) {
+    try {
+      const st = lstatSync(wt.path);
+      if (st.isDirectory() && !st.isSymbolicLink()) tree = resolve(wt.path);
+    } catch { /* missing: git reports it */ }
+  }
+  if (tree && a.forces === 0) {
+    const s = spawnSync(git, ['-C', tree, 'status', '--porcelain', '--ignore-submodules=none'], { encoding: 'utf8', windowsHide: true });
+    if (s.status !== 0 || String(s.stdout).trim()) tree = null;
+  }
+  if (tree) {
     for (const link of findLinks(tree).links) {
       try { if (removeLink(link)) removed.push(relative(tree, link).replace(/\\/g, '/')); } catch (e) {
         process.stderr.write(`worktree-remove-safe: could not remove link ${link}: ${e.code ?? e.message}; not running git\n`);
