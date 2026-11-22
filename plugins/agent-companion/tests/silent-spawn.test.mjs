@@ -123,6 +123,16 @@ test('over-provisioned rung: rewritten to the routed rung with no message, the m
   assert.ok(r.row.silent_fixes.includes('fit_over_rewrite:agent-companion:ac-sonnet-high->agent-companion:ac-sonnet-low'));
 });
 
+test('over-provisioned rung: a Rung reason: line keeps a two-step over-provision unrewritten and undenied (0.31.62)', () => {
+  const base = { subagent_type: 'agent-companion:ac-sonnet-high', model: 'sonnet', name: 'w', run_in_background: true };
+  const r = spawn({ ...base, prompt: 'Rung reason: shared logic, the cheaper rung ran out of room last time\nTYPE: mechanical-edit\nrename x' }, { started: RUNGS });
+  assert.notEqual(r.ui?.subagent_type, 'agent-companion:ac-sonnet-low');
+  assert.equal(r.out.permissionDecision, undefined);
+  assert.ok(!(r.row.silent_fixes || []).some((x) => /_rewrite:/.test(x)), JSON.stringify(r.row.silent_fixes));
+  const near = spawn({ ...base, prompt: 'Rung reason:\nTYPE: mechanical-edit\nrename x' }, { started: RUNGS });
+  assert.equal(near.ui?.subagent_type, 'agent-companion:ac-sonnet-low', 'an empty reason is not a stated rung');
+});
+
 test('over-provisioned rung: the rewrite lands BEFORE the self-review block and the row, so both see the rung that runs', () => {
   // ac-opus-max does not carry the self-review protocol and a bounded-feature spawn on it is over-provisioned:
   // it runs as ac-sonnet-high (model sonnet), whose definition carries the protocol. A late rewrite would append
@@ -219,6 +229,20 @@ test('effort fit: a Rung: reason, policy off, policy warn, and a rung below the 
   assert.equal(warn.out.permissionDecision, undefined, 'warn never denies');
   const below = spawn({ ...HI, subagent_type: 'agent-companion:ac-sonnet-low', prompt: brief }, { started: RUNGS });
   assert.notEqual(below.ui?.subagent_type, 'agent-companion:ac-sonnet-medium');
+});
+
+test('effort fit: a "Rung reason:" line (plain, listed or bold) keeps the stated rung; a mid-sentence or empty one does not', () => {
+  const brief = 'TYPE: research\nROLE: other\nread x and summarise';
+  for (const line of ['Rung reason: the sources conflict', '- Rung reason: the sources conflict', '**Rung reason:** the sources conflict', 'rung reason: sources conflict']) {
+    const r = spawn({ ...HI, prompt: `${line}\n${brief}` }, { started: RUNGS });
+    assert.notEqual(r.ui?.subagent_type, 'agent-companion:ac-sonnet-medium', line);
+    assert.equal(r.out.permissionDecision, undefined, line);
+    assert.ok(!(r.row.silent_fixes || []).some((x) => x.startsWith('effort_fit_rewrite:')), line);
+  }
+  for (const line of ['We kept the Rung reason: sources conflict', 'Rung reason:', 'Rung reasons: sources conflict', 'Rung reason is that sources conflict']) {
+    const r = spawn({ ...HI, prompt: `${line}\n${brief}` }, { started: RUNGS });
+    assert.equal(r.ui?.subagent_type, 'agent-companion:ac-sonnet-medium', line);
+  }
 });
 
 test('effort fit: a parity-typed brief (a reviewer, even with a WEIGHT line) is never rewritten', () => {

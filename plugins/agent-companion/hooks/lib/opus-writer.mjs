@@ -103,6 +103,7 @@ export function opusWriterRewrite(p, input, sid) {
     const brief = String(input.prompt || '');
     if (!brief.trim()) return null;
     const decls = briefDeclarations(brief);
+    // Operator policy (2026-11-14): no Opus writers. A `Rung reason:` / `Rung:` / `PREMIUM:` line does NOT exempt this rewrite.
     const rm = declarationValue(decls, 'ROLE', `(${BRIEF_ROLES.join('|')})\\b`);
     const role = rm ? rm[1].toLowerCase() : null;
     const tm = declarationValue(decls, 'TYPE', /([a-z][a-z0-9-]*)\b/.source);
