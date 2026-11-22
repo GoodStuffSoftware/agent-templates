@@ -2,7 +2,7 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
-## Unreleased (0.31.62, leg 1: queue over-grant; leg 2: backfill, sweep, tombstone; leg 3c: gate widened; leg 4a: live capacity; leg 4b: stuck holder)
+## 0.31.62 — 2026-11-22
 
 - **Queue and live-capacity review fixes.** A held lease's live charge now ramps DOWN too: the `.use` sidecar carries a `hold` that starts at the declared size and falls at most one unit per 25 s (`rampDownPerS`), and a job with a history never charges below its expected cpu, so a quiet phase cannot take a box:8 lease to 1 and let a burst oversubscribe the box. Windows ledger move: while older copies are still on `%LOCALAPPDATA%\ci-budget`, every new lease is mirrored there as a stub (units plus heartbeat) and removed with it; rollout requirement: restart every session and update vendored copies, after which the mirror can go. `resize()` on a lease released from outside no longer writes the lease file back. Stuck detection takes its io witness from the tree's own pids, so missing io counters on an elevated child never make a holder STUCK on cpu alone. The STUCK status line under policy `release` no longer quotes the ceiling; two comments in `ci-budget.mjs` reworded for the route-readers scan.
 - **Resource gate widened (leg 3c).** The classifier now also queues `xcodebuild`, `cargo build/test/check/clippy`, `dotnet build/test/publish`, `msbuild`, `go build/test`, `pytest`, `jest`, `mvn`/`mvnw`/`mvnd`, `docker build`/`buildx`/`compose build|up`, `vite`/`quasar`/`nuxt`/`next`/`webpack` build, and npm `build` and e2e scripts. Two new classes: `build` (box 6) and `test-suite` (box 8); a user override file merges classes by id.
