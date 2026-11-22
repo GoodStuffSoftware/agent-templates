@@ -5,7 +5,7 @@
 //
 //   node api-review.mjs run --brief-file <f> --diff-ref <base>..<head> --model <alias>
 //                           [--effort <e>] --cwd <worktree> [--writer <model/effort>] [--risk low|mid|high]
-//                           [--review-file <f>] [--max-usd N] [--max-turns N] [--max-tokens N]
+//                           [--review-file <f>] [--session-id <id> --tool-use-id <id> [--branch <b>]: the spawn guard passes these so the verdict row joins the reviewer-quality readers] [--max-usd N] [--max-turns N] [--max-tokens N]
 //
 // Prints the reviewer's output (its `VERDICT:` line first) on stdout, then one path-label
 // line, books the cost under `review` in the credit ledger, and exits:
@@ -34,6 +34,7 @@ import { execFileSyncHidden } from './lib/proc.mjs';
 import { opt, appendLog } from '../hooks/lib/context.mjs';
 import { REVIEW_INSTRUCTION as INSTRUCTION } from '../hooks/lib/self-review.mjs';
 import { tierFor } from '../hooks/lib/project-tier.mjs';
+import { apiVerdictFields, recordPostPassDefect } from '../hooks/lib/review-verdict.mjs';
 import { runApi, REVIEW_SYSTEM, reviewLimits, EXIT_OK, EXIT_USAGE, EXIT_UNAVAILABLE, EXIT_FAILED } from './lib/api-run.mjs';
 import { runApiSdk, DEFAULT_SDK_VERSION } from './lib/api-sdk-run.mjs';
 
@@ -110,6 +111,18 @@ export function gitDiff(cwd, range) {
   return { stat, diff, note };
 }
 
+// The reviewer reads the files in --cwd, but the diff is of the range: a working tree that is not at the range head would show it
+// other file versions than the diff describes (0.31.63). Returns null when they match, else the reason to refuse.
+export function headMismatch(cwd, range) {
+  const git = (args) => execFileSyncHidden('git', args, { cwd, encoding: 'utf8' }).trim();
+  try {
+    const head = String(range).split(/\.{2,3}/).pop() || 'HEAD';
+    const want = git(['rev-parse', '--verify', `${head}^{commit}`]);
+    const have = git(['rev-parse', 'HEAD']);
+    return want === have ? null : `the working directory is at ${have.slice(0, 9)}, not the range head ${want.slice(0, 9)} (its Read, Grep and Glob would show other file versions than the diff)`;
+  } catch { return 'cannot resolve the range head in the working directory'; }
+}
+
 // The change risk the writer states (the table of project tiers): low, mid or high.
 export const RISKS = ['low', 'mid', 'high'];
 // Said once, after the instruction, which lets a reviewer start the project's own run command: this reviewer cannot.
@@ -153,7 +166,7 @@ function parse(argv) {
 
 export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${s}\n`), env = process.env, fetchImpl, endpoint, sleep, now, cfg, clock, sdk, loadSdk } = {}) {
   const o = parse(argv);
-  const usage = 'usage: api-review.mjs run --brief-file <f> --diff-ref <base>..<head> --model <alias> [--effort <e>] --cwd <worktree> [--writer <model/effort>] [--risk low|mid|high] [--review-file <f>] [--runner sdk|fetch] [--max-usd N] [--max-turns N] [--max-tokens N]';
+  const usage = 'usage: api-review.mjs run --brief-file <f> --diff-ref <base>..<head> --model <alias> [--effort <e>] --cwd <worktree> [--writer <model/effort>] [--risk low|mid|high] [--review-file <f>] [--session-id <id>] [--tool-use-id <id>] [--branch <b>] [--runner sdk|fetch] [--max-usd N] [--max-turns N] [--max-tokens N]';
   if (o.error || o.cmd !== 'run' || !o['brief-file'] || !o['diff-ref'] || !o.model || !o.cwd) { out(o.error || usage); return EXIT_USAGE; }
   if (o.risk !== undefined && !RISKS.includes(o.risk)) { out('risk must be low, mid or high'); return EXIT_USAGE; }
   // The numeric options are validated: a NaN would silently remove its own cap.
@@ -163,15 +176,33 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   }
   // --max-usd: 0 turns the hard stop off (as the option does); anything else that is not a number >= 0 is a usage error.
   if (o['max-usd'] !== undefined && !(o['max-usd'] !== '' && Number.isFinite(Number(o['max-usd'])) && Number(o['max-usd']) >= 0)) { out('max-usd must be a number, 0 or more (0 turns the hard stop off)'); return EXIT_USAGE; }
+  const reviewId = `rv-${randomUUID().slice(0, 8)}`; // the ledger entry's id, for api-credits.mjs record-fallback
+  // 0.31.63: one telemetry row per API review (route 'api'), the count behind the share `api-credits.mjs status` prints; the guard's route and the manual path both end here.
+  // A failed run is written with ok:false and the share leaves it out (the subagent retry counts as the review that happened). A run
+  // that ends with a verdict carries the verdict fields (review_of_tool_use_id, review_verdict, branch, writer) the reviewer-quality
+  // readers fold on, from --session-id / --tool-use-id (the guard passes them); this row is the verdict row of a routed review.
+  let briefText = '';
+  let projectTier = '';
+  const routeRow = (ok, exit, text = null) => {
+    try {
+      const row = { at: new Date().toISOString(), source: 'api-review', route: 'api', route_reason: 'api', review_id: reviewId, diff_ref: String(o['diff-ref']).slice(0, 120), model: o.model, ok, exit };
+      const v = ok && text ? apiVerdictFields({ text, brief: briefText, sid: o['session-id'], tu: o['tool-use-id'], writer: o.writer, model: o.model, effort: o.effort, risk: o.risk, projectTier, branch: o.branch }) : null;
+      if (v) Object.assign(row, v);
+      appendLog('review-verdicts.jsonl', row);
+      if (v) recordPostPassDefect(row);
+    } catch { /* telemetry never fails a review */ }
+  };
   // Read once, here, and inlined: the model's tools cannot read outside the repository.
   let brief;
-  try { brief = readFileSync(o['brief-file'], 'utf8'); } catch (e) { out(`API review failed: cannot read the brief file (${e.code || 'error'})`); return EXIT_FAILED; }
-  if (briefIsOnlyAPath(brief)) { out('API review failed: the brief file holds a file path or no text, not the lead\'s brief itself (the reviewer cannot read outside the repository); put the brief text in the file'); return EXIT_FAILED; }
+  try { brief = readFileSync(o['brief-file'], 'utf8'); } catch (e) { out(`API review failed: cannot read the brief file (${e.code || 'error'})`); routeRow(false, EXIT_FAILED); return EXIT_FAILED; }
+  briefText = brief;
+  if (briefIsOnlyAPath(brief)) { out('API review failed: the brief file holds a file path or no text, not the lead\'s brief itself (the reviewer cannot read outside the repository); put the brief text in the file'); routeRow(false, EXIT_FAILED); return EXIT_FAILED; }
+  const mismatch = headMismatch(o.cwd, o['diff-ref']);
+  if (mismatch) { out(`API review failed: ${mismatch}; use the subagent reviewer, or run this from the worktree at the range head`); routeRow(false, EXIT_FAILED); return EXIT_FAILED; }
   let d;
-  try { d = gitDiff(o.cwd, o['diff-ref']); } catch (e) { out(`API review failed: cannot read the diff ${o['diff-ref']} in ${o.cwd}`); return EXIT_FAILED; }
+  try { d = gitDiff(o.cwd, o['diff-ref']); } catch (e) { out(`API review failed: cannot read the diff ${o['diff-ref']} in ${o.cwd}`); routeRow(false, EXIT_FAILED); return EXIT_FAILED; }
   const runner = chooseRunner({ flag: o.runner, option: opt('api_review_runner', '') });
   // The ledger meta carries the stated risk and the project's tier, so the weekly report can split API reviews like the others (this path bypasses the spawn guard).
-  let projectTier = '';
   try { projectTier = tierFor(o.cwd).tier || ''; } catch { projectTier = ''; }
   const metaTail = `${o.risk ? ` risk=${o.risk}` : ''}${projectTier ? ` project_tier=${projectTier}` : ''}`;
   const meta = `review ${String(o['diff-ref']).slice(0, Math.max(0, 120 - 7 - metaTail.length))}${metaTail}`;
@@ -181,9 +212,6 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   try { limits = reviewLimits({ softRaw: opt('api_review_soft_usd', ''), hardRaw: opt('api_review_hard_usd', ''), maxUsdFlag: o['max-usd'] }); } catch (e) { out(e.message); return EXIT_USAGE; }
   const { softUsd, maxUsd, clamped } = limits;
   if (clamped) err(`API review note: ${clamped}`);
-  const reviewId = `rv-${randomUUID().slice(0, 8)}`; // the ledger entry's id, for api-credits.mjs record-fallback
-  // 0.31.63: one telemetry row per API review (route 'api'), the count behind the share `api-credits.mjs status` prints; the guard's route and the manual path both end here.
-  const routeRow = (ok, exit) => { try { appendLog('review-verdicts.jsonl', { at: new Date().toISOString(), source: 'api-review', route: 'api', route_reason: 'api', review_id: reviewId, diff_ref: String(o['diff-ref']).slice(0, 120), model: o.model, ok, exit }); } catch { /* telemetry never fails a review */ } };
   let r = null;
   if (runner === 'sdk') {
     r = await runApiSdk({
@@ -222,7 +250,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     try { writeFileSync(o['review-file'], `${text}\n`); } catch (e) { out(`API review failed: cannot write the review file (${e.code || 'error'})`); return EXIT_FAILED; }
   }
   out(text);
-  routeRow(true, EXIT_OK);
+  routeRow(true, EXIT_OK, r.text);
   return EXIT_OK;
 }
 

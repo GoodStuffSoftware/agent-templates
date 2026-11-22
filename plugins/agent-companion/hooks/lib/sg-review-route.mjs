@@ -8,21 +8,28 @@
 //
 // Passes through (the spawn runs as written, with a route_reason for the telemetry row) when:
 //   - api_review_route is off (the default), or `writers` and the caller is the lead            -> off
-//   - the brief carries `API: no` (the retry marker after a failed API run; never loops)        -> fallback
-//   - the review has no diff range in its brief (the runner needs one)                          -> no-range
+//   - the brief carries `API: no` (the retry marker after a failed API run, or a writer that     -> caller-no
+//     decided for itself; never loops)
+//   - the same brief was routed and failed in the last 30 minutes (a caller that left `API: no`  -> repeat
+//     off would loop)
+//   - the review has no diff range in its brief (the runner needs one), or two ranges compete   -> no-range | ambiguous-range
 //   - RISK is high and api_review_high is `plan` (the default), or the review runs on Opus
 //     (unless the brief says `API: opus`)                                                       -> high-risk
-//   - the governor answers plan (pace, balance, breaker, no key: fallback; alternation, cap)    -> plan-alternation | plan-cap | fallback
+//   - the governor answers plan (pace, balance, breaker, no key: governor-fallback; alternation, cap) -> plan-alternation | plan-cap | governor-fallback
 //   - the caller is itself a reviewer (the recursion deny owns that spawn)                      -> (no row fields)
-// Any error passes through (fail open). The hook never holds a key and never calls the API itself.
+// Any error passes through (reason error; fail open). The decision uses the booked ledger only (billing: null): the guard cannot wait on
+// the Admin API, so the pace cap, balance and workspace limit see booked spend (README, api_review_route).
+// Denials a routed spawn skips: finishSpawn's fit, warrant and premium-cap checks for the ORIGINAL spawn. It is an ac-haiku runner now
+// (never premium, nothing to fit), so they do not apply; the hard denials (foreground block, missing TYPE, recursion) ran before the
+// rewrite, and notePendingRouted() records the rewritten spawn for SubagentStart pairing, as finishSpawn does for every allowed spawn. The hook never holds a key and never calls the API itself.
 //
 // Hooks may call scripts/ helpers (precedent: hooks/git-brief.mjs); the governor import is dynamic and inside the try block.
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { randomUUID } from 'node:crypto';
-import { opt, stateDir } from './context.mjs';
+import { randomUUID, createHash } from 'node:crypto';
+import { opt, stateDir, telemetryDir, tailRecords } from './context.mjs';
 import { declarationValue } from './brief-directives.mjs';
 import { isParityType } from './self-review.mjs';
 
@@ -30,7 +37,7 @@ const PLUGIN_ROOT = (() => {
   try { return join(dirname(fileURLToPath(import.meta.url)), '..', '..').replace(/\\/g, '/'); } catch { return '.'; }
 })();
 
-const RANGE = /(?:^|[\s`'"(=])((?!\.)[\w./~^@{}-]+\.{2,3}(?!\.)[\w./~^@{}-]+)/;
+const RANGE_G = /(?:^|[\s`'"(=])((?!\.)[\w./~^@{}-]+\.{2,3}(?!\.)[\w./~^@{}-]+)/g;
 const q = (s) => `"${String(s).replace(/"/g, '\\"')}"`;
 
 // The `API:` marker line of a brief: `no` (do not route) or `opus` (an Opus review may be routed).
@@ -39,9 +46,51 @@ export function apiMarker(brief) {
   return m ? m[1].toLowerCase() : null;
 }
 
-export function diffRangeOf(brief) {
-  const m = RANGE.exec(String(brief || ''));
-  return m ? m[1].replace(/\.+$/, '') : null; // a sentence-ending period is not part of the ref
+// The range the brief means: tokens on a line that names the review's range (`Diff:`, `diff range`, `range`) win over the same shape
+// anywhere else (a tag range in prose, `tests...pass`); two different candidates at the winning level are ambiguous (no route).
+export function diffRangeInfo(brief) {
+  const tokens = (text) => [...new Set([...String(text).matchAll(RANGE_G)].map((m) => m[1].replace(/\.+$/, '')))]; // a sentence-ending period is not part of the ref
+  const lines = String(brief || '').split(/\r?\n/);
+  const labelled = tokens(lines.filter((l) => /\b(?:diff|range)\b/i.test(l)).join('\n'));
+  const found = labelled.length ? labelled : tokens(lines.join('\n'));
+  if (found.length > 1) return { range: null, ambiguous: true };
+  return { range: found[0] || null, ambiguous: false };
+}
+export function diffRangeOf(brief) { return diffRangeInfo(brief).range; }
+
+// A short stable hash of the brief text: the repeat guard's key (api-review.mjs writes it on its failed rows).
+export function briefHash(brief) { return createHash('sha1').update(String(brief || '')).digest('hex').slice(0, 16); }
+
+const REPEAT_WINDOW_MS = 30 * 60000;
+const PRUNE_AFTER_MS = 7 * 86400000;
+// Did the API runner already fail on this very brief in the last 30 minutes? (A caller that left `API: no` off would loop.)
+function failedRecently(hash, file, now) {
+  try {
+    return tailRecords(file, { bytes: 1024 * 1024, filter: (l) => l.includes(hash) })
+      .some((r) => r && r.source === 'api-review' && r.ok === false && r.brief_hash === hash && now - Date.parse(r.at) <= REPEAT_WINDOW_MS);
+  } catch { return false; }
+}
+// Brief and review files older than 7 days (the full brief text is kept on disk for the runner and the relay).
+function pruneBriefs(dir, now) {
+  try {
+    for (const n of readdirSync(dir)) {
+      const f = join(dir, n);
+      try { if (now - statSync(f).mtimeMs > PRUNE_AFTER_MS) rmSync(f, { force: true }); } catch { /* best effort */ }
+    }
+  } catch { /* none yet */ }
+}
+
+// A routed spawn still joins the session's pending list (what finishSpawn's notePending does for every allowed spawn), as the
+// ac-haiku run it now is, so SubagentStart pairs the start with this spawn and consumes no other spawn's entry.
+export async function notePendingRouted({ input, sid, isCanary, rewriteState, rewriteModule }) {
+  try {
+    if (isCanary || (input && input.team_name)) return;
+    if (rewriteState && rewriteState.ignored) return;
+    const armed = !!rewriteState && (typeof rewriteState.armedAt === 'number' || rewriteState.pending.length > 0);
+    if (!armed) return;
+    const { notePendingSpawn } = await rewriteModule();
+    notePendingSpawn(sid, { type: 'agent-companion:ac-haiku', from: (input && input.subagent_type) || 'general-purpose', rewrite: false, arm: false });
+  } catch { /* fail open */ }
 }
 
 function worktreeOf(brief, fallback) {
@@ -56,8 +105,9 @@ function writerOf(decls) {
 }
 
 // The ac-haiku prompt that runs the API review and hands its stdout back unchanged.
-export function runnerPrompt({ briefFile, reviewFile, range, writer, risk, cwd, reviewModel = 'sonnet', reviewEffort = 'high' }) {
-  const cmd = `node ${q(`${PLUGIN_ROOT}/scripts/api-review.mjs`)} run --brief-file ${q(briefFile)} --diff-ref ${q(range)} --model ${reviewModel} --effort ${reviewEffort}${writer ? ` --writer ${writer}` : ''}${risk ? ` --risk ${risk}` : ''} --review-file ${q(reviewFile)} --cwd ${q(cwd)}`;
+export function runnerPrompt({ briefFile, reviewFile, range, writer, risk, cwd, sid, tu, reviewModel = 'sonnet', reviewEffort = 'high' }) {
+  // --session-id and --tool-use-id are the ORIGINAL spawn's: the runner writes them on its verdict row so the reviewer-quality readers join it.
+  const cmd = `node ${q(`${PLUGIN_ROOT}/scripts/api-review.mjs`)} run --brief-file ${q(briefFile)} --diff-ref ${q(range)} --model ${reviewModel} --effort ${reviewEffort}${writer ? ` --writer ${writer}` : ''}${risk ? ` --risk ${risk}` : ''}${sid && tu ? ` --session-id ${q(sid)} --tool-use-id ${q(tu)}` : ''} --review-file ${q(reviewFile)} --cwd ${q(cwd)}`;
   return [
     'TYPE: operate',
     'ROLE: other',
@@ -68,7 +118,7 @@ export function runnerPrompt({ briefFile, reviewFile, range, writer, risk, cwd, 
     '',
     `   ${cmd}`,
     '',
-    '2. When it finishes, if the exit code is 0, reply with its stdout exactly as printed, nothing added or removed (it starts with a review and has a VERDICT line).',
+    `2. When it finishes, if the exit code is 0, reply with its stdout exactly as printed, nothing added or removed from it (it starts with a review and has a VERDICT line), then add one last line: (full review file: ${reviewFile})`,
     '3. If the exit code is nonzero (stdout starts `API review unavailable` or `API review failed`): when the stdout ends with `(review id: <id>)`, first run',
     `   node ${q(`${PLUGIN_ROOT}/scripts/api-credits.mjs`)} record-fallback <id> --reason "<the reason printed>"`,
     '   then reply with exactly this sentence and nothing else: API review failed; spawn the review again with the line `API: no` added to the brief.',

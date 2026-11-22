@@ -505,7 +505,7 @@ export function status({ now = Date.now(), cfg = loadConfig(), path = ledgerPath
 
 // The API share of all reviews (0.31.63), from telemetry/review-verdicts.jsonl. An API review counts once, by the row api-review.mjs
 // writes on exit (source "api-review"); every other row counts as a subagent review unless it says route "api" (the verdict row of a
-// guard-routed review, which the api-review row already counts). Rows without a route (older ones) are subagent reviews.
+// guard-routed review, which the api-review row already counts). An api-review row with ok:false (a failed run, retried as a subagent) is not counted: the retry is the one review that happened. The denominator is reviews with a verdict: API reviews that finished plus subagent reviews with a parsed verdict line. Rows without a route (older ones) are subagent reviews.
 export function reviewShareLines({ now = Date.now(), file = join(telemetryDir(), 'review-verdicts.jsonl') } = {}) {
   const day = new Date(now).toISOString().slice(0, 10);
   const weekAgo = now - 7 * 86400000;
@@ -515,6 +515,7 @@ export function reviewShareLines({ now = Date.now(), file = join(telemetryDir(),
       const at = Date.parse(r && r.at);
       if (!Number.isFinite(at) || at < weekAgo || at > now + 60000) continue;
       const isApi = r.source === 'api-review';
+      if (isApi && r.ok === false) continue; // a failed run: the review is redone on a subagent, whose verdict row counts it
       if (!isApi && r.route === 'api') continue;
       for (const [k, on] of [['today', String(r.at).slice(0, 10) === day], ['week', true]]) { if (!on) continue; t[k].all++; if (isApi) t[k].api++; }
     }

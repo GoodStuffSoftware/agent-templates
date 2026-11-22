@@ -203,7 +203,7 @@ const nonEmptyStr = (x) => typeof x === 'string' && x.length > 0;
 // After a FIX or BLOCK row on a branch: find the most recent earlier PASS row on that branch (within
 // 7 days, any session) that has no outcome row yet, and append one marking a defect found after PASS.
 // No git, no child process; bounded tail reads. Fails open.
-function recordPostPassDefect(fixRow) {
+export function recordPostPassDefect(fixRow) {
   try {
     if (!fixRow.reviewed_branch || (fixRow.review_verdict !== 'FIX' && fixRow.review_verdict !== 'BLOCK')) return null;
     const sid = fixRow.session_id;
@@ -231,6 +231,33 @@ function recordPostPassDefect(fixRow) {
     };
     appendLog('review-outcomes.jsonl', row);
     return row;
+  } catch { return null; }
+}
+
+// The verdict fields of an API review (0.31.63), merged into the api-review exit row so the readers that fold review-verdicts.jsonl on
+// session_id + review_of_tool_use_id (decision-register, usage/telemetry, the post-pass-defect pass) count it. A guard-routed review's
+// PostToolUse sees the rewritten operate prompt and writes no row of its own, so this is the one row. Null when no verdict line parses.
+export function apiVerdictFields({ text, brief, sid, tu, writer, model, effort, risk, projectTier, branch }) {
+  try {
+    const pv = parseVerdict(text);
+    if (!pv) return null;
+    const [wm, we] = String(writer || '').split('/');
+    return {
+      session_id: sid || null,
+      review_of_tool_use_id: tu || null,
+      review_verdict: pv.verdict,
+      review_verdict_raw: pv.raw,
+      declared_type: 'code-review',
+      declared_role: 'reviewer',
+      reviewer_model: model || null,
+      reviewer_effort: effort || null,
+      declared_risk: risk || null,
+      project_tier: projectTier || null,
+      reviewed_model: wm || null,
+      reviewed_effort: we || null,
+      reviewed_branch: branch || branchOf(brief),
+      post_pass_defect: null,
+    };
   } catch { return null; }
 }
 
