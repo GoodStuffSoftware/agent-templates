@@ -2,7 +2,7 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
-## 0.31.63 — unreleased
+## 0.31.63 — 2026-11-22
 
 - **The spawn guard routes reviews to the API credits (options `api_review_route` off|writers|all, `api_review_high` plan|api).** A review spawn (a parity TYPE) with a diff range in its brief is decided by the credit governor inside the guard and, on `api`, rewritten into an `ac-haiku` run of `api-review.mjs` (the original brief kept in `state/review-briefs/`); RISK high, an Opus review, `API: no`, no or two competing diff ranges, a brief whose API run failed in the last 30 minutes, a reviewer's own spawn and any error pass through as written. `decide --peek` answers without advancing the alternation counter; review-verdicts rows carry `route` and `route_reason`, `api-review.mjs` writes one `route: api` row per API review, and `api-credits.mjs status` prints the API share of all reviews for today and 7 days. Default off; this environment's values are in `docs/DEFAULTS-ENVIRONMENT.md`.
 - **API review routing: review-round fixes.** A writer decides its own review once (its reviewer brief carries `API: no`, so the counter moves once per review); the routed runner refuses a worktree whose HEAD is not the range head, a failed API run writes an `ok: false` row (not counted in the share) and a successful one writes the verdict row the reviewer-quality readers fold on; a labelled range line beats a tag range in prose, two competing ranges are `ambiguous-range`; the rewritten spawn drops `isolation` and `team_name`, joins the SubagentStart pending list, and names the review file; `route_reason` is split into `caller-no`, `governor-fallback`, `error`, `repeat`; briefs older than 7 days are pruned.
