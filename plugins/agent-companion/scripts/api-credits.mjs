@@ -4,6 +4,8 @@
 //   node api-credits.mjs decide <category>              prints "api" or "plan", then one reason line (billed spend from the Admin API plus booked spend after the last complete day; "booked only, not verified against billing" without an admin key or network)
 //   node api-credits.mjs record <category> <usd> <meta> --api-key-source ANTHROPIC_API_KEY  appends spend; without the flag it is refused (exit 2, nothing booked, a line in api-credits-rejects.jsonl)
 //   node api-credits.mjs status                         spend by category, the pace, what is left, the review limits in force, then billed spend (month and cycle, by workspace, key and model), the booked figure beside it, gaps, credits left (estimate), workspace limits
+//   node api-credits.mjs credits [--json]               used this cycle (billed per workspace and model, booked not yet billed), remaining (Console balance anchor minus billed since), caps
+//   node api-credits.mjs credits anchor <usd> [--date <ISO>]  records the Console balance and its date (agent-companion state); replaces the last anchor
 //   node api-credits.mjs record-fallback <review id> [--reason <r>]  marks a review as redone on the plan (the id api-review.mjs printed)
 //   node api-credits.mjs reviews [--since <ISO date>] [--until <ISO date>]  real reviews only (no probe or measure rows): count, spend, median, stopped or fallen back
 //   node api-credits.mjs summary                        one line: "API credits: reviews $X of the review share of the budget, cycle day N"
@@ -15,6 +17,7 @@
 
 import { isMain } from './lib/is-main.mjs';
 import { CATEGORIES, decide, record, recordFallback, reviewStats, reviewSummaryLine, status, summaryLine, billingStatusLines } from './lib/api-credits.mjs';
+import { creditsView, creditsLines, readAnchor, writeAnchor } from './lib/api-credits.mjs';
 import { runApi, reviewLimitsLine } from './lib/api-run.mjs';
 import { getBilling, loadSpendConfig } from './lib/api-spend.mjs';
 import { opt } from '../hooks/lib/context.mjs';
@@ -79,6 +82,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     out(st.text + limits + '\n' + billingStatusLines(b.ok ? b.snapshot : null, { cfg, entries: (st.ledger && st.ledger.entries) || [], now, reason: b.reason || '', cacheAgeMs: b.ok ? b.ageMs : null }).join('\n'));
     return 0;
   }
+  if (cmd === 'credits') return creditsCommand(rest, { out, now, cfg, env, billing });
   if (cmd === 'summary') { out(summaryLine({ now, cfg })); return 0; }
   if (cmd === 'probe') {
     const r = await runApi({
@@ -93,8 +97,34 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     out(r.unavailable ? `API review unavailable: ${r.reason}` : `probe failed: ${r.reason}`);
     return 1;
   }
-  out('usage: api-credits.mjs decide <category> | record <category> <usd> <meta> --api-key-source ANTHROPIC_API_KEY | record-fallback <review id> [--reason <r>] | reviews [--since <date>] [--until <date>] | status | summary | probe');
+  out('usage: api-credits.mjs decide <category> | record <category> <usd> <meta> --api-key-source ANTHROPIC_API_KEY | record-fallback <review id> [--reason <r>] | reviews [--since <date>] [--until <date>] | status | credits [--json] | credits anchor <usd> [--date <ISO>] | summary | probe');
   return 2;
+}
+
+// `credits [--json]` and `credits anchor <usd> [--date <ISO>]`. The view never fails: without an admin key, or when the Admin API
+// call fails, it prints the ledger-only view with the reason in one line and exits 0. The anchor is the Console balance on a date
+// (the Admin API cannot read the balance); it is stored in the agent-companion state.
+async function creditsCommand(rest, { out, now, cfg, env, billing }) {
+  if (rest[0] === 'anchor') {
+    const di = rest.indexOf('--date');
+    const dateRaw = di >= 0 ? rest[di + 1] : null;
+    const args = rest.slice(1).filter((_, i) => di < 0 || (i + 1 !== di && i + 1 !== di + 1));
+    if (args.length !== 1 || (di >= 0 && !dateRaw)) { out('usage: api-credits.mjs credits anchor <usd> [--date <ISO date or time>]  (the balance the Console shows on that date)'); return 2; }
+    const asOf = dateRaw === null ? now : (/^\d{4}-\d{2}-\d{2}/.test(dateRaw) ? Date.parse(dateRaw) : NaN);
+    try {
+      const prev = readAnchor();
+      const a = writeAnchor(args[0], { asOf, now });
+      out(`anchored: Console balance $${a.usd.toFixed(2)} as of ${new Date(a.asOf).toISOString()}${prev ? `; replaced $${prev.usd.toFixed(2)} as of ${new Date(prev.asOf).toISOString().slice(0, 10)}` : ''}`);
+      return 0;
+    } catch (e) { out(`anchor failed: ${e.message}`); return 2; }
+  }
+  const json = rest.includes('--json');
+  let st = { text: 'ledger unreadable', ledger: {} };
+  try { st = status({ now, cfg, env }); } catch { /* the view says the ledger is unreadable */ }
+  const b = await billing();
+  const view = creditsView({ snap: b.ok ? b.snapshot : null, reason: b.reason || '', cfg, ledgerCycle: st.ledger || {}, ledgerOk: !/ledger unreadable/.test(st.text), anchor: readAnchor(), now, fetchedAgeMs: b.ok ? b.ageMs : null });
+  out(json ? JSON.stringify(view, null, 2) : creditsLines(view).join('\n'));
+  return 0;
 }
 
 if (isMain(import.meta.url)) {

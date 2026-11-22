@@ -632,3 +632,145 @@ export function billingStatusLines(snap, { cfg, entries, now, reason = '', cache
   if (Array.isArray(snap.missing) && snap.missing.length) lines.push(`not fetched: ${snap.missing.join(', ')}`);
   return lines;
 }
+
+// --- credits: used, remaining against a Console anchor, and the caps (`credits`, `credits anchor`) --------------------------
+//
+// The Admin API reports cost but not the prepaid balance (Console only). So the operator reads the balance B in the Console on a
+// date D and records it (`credits anchor`); remaining = B - billed cost since D. The anchor lives in the agent-companion state,
+// never in the repo or in operator-edited config. Pure functions: the snapshot (or null) and the ledger come from the caller.
+
+export const anchorPath = () => stateFile('api-credits-anchor.json');
+
+// { usd, asOf (ms), setAt (ms) } or null when none is stored or the file is unreadable.
+export function readAnchor(path = anchorPath()) {
+  try {
+    const j = JSON.parse(readFileSync(path, 'utf8'));
+    const asOf = Date.parse(j && j.asOf);
+    const setAt = Date.parse(j && j.setAt);
+    return j && Number.isFinite(Number(j.usd)) && Number.isFinite(asOf) ? { usd: Number(j.usd), asOf, setAt: Number.isFinite(setAt) ? setAt : asOf } : null;
+  } catch { return null; }
+}
+
+// Re-anchoring replaces the stored anchor. Throws on a bad amount or a date in the future.
+export function writeAnchor(usd, { asOf = Date.now(), now = Date.now(), path = anchorPath() } = {}) {
+  const text = String(usd ?? '').trim().replace(/^\$/, '');
+  if (!/^\d+(\.\d+)?$/.test(text)) throw new Error('the balance must be a plain dollar amount, for example 183.40');
+  const n = Number(text);
+  if (!Number.isFinite(asOf)) throw new Error('bad --date (an ISO date or time)');
+  if (asOf > now + 60000) throw new Error('--date is in the future');
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify({ v: 1, usd: n, asOf: new Date(asOf).toISOString(), setAt: new Date(now).toISOString() }, null, 2)}\n`);
+  renameSync(tmp, path);
+  return { usd: n, asOf, setAt: now };
+}
+
+// Today's pace cap for a category, as `decide` computes it (share x budget x cycle fraction + one average item).
+function paceCap(category, { cfg, cy, ledgerCycle }) {
+  const sh = cfg.shares;
+  const nonReserve = CATEGORIES.reduce((a, k) => a + (sh[k] || 0), 0) || 1;
+  const own = sh[category] || 0;
+  const share = cy.reserveReleased ? own + (sh.reserve || 0) * (own / nonReserve) : own;
+  const cnt = (ledgerCycle.n || {})[category] || 0;
+  const avg = cnt > 0 ? ((ledgerCycle.spent || {})[category] || 0) / cnt : cfg.itemEstimate;
+  return share * cfg.budget * cy.frac + avg;
+}
+
+// snap: a billing snapshot or null (ledger only; reason says why). ledgerCycle: the current cycle of the ledger ({ spent, n, entries }).
+export function creditsView({ snap = null, reason = '', cfg, ledgerCycle = {}, ledgerOk = true, anchor = null, now = Date.now(), fetchedAgeMs = null }) {
+  const cy = cycleOf(now, cfg.cycleDay);
+  const entries = Array.isArray(ledgerCycle.entries) ? ledgerCycle.entries : [];
+  const monthStart = monthStartOf(now);
+  const lc = { spent: ledgerCycle.spent || {}, n: ledgerCycle.n || {} };
+  const bookedTotal = sum(lc.spent);
+  const warnings = [];
+  if (!ledgerOk) warnings.push('the local ledger is unreadable: booked figures are missing');
+  const view = { now: iso(now), source: snap ? 'billing' : 'ledger-only', fallbackReason: snap ? null : (reason || 'billing not available'), cycle: { key: cy.key, start: iso(cy.start), end: iso(cy.end), day: Math.floor((now - cy.start) / DAY_MS) + 1, fractionElapsed: cy.frac, reserveReleased: cy.reserveReleased } };
+
+  // Used this cycle.
+  const wsRows = []; const modelRows = [];
+  let billedCycle = null; let notYetBilled; let dataRunsTo = null;
+  if (snap) {
+    const rows = (snap.cost || []).filter((r) => dayMs(r.day) >= cy.start);
+    billedCycle = billedSince(snap, cy.start);
+    for (const [id, v] of group(rows, (r) => r.ws, (r) => Number(r.usd) || 0)) {
+      const name = workspaceName(snap, id);
+      wsRows.push({ id, name, usd: v, limit: limitFor(cfg, name, id) });
+    }
+    for (const [m, v] of group(rows, (r) => model5(r.model), (r) => Number(r.usd) || 0)) modelRows.push({ model: m, usd: v });
+    notYetBilled = bookedBetween(entries, Math.max(snap.through, cy.start));
+    dataRunsTo = iso(snap.through);
+  } else notYetBilled = bookedTotal;
+  view.billed = snap ? { cycleTotal: billedCycle, throughUtc: dataRunsTo, throughNote: 'end of the last complete UTC day billed; cost data lags up to a day', cachedAgeMin: fetchedAgeMs === null ? null : Math.round(fetchedAgeMs / 60000), byWorkspace: wsRows, byModel: modelRows } : null;
+  view.booked = { cycleTotal: bookedTotal, notYetBilled, note: snap ? 'booked in the local ledger after the last complete billed day (the lag window)' : 'every booked entry counts as not yet billed (no billing data)' };
+  view.used = { combined: (snap ? billedCycle : 0) + notYetBilled };
+
+  // Remaining: anchor minus billed since the anchor's UTC day (that whole day counts, so a mid-day reading errs low).
+  view.anchor = null; view.remaining = null;
+  if (anchor) {
+    const ageDays = (now - anchor.asOf) / DAY_MS;
+    view.anchor = { usd: anchor.usd, asOf: iso(anchor.asOf), setAt: iso(anchor.setAt), ageDays: Math.round(ageDays * 10) / 10 };
+    const fromDay = Math.floor(anchor.asOf / DAY_MS) * DAY_MS;
+    let billedSinceAnchor = null; let bookedSinceAnchor; let basis;
+    if (snap) {
+      billedSinceAnchor = billedSince(snap, fromDay);
+      bookedSinceAnchor = bookedBetween(entries, Math.max(snap.through, fromDay));
+      basis = `billed since ${iso(fromDay).slice(0, 10)}`;
+      if (fromDay < snap.from) warnings.push(`the anchor (${iso(anchor.asOf).slice(0, 10)}) is before the billing window fetched (from ${iso(snap.from).slice(0, 10)}): billed since the anchor is understated, remaining is too high; re-anchor`);
+    } else { bookedSinceAnchor = bookedBetween(entries, fromDay); basis = `booked since ${iso(fromDay).slice(0, 10)} (billing not available; booked only)`; }
+    const spentSince = (billedSinceAnchor === null ? 0 : billedSinceAnchor) + bookedSinceAnchor;
+    view.remaining = { usd: anchor.usd - (billedSinceAnchor === null ? bookedSinceAnchor : billedSinceAnchor), afterBooked: anchor.usd - spentSince, basis, billedSinceAnchor, bookedNotYetBilledSinceAnchor: snap ? bookedSinceAnchor : null, bookedSinceAnchor: snap ? null : bookedSinceAnchor };
+    if (now - anchor.asOf > cy.end - cy.start) warnings.push(`the anchor is ${Math.floor(ageDays)} days old (older than one cycle): read the Console balance again and run \`credits anchor <usd>\``);
+    if (spentSince > anchor.usd) warnings.push(`spend since the anchor (${usd2(spentSince)}) exceeds the anchored balance (${usd2(anchor.usd)}): a top-up probably happened; read the Console balance again and re-anchor`);
+  }
+
+  // Caps.
+  const cats = CATEGORIES.map((k) => {
+    const sv = spendView(snap, k, { cfg, cy, entries, now });
+    const spent = sv.verified ? sv.spent : (lc.spent[k] || 0);
+    const cap = paceCap(k, { cfg, cy, ledgerCycle: lc });
+    return { category: k, share: cfg.shares[k] || 0, shareUsd: (cfg.shares[k] || 0) * cfg.budget, spent, basis: sv.verified ? 'billed + booked' : 'booked', paceCapNow: cap, usedOfPaceCap: cap > 0 ? spent / cap : null, workspace: (cfg.categoryWorkspaces || {})[k] || null };
+  });
+  const wsLimits = Object.entries(cfg.workspaceLimits || {}).map(([name, limit]) => {
+    let used; let basis;
+    if (snap) {
+      const id = /^wrkspc_/.test(name) ? name : resolveWorkspace(snap, name);
+      used = id === null ? null : billedSince(snap, monthStart, id) + bookedBetween(entries, Math.max(snap.through, monthStart), Infinity, CATEGORIES.filter((c) => resolveWorkspace(snap, (cfg.categoryWorkspaces || {})[c]) === id));
+      basis = 'billed + booked, calendar month';
+    } else {
+      used = bookedBetween(entries, monthStart, Infinity, CATEGORIES.filter((c) => String((cfg.categoryWorkspaces || {})[c] || '').toLowerCase() === name.toLowerCase()));
+      basis = 'booked only, calendar month';
+    }
+    return { workspace: name, limit, used, usedPct: used === null || !(limit > 0) ? null : used / limit, basis };
+  });
+  view.caps = { monthlyBudget: cfg.budget, reserveShare: cfg.shares.reserve || 0, reserveReleased: cy.reserveReleased, categories: cats, workspaceLimits: wsLimits };
+  view.warnings = warnings;
+  return view;
+}
+
+const pctOf = (x) => (x === null || x === undefined ? 'n/a' : `${(x * 100).toFixed(0)}%`);
+
+export function creditsLines(v) {
+  const L = [];
+  L.push(`API credits (cycle ${v.cycle.key} .. ${v.cycle.end.slice(0, 10)}, day ${v.cycle.day}, ${(v.cycle.fractionElapsed * 100).toFixed(0)}% elapsed)`);
+  if (v.source === 'ledger-only') L.push(`billing: not available (${v.fallbackReason}); showing the local ledger only, which is booked spend, not verified against billing`);
+  else L.push(`data runs to: ${v.billed.throughUtc.slice(0, 10)} 00:00Z (end of the last complete UTC day; cost data lags up to a day); fetched ${v.billed.cachedAgeMin === null || v.billed.cachedAgeMin < 2 ? 'now' : `${v.billed.cachedAgeMin} min ago`}`);
+  if (v.billed) {
+    L.push(`used this cycle, billed: ${usd2(v.billed.cycleTotal)} (Admin API cost report, list price, before credits)`);
+    L.push(`  by workspace: ${v.billed.byWorkspace.length ? v.billed.byWorkspace.map((w) => `${w.name} ${usd2(w.usd)}`).join(', ') : 'none yet'}`);
+    L.push(`  by model: ${v.billed.byModel.length ? v.billed.byModel.map((m) => `${m.model} ${usd2(m.usd)}`).join(', ') : 'none yet'}`);
+  }
+  L.push(`booked, not yet billed: ${usd2(v.booked.notYetBilled)} (${v.booked.note})`);
+  L.push(`used this cycle, combined: ${usd2(v.used.combined)}`);
+  if (v.anchor && v.remaining) {
+    L.push(`anchor: Console balance ${usd2(v.anchor.usd)} on ${v.anchor.asOf.slice(0, 16).replace('T', ' ')}Z, set ${v.anchor.setAt.slice(0, 10)} (${v.anchor.ageDays} days old)`);
+    L.push(`remaining: ${usd2(v.remaining.usd)} = anchor - ${v.remaining.basis} ${usd2(v.remaining.billedSinceAnchor === null ? v.remaining.bookedSinceAnchor : v.remaining.billedSinceAnchor)}${v.remaining.billedSinceAnchor === null ? '' : `; ${usd2(v.remaining.afterBooked)} after the booked-not-yet-billed ${usd2(v.remaining.bookedNotYetBilledSinceAnchor)}`}`);
+  } else L.push('remaining: no anchor: run `credits anchor <usd>` (the prepaid balance is shown in the Console only; the Admin API cannot read it)');
+  const c = v.caps;
+  L.push(`caps: monthly budget ${usd2(c.monthlyBudget)}; reserve ${usd2(c.reserveShare * c.monthlyBudget)} ${c.reserveReleased ? 'released' : 'held until the last days of the cycle'}`);
+  for (const k of c.categories) L.push(`  ${k.category.padEnd(9)} spent ${usd2(k.spent)} of today's pace cap ${usd2(k.paceCapNow)} (${pctOf(k.usedOfPaceCap)}); share ${(k.share * 100).toFixed(0)}% = ${usd2(k.shareUsd)} (${k.basis})${k.workspace ? `; workspace ${k.workspace}` : ''}`);
+  L.push(c.workspaceLimits.length ? `workspace limits: ${c.workspaceLimits.map((w) => `${w.workspace} ${w.used === null ? 'not found' : usd2(w.used)} of ${usd2(w.limit)} (${pctOf(w.usedPct)}, ${w.basis})`).join('; ')}` : 'workspace limits: none configured (api_credits_workspace_limits)');
+  for (const w of v.warnings) L.push(`WARNING: ${w}`);
+  L.push('caveat: cost is list price, Priority Tier is excluded, and values can be revised for about 7 days after month end');
+  return L;
+}
