@@ -222,8 +222,15 @@ export const clearsFile = (dir) => join(dir, 'clears.jsonl');
 
 /** Append one clear record: { at, rule, type, id, pid, label, project, resources, evidence }. Never throws. */
 export function appendClear(dir, rec) {
+  appendRotatingJsonl(clearsFile(dir), rec);
+}
+
+/**
+ * Append one JSON row to a ledger log, rotating at 512 KB to <file>.1 (one generation). Never throws: a log
+ * failure never blocks the queue. Shared by clears.jsonl, grants.jsonl and reaps.jsonl (scripts/lib/reaper.mjs).
+ */
+export function appendRotatingJsonl(file, rec) {
   try {
-    const file = clearsFile(dir);
     try {
       if (statSync(file).size > CLEARS_MAX_BYTES) renameSync(file, `${file}.1`);
     } catch { /* no log yet */ }
@@ -256,13 +263,7 @@ export const grantsFile = (dir) => join(dir, 'grants.jsonl');
  * clears.jsonl (to grants.jsonl.1). Never throws: a log failure never blocks the queue.
  */
 export function appendGrant(dir, rec) {
-  try {
-    const file = grantsFile(dir);
-    try {
-      if (statSync(file).size > CLEARS_MAX_BYTES) renameSync(file, `${file}.1`);
-    } catch { /* no log yet */ }
-    appendFileSync(file, `${JSON.stringify(rec)}\n`);
-  } catch { /* a log failure never blocks the queue */ }
+  appendRotatingJsonl(grantsFile(dir), rec);
 }
 
 /** Grant rows with ts >= now - sinceMs, oldest first (reads grants.jsonl.1 too). Torn lines are skipped. */
