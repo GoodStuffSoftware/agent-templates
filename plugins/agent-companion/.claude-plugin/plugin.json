@@ -725,6 +725,12 @@
       "description": "Comma-separated permission modes in which resource_gate=rewrite rewrites the command (default bypassPermissions only: permission rules are checked against the REWRITTEN command). In any other mode a rewrite becomes a deny with the same wrapped command in its text. \"any\" lifts the limit. Has no effect on deny, hint or off.",
       "default": "bypassPermissions"
     },
+    "resource_gate_powershell_rewrite": {
+      "type": "boolean",
+      "title": "Resource queue gate: rewrite PowerShell commands",
+      "description": "Off by default. The gate also covers the PowerShell tool, but Claude Code's docs do not say that PowerShell honours a PreToolUse updatedInput, and a hook cannot tell whether a rewrite was applied (if it were ignored, the heavy command would run unqueued). So with resource_gate=rewrite a heavy PowerShell command is DENIED with the queued command in the text (fail closed) unless this is true. Turn it on only after checking in a live session that a PowerShell rewrite takes effect.",
+      "default": false
+    },
     "shared_resources_line": {
       "type": "boolean",
       "title": "Shared resources line",

@@ -117,7 +117,10 @@ try {
     const mode = gateMode(opt('resource_gate', DEFAULT_GATE_MODE));
     if (mode !== 'off') {
       const permOk = mode === 'rewrite'
-        && modeAllowed(p.permission_mode, opt('resource_gate_permission_modes', 'bypassPermissions'));
+        && modeAllowed(p.permission_mode, opt('resource_gate_permission_modes', 'bypassPermissions'))
+        // Fail closed: nothing documents that the PowerShell tool applies updatedInput, and this hook cannot
+        // tell. Unless the option is on, a PowerShell rewrite becomes a deny that carries the queued command.
+        && (!isPs || opt('resource_gate_powershell_rewrite', false) === true);
       const d = await gateDecision(input.command, {
         cwd: typeof p.cwd === 'string' && p.cwd ? p.cwd : process.cwd(),
         mode,
