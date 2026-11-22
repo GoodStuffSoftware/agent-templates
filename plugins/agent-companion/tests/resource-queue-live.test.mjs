@@ -235,7 +235,7 @@ test('RAM: a running job is charged its expected peak while it ramps up, then dr
     assert.equal(w.leases().find((l) => l.id === a.id).expRamMb, 30_000);
     let b = null;
     const pb = w.acq({ box: 2, ramMb: 20_000, label: 'needs ram', pid: 9003 }).then((l) => { b = l; });
-    await settle(40);
+    await settle(8); // the waiter's polls move the fake clock 1.5 s each: stay inside the 60 s ramp
     assert.equal(b, null, '30 GB still ramping up leaves too little');
     assert.match(reasonOf(w, 'needs ram'), /RAM 20000 MB needed, \d+ MB free after a \d+ MB reserve and 30000 MB still ramping up/);
     w.t += 61_000; // ramp over: the real free RAM (fake: unchanged) is what counts
