@@ -1,7 +1,14 @@
 // PreToolUse on Bash: the ONE hook that rewrites a Bash command's input.
 //
-// Only one PreToolUse hook's updatedInput survives a call, so both rewrites live
+// Only one PreToolUse hook's updatedInput survives a call, so the rewrites live
 // here, in a fixed order, as one `updatedInput`:
+//   0. worktree remove (hooks/lib/worktree-remove.mjs, scripts/worktree-remove-safe.mjs):
+//      `git worktree remove <tree>` of a tree holding a Windows junction or a directory
+//      symlink is rewritten IN PLACE to the safe script, which unlinks each link first
+//      (git follows a junction and empties its target). Bash: updatedInput; PowerShell:
+//      a denial carrying the rewritten command unless resource_gate_powershell_rewrite.
+//      A line it cannot rewrite cleanly is denied. Option worktree_remove_safe (default
+//      true). Not seen: `bash -c "..."`, `xargs git worktree remove`, aliases and functions.
 //   1. resource gate (hooks/lib/resource-gate.mjs): a heavy command (full test
 //      suite, E2E, emulator, gradle...) is sent through the machine-wide resource
 //      queue. Setting resource_gate: rewrite | deny | hint | off, default deny.
