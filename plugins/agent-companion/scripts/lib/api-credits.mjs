@@ -717,7 +717,7 @@ export function creditsView({ snap = null, reason = '', cfg, ledgerCycle = {}, l
       bookedSinceAnchor = bookedBetween(entries, Math.max(snap.through, fromDay));
       basis = `billed since ${iso(fromDay).slice(0, 10)}`;
       if (fromDay < snap.from) warnings.push(`the anchor (${iso(anchor.asOf).slice(0, 10)}) is before the billing window fetched (from ${iso(snap.from).slice(0, 10)}): billed since the anchor is understated, remaining is too high; re-anchor`);
-    } else { bookedSinceAnchor = bookedBetween(entries, fromDay); basis = `booked since ${iso(fromDay).slice(0, 10)} (billing not available; booked only)`; }
+    } else { bookedSinceAnchor = bookedBetween(entries, fromDay); basis = `booked since ${iso(fromDay).slice(0, 10)}`; }
     const spentSince = (billedSinceAnchor === null ? 0 : billedSinceAnchor) + bookedSinceAnchor;
     view.remaining = { usd: anchor.usd - (billedSinceAnchor === null ? bookedSinceAnchor : billedSinceAnchor), afterBooked: anchor.usd - spentSince, basis, billedSinceAnchor, bookedNotYetBilledSinceAnchor: snap ? bookedSinceAnchor : null, bookedSinceAnchor: snap ? null : bookedSinceAnchor };
     if (now - anchor.asOf > cy.end - cy.start) warnings.push(`the anchor is ${Math.floor(ageDays)} days old (older than one cycle): read the Console balance again and run \`credits anchor <usd>\``);
@@ -764,7 +764,7 @@ export function creditsLines(v) {
   L.push(`used this cycle, combined: ${usd2(v.used.combined)}`);
   if (v.anchor && v.remaining) {
     L.push(`anchor: Console balance ${usd2(v.anchor.usd)} on ${v.anchor.asOf.slice(0, 16).replace('T', ' ')}Z, set ${v.anchor.setAt.slice(0, 10)} (${v.anchor.ageDays} days old)`);
-    L.push(`remaining: ${usd2(v.remaining.usd)} = anchor - ${v.remaining.basis} ${usd2(v.remaining.billedSinceAnchor === null ? v.remaining.bookedSinceAnchor : v.remaining.billedSinceAnchor)}${v.remaining.billedSinceAnchor === null ? '' : `; ${usd2(v.remaining.afterBooked)} after the booked-not-yet-billed ${usd2(v.remaining.bookedNotYetBilledSinceAnchor)}`}`);
+    L.push(`remaining: ${usd2(v.remaining.usd)} = anchor - ${v.remaining.basis} ${usd2(v.remaining.billedSinceAnchor === null ? v.remaining.bookedSinceAnchor : v.remaining.billedSinceAnchor)}${v.remaining.billedSinceAnchor === null ? ' (billing not available; booked only)' : `; ${usd2(v.remaining.afterBooked)} after the booked-not-yet-billed ${usd2(v.remaining.bookedNotYetBilledSinceAnchor)}`}`);
   } else L.push('remaining: no anchor: run `credits anchor <usd>` (the prepaid balance is shown in the Console only; the Admin API cannot read it)');
   const c = v.caps;
   L.push(`caps: monthly budget ${usd2(c.monthlyBudget)}; reserve ${usd2(c.reserveShare * c.monthlyBudget)} ${c.reserveReleased ? 'released' : 'held until the last days of the cycle'}`);
