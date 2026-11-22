@@ -96,7 +96,7 @@ test('evaluate: a quiet release flags nothing', () => assert.deepEqual(names(met
 test('evaluate: worker guard over 2x its pooled rate (n>=10), new guard (>=3), lead guard per hour', () => {
   assert.ok(names(metrics({ telemetry: { 'denial:python-stdin/deny': t(30, 56, 30, 8) } })).includes('guard:python-stdin/deny'));
   assert.deepEqual(names(metrics({ telemetry: { 'denial:python-stdin/deny': t(12, 56, 12, 8) } })), []);
-  assert.ok(names(metrics({ telemetry: { 'denial:fresh-guard/deny': t(3, 0, 3, null) } })).includes('guard:fresh-guard/deny'));
+  assert.ok(names(metrics({ telemetry: { 'denial:fresh-guard/deny': t(5, 0, 30, null) } })).includes('guard:fresh-guard/deny'));
   assert.ok(names(metrics({ telemetry: { 'denial:delegation/deny': t(100, 300, 100, 40) } })).includes('guard:delegation/deny'));
 });
 test('evaluate: spawn rewrites, queue, context, status, bash, api, runaway, bleed', () => {
@@ -170,9 +170,9 @@ test('clear lifts the hold, logs a row, and the cooldown suppresses the same fla
   assert.equal(S.isHoldActive(), false); assert.equal(existsSync(file('release-hold.json')), false);
   assert.equal(S.flagLine(), null);
   assert.equal(S.openFlag({ version: '1', flags: [{ name: 'queue-clears', value: 4 }], at: T + 3 * HOUR }), null, 'inside the 4 h cooldown, same size');
-  assert.ok(S.openFlag({ version: '1', flags: [{ name: 'queue-clears', value: 9 }], at: T + 3 * HOUR }), 'worsened 1.5x');
+  assert.ok(S.openFlag({ version: '1', flags: [{ name: 'queue-clears', value: 9 }], at: T + 3 * HOUR }), 'worsened more than 2x');
   S.clear({ at: T + 3.5 * HOUR });
-  assert.ok(S.openFlag({ version: '1', flags: [{ name: 'queue-clears', value: 4 }], at: T + 8 * HOUR }), 'after the cooldown');
+  assert.equal(S.openFlag({ version: '1', flags: [{ name: 'queue-clears', value: 9 }], at: T + 30 * HOUR }), null, 'answered stays answered, however much later');
   const rows = readFileSync(file('release-watch-checks.jsonl'), 'utf8').trim().split('\n');
   assert.ok(rows.length >= 2);
 });
@@ -184,7 +184,7 @@ test('flag line: open unanswered flag and hold, silent when answered', () => {
   assert.match(l, /RELEASE WATCH 1\.2\.3/); assert.match(l, /PushNotification/); assert.match(l, /queue-clears/);
   S.noteReply(T + 1);
   assert.equal(S.flagLine(), null);
-  S.clear();
+  S.clear({ at: T - 1 });
   S.openFlag({ version: '1.2.3', flags: [{ name: 'z', value: 1 }], at: T });
   S.maybeHold({ holdMinutes: 1, at: T + HOUR });
   assert.match(S.flagLine(), /RELEASE HOLD/);

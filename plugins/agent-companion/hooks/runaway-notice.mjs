@@ -46,9 +46,9 @@ try {
     try {
       if (unattendedReason({ payload: p, root: stateRootPath() }) === null) {
         const prompt = String(p.prompt || '');
-        const genuine = !/^\s*<(task-notification|system-reminder|command-)/.test(prompt);
+        const genuine = !/^\s*<(task-notification|system-reminder|command-|teammate-message|channel|bus-)/.test(prompt);
         // The operator's words lift a hold: a short genuine prompt saying "clear hold" or "release hold".
-        if (genuine && isHoldActive() && prompt.length <= 80 && /(^|[\s"'`])(clear|release) hold\b/i.test(prompt)) {
+        if (genuine && isHoldActive() && /^(please\s+)?(clear|release)\s+(the\s+)?hold[.!]*$/i.test(prompt.trim())) {
           clearWatch({ by: 'prompt' });
           watch = '[agent-companion] The release hold is lifted on the operator\'s word: new agents, heavy jobs and running workers carry on.';
         } else {

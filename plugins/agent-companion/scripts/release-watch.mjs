@@ -55,19 +55,38 @@ const units = (u, m) => 2e-6 * MULT(m) * ((u.input_tokens || 0) + 5 * (u.output_
 const quant = (a, p) => { const s = a.slice().sort((x, y) => x - y); return s.length ? +s[Math.min(s.length - 1, Math.floor(p * s.length))].toFixed(2) : null; };
 const sum = (a, f) => a.reduce((s, x) => s + f(x), 0);
 
-export function analyze({ T, nowMs = S.now(), baseFrom, days = 7, sample = 500, telDir, projectsDir, clearsFiles } = {}) {
+// Queue clears that mean something went wrong: a lease whose holder died or went stale, a holder past the ceiling, a stuck release.
+// Waiting tickets whose requester left, idle clears, the operator's manual clear, and rows written by test runs are routine.
+export const CLEAR_FAILURE_RULES = new Set(['pid-dead', 'heartbeat-stale', 'live-holder-ceiling', 'stuck-holder', 'stuck-release']);
+export function isFailureClear(r) {
+  if (!r || !CLEAR_FAILURE_RULES.has(r.rule)) return false;
+  if (r.type && r.type !== 'lease') return false;
+  const lab = String(r.label || ''); const wt = String(r.worktree || '').replace(/\\/g, '/').toLowerCase();
+  if (/\.test\.m?js\b|node --test|\btests?\//i.test(lab)) return false;
+  if (/\/(tmp|temp)\//.test(wt) || /\/appdata\/local\/temp\//.test(wt)) return false;
+  return true;
+}
+
+// T: the install time; the baseline is always the `days` days before it. winFrom: start of the window measured now (default T;
+// the tick passes the previous check's time, so each check is a rate over its own window, not a running count since install).
+export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, days = 7, sample = 500, telDir, projectsDir, clearsFiles, holds } = {}) {
   const root = stateRootPath();
   telDir = telDir || join(root, 'telemetry');
   projectsDir = projectsDir || join(claudeDir(), 'projects');
-  clearsFiles = clearsFiles || [process.env.CI_BUDGET_DIR && join(process.env.CI_BUDGET_DIR, 'clears.jsonl'), join(root, 'ci-budget', 'clears.jsonl'),
-    process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'ci-budget', 'clears.jsonl')].filter(Boolean);
+  // The real machine-wide queue data is read only when the state dir is the real one (a scratch state dir keeps tests and sandbox runs off it).
+  clearsFiles = clearsFiles || [...new Set([process.env.CI_BUDGET_DIR && join(process.env.CI_BUDGET_DIR, 'clears.jsonl'), join(root, 'ci-budget', 'clears.jsonl'),
+    !process.env.AGENT_COMPANION_STATE_DIR && process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'ci-budget', 'clears.jsonl')].filter(Boolean).map((p) => p.replace(/\\/g, '/')))];
   const B0 = baseFrom > 0 ? baseFrom : T - days * 24 * HOUR;
+  const W0 = winFrom > 0 ? Math.max(winFrom, T) : T;
+  // What the hold itself caused (denials, refusals, anything logged while it was on) never counts toward a signal.
+  const holdIv = holds || S.holdIntervals(nowMs);
+  const inHold = (t) => holdIv.some(([a, b]) => t >= a && t <= b);
   const rd = (f) => jsonl(join(telDir, f + '.jsonl'));
   const ts = (r) => (typeof r.at === 'number' ? r.at : Date.parse(r.at || r.ts || 0));
-  const win = (r) => { const t = ts(r); return t >= T && t <= nowMs ? 'since' : t >= B0 && t < T ? 'base' : null; };
+  const win = (r) => { const t = ts(r); if (inHold(t)) return null; return t >= W0 && t <= nowMs ? 'since' : t >= B0 && t < T ? 'base' : null; };
   const N = { since: 0, base: 0 };
   for (const r of rd('spawns')) { const w = win(r); if (w) N[w]++; }
-  const span = { since: Math.max((nowMs - T) / HOUR, 1e-3), base: Math.max((T - B0) / HOUR, 1e-3) };
+  const span = { since: Math.max((nowMs - W0) / HOUR, 1e-3), base: Math.max((T - B0) / HOUR, 1e-3) };
   const out = { T: new Date(T).toISOString(), now: new Date(nowMs).toISOString(), spawns: { ...N, perHour: { since: +(N.since / span.since).toFixed(1), base: +(N.base / span.base).toFixed(1) } }, telemetry: {}, span };
   const count = (file, keyf, filt = () => true) => {
     const c = {};
@@ -91,7 +110,7 @@ export function analyze({ T, nowMs = S.now(), baseFrom, days = 7, sample = 500, 
   }
   {
     const c = { since: 0, base: 0 };
-    for (const f of clearsFiles) for (const r of jsonl(f)) { const w = win(r); if (w) c[w]++; }
+    for (const f of clearsFiles) for (const r of jsonl(f)) { if (!isFailureClear(r)) continue; const w = win(r); if (w) c[w]++; }
     out.queueClears = { since: c.since, base: c.base, perHour: { since: +(c.since / span.since).toFixed(2), base: +(c.base / span.base).toFixed(2) } };
   }
   // ---- worker transcripts ----
@@ -112,7 +131,7 @@ export function analyze({ T, nowMs = S.now(), baseFrom, days = 7, sample = 500, 
       }
     }
   }
-  const fresh = files.filter((f) => f.m >= T); const old = files.filter((f) => f.m < T);
+  const fresh = files.filter((f) => f.m >= W0); const old = files.filter((f) => f.m < W0);
   const step = Math.max(1, Math.ceil(old.length / sample));
   const pick = [...fresh.slice(0, 2000).map((f) => f.fp), ...old.filter((_, i) => i % step === 0).map((f) => f.fp)];
   const seen = new Set(); const W = { since: [], base: [] }; const sig = { since: {}, base: {} };
@@ -136,12 +155,13 @@ export function analyze({ T, nowMs = S.now(), baseFrom, days = 7, sample = 500, 
         if (b.type === 'tool_result' && b.is_error) {
           terr++; const t = typeof b.content === 'string' ? b.content : JSON.stringify(b.content);
           const m = /^(PreToolUse:[\w:]+) hook error: (.{0,48})/.exec(t);
-          if (m) { hook++; const w = first >= T ? 'since' : 'base'; const k = `${m[1]} ${m[2]}`; sig[w][k] = (sig[w][k] || 0) + 1; }
+          if (m && !/post-release hold/i.test(t) && !inHold(Date.parse(o.timestamp))) { hook++; const w = first >= W0 ? 'since' : first < T ? 'base' : null; const k = `${m[1]} ${m[2]}`; if (w) sig[w][k] = (sig[w][k] || 0) + 1; }
         }
       }
     }
     if (!first || first < B0 || first > nowMs) continue;
-    const w = first >= T ? 'since' : 'base';
+    const w = first >= W0 ? 'since' : first < T ? 'base' : null;
+    if (!w || inHold(first)) continue;
     const st = /STATUS:\s*(done|partial|blocked)/i.exec(txt);
     let fin = false; try { fin = JSON.parse(readFileSync(fp.replace(/\.jsonl$/, '.meta.json'), 'utf8')).finished === true; } catch { /* none */ }
     W[w].push({ u, peak, hook, terr, api, status: st ? st[1].toLowerCase() : (fin ? 'none' : 'running') });
@@ -172,14 +192,15 @@ export const TH = {
   minSpawns: 10, minWorkers: 10, guardFactor: 2, guardMinN: 10, newGuardMin: 3,
   rewritePer100: 3, hookErrorPp: 15, newSigWorkers: 5, over150Pct: 5, handoffHardPer100: 2, handoffEndBlockPer100: 10,
   noStatusPct: 15, noStatusMinFinished: 30, noStatusPp: 10, partialPct: 35, blockedPct: 6, finMin: 10,
-  bashFailPct: 7, bashMinN: 20, gateDeniedPer100: 20, clearsPerHour: 1, clearsMin: 3, apiWorkers: 3,
+  bashFailPct: 7, bashMinN: 20, gateDeniedPer100: 20, clearsFactor: 2, clearsMin: 3, apiWorkers: 3, newGuardPer100: 10,
   struggle100: 2, unitsFactor: 1.5, unitsAbs: 1.9, pollDeny100: 18,
 };
 const REWRITE_GUARDS = new Set(['fit', 'inherit', 'type-required', 'routing-autofix']);
 
 // opts.first: the first check of an install. A guard key that has no baseline hits is then not flagged as new: the release itself may have introduced it.
 export function evaluate(m, opts = {}) {
-  const flags = []; const f = (name, value, limit, detail) => flags.push({ name, value, limit, detail });
+  // level: the rate the flag is judged on later (per hour, per 100 spawns, a share). A count flag carries count / window hours.
+  const flags = []; const f = (name, value, limit, detail, level = value) => flags.push({ name, value, level, limit, detail });
   if (!m) return flags;
   const sp = m.spawns; const ws = m.workers.since; const wb = m.workers.base;
   const enough = sp.since >= TH.minSpawns; const wEnough = ws.n >= TH.minWorkers;
@@ -195,8 +216,8 @@ export function evaluate(m, opts = {}) {
         continue;
       }
       const ps = v.per100spawns.since; const pb = v.per100spawns.base;
-      if (v.base === 0 && opts.first) continue;
-      if (v.base === 0 && v.since >= TH.newGuardMin) f(`guard:${k.slice(7)}`, v.since, TH.newGuardMin, `new guard, ${v.since} hits`);
+      // A key with no baseline hits flags on its deny rate per 100 spawns over a floor, never on mere presence.
+      if (v.base === 0) { if (v.since >= TH.newGuardMin && ps > TH.newGuardPer100) f(`guard:${k.slice(7)}`, ps, TH.newGuardPer100, `new guard, ${v.since} hits, ${ps}/100 spawns`); }
       else if (v.since >= TH.guardMinN && pb > 0 && ps > TH.guardFactor * pb) f(`guard:${k.slice(7)}`, ps, +(TH.guardFactor * pb).toFixed(1), `${ps}/100 spawns vs ${pb}`);
     }
     const rw = tel.filter(([k]) => k.startsWith('denial:') && k.endsWith('/deny') && REWRITE_GUARDS.has(k.slice(7).split('/')[0])).reduce((s, [, v]) => s + v.since, 0);
@@ -215,17 +236,22 @@ export function evaluate(m, opts = {}) {
     if (per(pd, sp.since) > TH.pollDeny100) f('polling-waste', per(pd, sp.since), TH.pollDeny100, `${pd} worker-wait denials`);
   }
   const rn = tel.filter(([k]) => k.startsWith('runaway:')).reduce((s, [, v]) => s + v.since, 0);
-  if (rn > 0) f('runaway', rn, 0, `${rn} runaway row(s)`);
-  if (m.queueClears.since >= TH.clearsMin && m.queueClears.perHour.since > TH.clearsPerHour) f('queue-clears', m.queueClears.perHour.since, TH.clearsPerHour, `${m.queueClears.since} clears, baseline ${m.queueClears.perHour.base}/h`);
+  const spanH = m.span.since;
+  if (rn > 0) f('runaway', rn, 0, `${rn} runaway row(s)`, +(rn / spanH).toFixed(3));
+  {
+    // Failure clears per hour against the pooled 7-day rate (floor: one clear in the baseline), never a fixed rate.
+    const qc = m.queueClears; const baseRate = Math.max(qc.base, 1) / m.span.base; const lim = TH.clearsFactor * baseRate;
+    if (qc.since >= TH.clearsMin && qc.since / spanH > lim) f('queue-clears', +(qc.since / spanH).toFixed(2), +lim.toFixed(2), `${qc.since} failure clears, baseline ${qc.perHour.base}/h`);
+  }
   if (m.bash.since.n >= TH.bashMinN && m.bash.since.failPct > TH.bashFailPct) f('worker-bash-fail', m.bash.since.failPct, TH.bashFailPct, `n=${m.bash.since.n}`);
   if (wEnough) {
     if (ws.hookErrorWorkersPct != null && wb.hookErrorWorkersPct != null && ws.hookErrorWorkersPct - wb.hookErrorWorkersPct >= TH.hookErrorPp) f('hook-error-share', ws.hookErrorWorkersPct, wb.hookErrorWorkersPct + TH.hookErrorPp, `vs ${wb.hookErrorWorkersPct}% before`);
-    for (const [sg, n] of Object.entries(m.hookSignatures.since)) if (n >= TH.newSigWorkers && !m.hookSignatures.base[sg]) f(`hook-signature:${sg}`, n, TH.newSigWorkers, 'new hook-error signature');
+    for (const [sg, n] of Object.entries(m.hookSignatures.since)) if (n >= TH.newSigWorkers && !m.hookSignatures.base[sg]) f(`hook-signature:${sg}`, n, TH.newSigWorkers, 'new hook-error signature', +(n / spanH).toFixed(3));
     if (ws.over150kPct > TH.over150Pct) f('context-over-150k', ws.over150kPct, TH.over150Pct, `p90 ${ws.peakCtxP90}`);
     if (ws.finished >= TH.noStatusMinFinished && (ws.noStatusPct > TH.noStatusPct || (wb.noStatusPct != null && ws.noStatusPct - wb.noStatusPct > TH.noStatusPp))) f('no-final-status', ws.noStatusPct, TH.noStatusPct, `vs ${wb.noStatusPct}% before`);
     if (ws.finished >= TH.finMin && ws.partialPct > TH.partialPct) f('partial-share', ws.partialPct, TH.partialPct);
     if (ws.finished >= TH.finMin && ws.blockedPct > TH.blockedPct) f('blocked-share', ws.blockedPct, TH.blockedPct);
-    if (ws.apiNonUsageWorkers >= 1 || ws.apiErrorWorkers >= TH.apiWorkers) f('api-errors', ws.apiErrorWorkers, TH.apiWorkers, `${ws.apiNonUsageWorkers} non-usage-limit`);
+    if (ws.apiNonUsageWorkers >= 1 || ws.apiErrorWorkers >= TH.apiWorkers) f('api-errors', ws.apiErrorWorkers, TH.apiWorkers, `${ws.apiNonUsageWorkers} non-usage-limit`, +(ws.apiErrorWorkers / spanH).toFixed(3));
     const lim = wb.n >= TH.minWorkers ? TH.unitsFactor * wb.unitsPerWorker.mean : TH.unitsAbs;
     if (ws.unitsPerWorker.mean > lim) f('units-per-worker', ws.unitsPerWorker.mean, +lim.toFixed(2), `mean, baseline ${wb.unitsPerWorker.mean}`);
     if (wb.n >= TH.minWorkers && wb.unitsPerWorker.p90 && ws.unitsPerWorker.p90 > TH.unitsFactor * wb.unitsPerWorker.p90) f('units-p90', ws.unitsPerWorker.p90, +(TH.unitsFactor * wb.unitsPerWorker.p90).toFixed(2), 'p90 per worker');
@@ -249,11 +275,13 @@ export function tick({ at = S.now(), installed, holdMinutes, run = analyze } = {
       const last = due[due.length - 1];
       let metrics = null; let flags = [];
       try {
-        metrics = run({ T: sch.T, nowMs: at, baseFrom: sch.prevT || undefined });
-        flags = evaluate(metrics, { first: sch.done.length === 0 });
+        // Window = since the previous check (a rate per window); baseline = always the 7 days before the install time T.
+        metrics = run({ T: sch.T, nowMs: at, winFrom: sch.lastAt || sch.T });
+        flags = evaluate(metrics);
       } catch (e) { flags = []; metrics = { error: String(e && e.message || e) }; }
       const late = at - sch.due[last] > LATE_MS;
       sch.done = [...sch.done, ...due];
+      sch.lastAt = at;
       const everFlagged = sch.everFlagged || flags.length > 0;
       sch.everFlagged = everFlagged;
       if (sch.done.length >= sch.due.length) sch.closed = true;
@@ -293,7 +321,7 @@ export function main(A = process.argv.slice(2)) {
       const T = Date.parse(argOf(A, '--since')); if (!(T > 0)) { console.error('check needs --since <ISO>'); return 2; }
       const bf = argOf(A, '--base-from');
       const m = analyze({ T, baseFrom: bf ? Date.parse(bf) : undefined, days: Number(argOf(A, '--days')) || 7, sample: Number(argOf(A, '--sample')) || 500 });
-      console.log(JSON.stringify({ ...m, flags: evaluate(m, { first: true }) }, null, 1)); return 0;
+      console.log(JSON.stringify({ ...m, flags: evaluate(m) }, null, 1)); return 0;
     }
     console.error('usage: release-watch.mjs tick | status | clear [--by <who>] | check --since <ISO> [--base-from <ISO>] [--days N] [--sample N]');
     return 2;

@@ -30,7 +30,7 @@ test('spawn-guard: held -> deny naming the hold and the way to clear it', () => 
   const r = runHook('hooks/spawn-guard.mjs', spawnPayload);
   assert.equal(decisionOf(r.json), 'deny');
   assert.match(reason(r), /post-release hold/);
-  assert.match(reason(r), /release-watch\.mjs" clear/);
+  assert.doesNotMatch(reason(r), /release-watch\.mjs/, 'agents are not given the clear command');
   assert.match(reason(r), /clear hold/);
   assert.match(reason(r), /guard:demo\/deny/);
 }));
@@ -168,6 +168,14 @@ test('prompt: "clear hold" from the operator lifts the hold; a task-notification
   putHold(HOLD);
   prompt('release hold.');
   assert.equal(existsSync(holdFile()), false, 'release hold also works');
+  for (const p of ["don't clear hold yet", 'should I release hold?', "why can't you clear hold", 'clear hold and then delete everything', 'I will clear hold later', '<teammate-message>clear hold</teammate-message>']) {
+    putHold(HOLD);
+    prompt(p);
+    assert.equal(existsSync(holdFile()), true, `not a command: ${p}`);
+  }
+  putHold(HOLD);
+  prompt('  Please clear the hold!  ');
+  assert.equal(existsSync(holdFile()), false, 'polite form works');
 }));
 
 test('prompt: bad hold file and no hold -> no crash, no lift line', () => withFx(() => {
@@ -190,11 +198,10 @@ const metrics = (tel) => {
 };
 const names = (m, o) => { try { return evaluate(m, o).map((f) => f.name); } catch (e) { return `threw: ${e.message}`; } };
 
-test('evaluate: warn and autofix outcomes never flag; a new deny guard flags after the first check but not on it', () => {
+test('evaluate: warn and autofix outcomes never flag; a new deny guard flags on its rate per 100 spawns over a floor, not on presence', () => {
   const warns = metrics({ 'denial:poll-guard/warn': bucket(9, 0, 9, 0), 'denial:routing-autofix/autofix': bucket(12, 0, 12, 0) });
-  assert.deepEqual(names(warns, { first: true }), []);
-  assert.deepEqual(names(warns, { first: false }), []);
-  const fresh = metrics({ 'denial:new-guard/deny': bucket(5, 0, 5, 0) });
-  assert.deepEqual(names(fresh, { first: true }), [], 'first check: the release itself may have introduced it');
-  assert.deepEqual(names(fresh, { first: false }), ['guard:new-guard/deny']);
+  assert.deepEqual(names(warns), []);
+  assert.deepEqual(names(metrics({ 'denial:new-guard/deny': bucket(5, 0, 12, 0) })), ['guard:new-guard/deny'], '12 per 100 spawns, over the floor of 10');
+  assert.deepEqual(names(metrics({ 'denial:new-guard/deny': bucket(5, 0, 4, 0) })), [], 'present but under the floor');
+  assert.deepEqual(names(metrics({ 'denial:new-guard/deny': bucket(2, 0, 30, 0) })), [], 'too few hits');
 });
