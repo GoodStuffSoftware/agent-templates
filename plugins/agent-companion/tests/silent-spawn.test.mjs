@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, readJsonl } from './helpers.mjs';
-import { inferRole, BRIEF_ROLES } from '../hooks/lib/brief-directives.mjs';
+import { inferRole, BRIEF_ROLES, rungStated } from '../hooks/lib/brief-directives.mjs';
 
 function seedStart(stateDir, sessionId, agentType) {
   const t = join(stateDir, 'telemetry');
@@ -243,6 +243,23 @@ test('effort fit: a "Rung reason:" line (plain, listed or bold) keeps the stated
     const r = spawn({ ...HI, prompt: `${line}\n${brief}` }, { started: RUNGS });
     assert.equal(r.ui?.subagent_type, 'agent-companion:ac-sonnet-medium', line);
   }
+});
+
+test('rungStated: a Rung reason line in a fence, an indented block or an HTML comment does not count; a bold or backtick-first one does', () => {
+  const reason = 'Rung reason: the sources conflict';
+  const fence = '```';
+  for (const brief of [
+    `TYPE: research\n${fence}\n${reason}\n${fence}\nread x`,
+    `TYPE: research\n~~~\n${reason}\n~~~\nread x`,
+    `TYPE: research\n\n    ${reason}\n\nread x`,
+    `TYPE: research\n<!--\n${reason}\n-->\nread x`,
+    `TYPE: research\n<!-- ${reason} -->\nread x`,
+  ]) assert.equal(rungStated(brief), false, brief);
+  for (const brief of [
+    `TYPE: research\n**Rung reason:** the sources conflict\nread x`,
+    `TYPE: research\nRung reason: \`opus/high\` the sources conflict\nread x`,
+    `TYPE: research\n${reason}\nread x`,
+  ]) assert.equal(rungStated(brief), true, brief);
 });
 
 test('effort fit: a parity-typed brief (a reviewer, even with a WEIGHT line) is never rewritten', () => {

@@ -666,6 +666,18 @@ test('wrapper: with noclobber on (set -C, and bash -C) the original runs as writ
   } finally { t.done(); }
 });
 
+test('readPermissionRules: PowerShell(...) deny rules are read too, and a PowerShell deny rule blocks the wrap', () => {
+  const fx = makeFixture();
+  try {
+    const cd = join(fx.dir, 'cfg');
+    mkdirSync(cd, { recursive: true });
+    writeFileSync(join(cd, 'settings.json'), JSON.stringify({ permissions: { deny: ['PowerShell(git push:*)', 'PowerShell', 'Edit(x)'] } }));
+    const rules = readPermissionRules({ claudeDirPath: cd });
+    assert.deepEqual(rules.map((r) => `${r.kind}:${r.pattern}`), ['deny:git push:*', 'deny:']);
+    assert.ok(blockingPermissionRule(rules.slice(0, 1), 'git push origin main'), 'the PowerShell deny rule matches like a Bash one');
+  } finally { fx.cleanup(); }
+});
+
 test('readPermissionRules: a settings file with a UTF-8 BOM is read, so its deny rule is seen', () => {
   const fx = makeFixture();
   try {

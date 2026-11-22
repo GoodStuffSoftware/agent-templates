@@ -184,6 +184,10 @@ test('fails open: missing transcript, garbage stdin', () => {
 
 // --- interrupted background workers (hooks/lib/interrupted-workers.mjs, delivered by runaway-notice on UserPromptSubmit) ---
 
+// recent timestamps: interrupts older than 24 h are not reported
+const hoursAgo = (h) => new Date(Date.now() - h * 3600e3).toISOString();
+const T0 = hoursAgo(3); const T1 = hoursAgo(2); const T2 = hoursAgo(1);
+
 function interruptedFixture(fx, { sid = 'lead-int-1' } = {}) {
   const proj = join(fx.dir, 'proj');
   const subs = join(proj, sid, 'subagents');
@@ -208,13 +212,13 @@ test('interrupted background workers: one line each, once, with the last handoff
     writeFileSync(handoff, '# handoff\n');
     const write = { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Write', input: { file_path: handoff, content: 'x' } }] } };
     t.worker('widget-1', { agentType: 'agent-companion:ac-sonnet-high', description: 'Build the widget', name: 'widget-writer', requestShape: 'background' },
-      [write, t.marker('2026-11-21T10:11:12.000Z')]);
+      [write, t.marker(T1)]);
     t.worker('docs-1', { agentType: 'general-purpose', description: 'Survey docs', name: 'docs-scout', requestShape: 'background' },
-      [t.marker('2026-11-21T10:11:12.000Z')]);
+      [t.marker(T1)]);
     // not reported: finished normally, resumed after the interrupt, a foreground helper, a quoted marker mid-message
     t.worker('done-1', { description: 'done one', requestShape: 'background' }, [{ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'STATUS: done' }] } }]);
-    t.worker('resumed-1', { description: 'resumed one', requestShape: 'background' }, [t.marker('2026-11-21T10:00:00.000Z'), { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'carrying on' }] } }]);
-    t.worker('fg-1', { description: 'foreground one', requestShape: 'foreground' }, [t.marker('2026-11-21T10:11:12.000Z')]);
+    t.worker('resumed-1', { description: 'resumed one', requestShape: 'background' }, [t.marker(T0), { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'carrying on' }] } }]);
+    t.worker('fg-1', { description: 'foreground one', requestShape: 'foreground' }, [t.marker(T1)]);
     t.worker('quoter-1', { description: 'quoter', requestShape: 'background' }, [{ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'the marker is "[Request interrupted by user]"' }] } }]);
 
     const first = t.prompt();
@@ -224,14 +228,14 @@ test('interrupted background workers: one line each, once, with the last handoff
     assert.equal(rows.length, 2, text);
     const w = rows.find((l) => l.includes('widget-writer'));
     assert.match(w, /background worker interrupted: widget-writer "Build the widget" \(widget-1, agent-companion:ac-sonnet-high\)/);
-    assert.match(w, /at 10:11:12Z/);
+    assert.ok(w.includes(`at ${T1.slice(11, 19)}Z`), w);
     assert.ok(w.includes(`its last handoff file: ${handoff}`), w);
     assert.match(w, /Respawn it fresh on the same rung from its handoff or original brief\./);
     assert.match(rows.find((l) => l.includes('docs-scout')), /it wrote no handoff file/);
     assert.doesNotMatch(text, /done one|resumed one|foreground one|quoter/);
 
     assert.equal(t.prompt().stdout.trim(), '', 'each worker is reported once');
-    t.worker('late-1', { description: 'late one', name: 'late', requestShape: 'background' }, [t.marker('2026-11-21T10:30:00.000Z')]);
+    t.worker('late-1', { description: 'late one', name: 'late', requestShape: 'background' }, [t.marker(T2)]);
     const later = t.prompt().json.hookSpecificOutput.additionalContext;
     assert.equal(later.split('\n').length, 1);
     assert.match(later, /late "late one"/);
@@ -242,11 +246,40 @@ test('interrupted-worker notice: a subagent payload, the option off and no subag
   const fx = makeFixture();
   try {
     const t = interruptedFixture(fx, { sid: 'lead-int-2' });
-    t.worker('held-1', { description: 'x', requestShape: 'background' }, [t.marker('2026-11-21T10:11:12.000Z')]);
+    t.worker('held-1', { description: 'x', requestShape: 'background' }, [t.marker(T1)]);
     const base = { hook_event_name: 'UserPromptSubmit', session_id: 'lead-int-2', transcript_path: t.lead };
     assert.equal(runHook('hooks/runaway-notice.mjs', { ...base, agent_id: 'w1' }).stdout.trim(), '');
     assert.equal(runHook('hooks/runaway-notice.mjs', base, { env: { CLAUDE_PLUGIN_OPTION_INTERRUPTED_WORKER_NOTICE: '0' } }).stdout.trim(), '');
     assert.equal(runHook('hooks/runaway-notice.mjs', { ...base, session_id: 'lead-int-3', transcript_path: join(fx.dir, 'proj', 'lead-int-3.jsonl') }).stdout.trim(), '');
     assert.match(t.prompt().json.hookSpecificOutput.additionalContext, /held-1/, 'the silent runs claimed nothing');
+  } finally { fx.cleanup(); }
+});
+
+test('interrupted-worker notice: a worker the lead stopped with TaskStop is not reported; an interrupt older than 24 h is not news', () => {
+  const fx = makeFixture();
+  try {
+    const t = interruptedFixture(fx, { sid: 'lead-int-4' });
+    const stop = { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu-1', name: 'TaskStop', input: { task_id: 'stopped-1' } }] } };
+    writeFileSync(t.lead, JSON.stringify({ type: 'user' }) + '\n' + JSON.stringify(stop) + '\n');
+    t.worker('stopped-1', { description: 'stopped on purpose', name: 'stopped-one', requestShape: 'background' }, [t.marker(T1)]);
+    t.worker('ancient-1', { description: 'two days old', name: 'ancient-one', requestShape: 'background' }, [t.marker(hoursAgo(48))]);
+    t.worker('fresh-1', { description: 'fresh interrupt', name: 'fresh-one', requestShape: 'background' }, [t.marker(T1)]);
+    const text = t.prompt().json.hookSpecificOutput.additionalContext;
+    assert.equal(text.split('\n').length, 1, text);
+    assert.match(text, /fresh-one/);
+    assert.doesNotMatch(text, /stopped-one|ancient-one/);
+  } finally { fx.cleanup(); }
+});
+
+test('interrupted-worker notice: a worker resumed and interrupted again is reported again (claim key includes the interrupt time)', () => {
+  const fx = makeFixture();
+  try {
+    const t = interruptedFixture(fx, { sid: 'lead-int-5' });
+    t.worker('again-1', { description: 'interrupted twice', name: 'again-one', requestShape: 'background' }, [t.marker(T0)]);
+    assert.match(t.prompt().json.hookSpecificOutput.additionalContext, /again-one/);
+    assert.equal(t.prompt().stdout.trim(), '', 'same interrupt: told once');
+    t.worker('again-1', { description: 'interrupted twice', name: 'again-one', requestShape: 'background' },
+      [t.marker(T0), { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'resumed' }] } }, t.marker(T2)]);
+    assert.match(t.prompt().json.hookSpecificOutput.additionalContext, /again-one/, 'a new interrupt is new news');
   } finally { fx.cleanup(); }
 });

@@ -79,6 +79,28 @@ test('a last line without a newline counts as a line (301 lines are capped)', ()
   } finally { fx.cleanup(); }
 });
 
+test('allow_large: true passes a big file through uncapped; false or absent does not', () => {
+  const fx = makeFixture();
+  try {
+    writeFileSync(join(fx.dir, 'big.txt'), lines(1000));
+    assert.equal(read(fx, { file_path: 'big.txt', allow_large: true }).stdout.trim(), '');
+    assert.deepEqual(read(fx, { file_path: 'big.txt', allow_large: false }).json.hookSpecificOutput.updatedInput.limit, 300);
+  } finally { fx.cleanup(); }
+});
+
+test('line counting by indexOf: exact counts across chunk boundaries, CRLF, and a blank-line-only tail', () => {
+  const fx = makeFixture();
+  try {
+    // 200000 short lines (> one 64 KB chunk many times over): the count must be exact
+    writeFileSync(join(fx.dir, 'long.txt'), lines(200000));
+    assert.match(read(fx, { file_path: 'long.txt' }).json.hookSpecificOutput.additionalContext, /has 200000 lines/);
+    writeFileSync(join(fx.dir, 'crlf.txt'), lines(400).replace(/\n/g, '\r\n'));
+    assert.match(read(fx, { file_path: 'crlf.txt' }).json.hookSpecificOutput.additionalContext, /has 400 lines/);
+    writeFileSync(join(fx.dir, 'blank.txt'), lines(300) + '\n\n');
+    assert.match(read(fx, { file_path: 'blank.txt' }).json.hookSpecificOutput.additionalContext, /has 302 lines/);
+  } finally { fx.cleanup(); }
+});
+
 test('options: read_cap=false turns it off (env), read_cap_lines changes the threshold', () => {
   const fx = makeFixture();
   try {
