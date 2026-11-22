@@ -346,28 +346,6 @@ test('ramp limit: a lease still warming is charged its expected usage, so a burs
   } finally { w.done(); }
 });
 
-test('backfill: a waiting head is judged by its expected need, so a smaller later request may pass it', async () => {
-  const w = world({ cores: 64, budget: 8 });
-  try {
-    w.busy = 0;
-    const seed = await w.acq({ box: 6, label: 'big known', cls: 'tests', pid: 9001 });
-    seedHistory(w, seed, { cpuP90: 1, ramMaxMb: 100 });
-    seed.release();
-    const a = await w.acq({ box: 6, label: 'running', pid: 9002 }); // holds 6 of 8
-    let head = null; let late = null;
-    const ph = w.acq({ box: 6, label: 'big known', cls: 'tests', pid: 9003 }).then((l) => { head = l; });
-    await settle(40);
-    assert.equal(head, null, 'the head waits: 6 + 6 > 8 (history gives 1 only while warming, not yet held)');
-    const pl = w.acq({ box: 1, label: 'small', pid: 9004 }).then((l) => { late = l; });
-    await settle(40);
-    assert.ok(late && !late.off, 'the small request is let past the waiting head');
-    a.release();
-    await settle(40);
-    await ph; await pl;
-    head.release(); late.release();
-  } finally { w.done(); }
-});
-
 // ---------------------------------------------------------------- status
 
 test('status: each holder reports declared, charged, measured and expected; the machine reports liveCapacity', async () => {

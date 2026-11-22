@@ -14,7 +14,7 @@ import { makeWorld, settle } from './resource-queue-world.mjs';
 const keys = (o) => Object.keys(o).sort();
 
 const TOP = ['dir', 'foreign', 'generatedAt', 'legacyLocks', 'machine', 'ok', 'queue', 'recentClears', 'reservations', 'resources', 'schema', 'schemaVersion', 'strays'];
-const MACHINE = ['busyCores', 'cores', 'externalCores', 'freeRamMb', 'loaded', 'ramReserveMb', 'totalRamMb'];
+const MACHINE = ['busyCores', 'cores', 'externalCores', 'freeRamMb', 'liveCapacity', 'loaded', 'ramReserveMb', 'totalRamMb'];
 const RESOURCE = ['capacity', 'free', 'held', 'holders', 'name'];
 const HOLDER = [
   'ageMs', 'alive', 'bound', 'boundPid', 'ceilingMs', 'foreign', 'group', 'hbStale', 'heartbeatAgeMs', 'heartbeatAt', 'id', 'idleFlag', 'idleMs', 'kind', 'label', 'lastActivityAt', 'overTime', 'pid', 'project', 'ramMb',
