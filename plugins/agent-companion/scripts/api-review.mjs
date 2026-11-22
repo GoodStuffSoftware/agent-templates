@@ -31,7 +31,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isMain } from './lib/is-main.mjs';
 import { execFileSyncHidden } from './lib/proc.mjs';
-import { opt } from '../hooks/lib/context.mjs';
+import { opt, appendLog } from '../hooks/lib/context.mjs';
 import { REVIEW_INSTRUCTION as INSTRUCTION } from '../hooks/lib/self-review.mjs';
 import { tierFor } from '../hooks/lib/project-tier.mjs';
 import { runApi, REVIEW_SYSTEM, reviewLimits, EXIT_OK, EXIT_USAGE, EXIT_UNAVAILABLE, EXIT_FAILED } from './lib/api-run.mjs';
@@ -182,6 +182,8 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   const { softUsd, maxUsd, clamped } = limits;
   if (clamped) err(`API review note: ${clamped}`);
   const reviewId = `rv-${randomUUID().slice(0, 8)}`; // the ledger entry's id, for api-credits.mjs record-fallback
+  // 0.31.63: one telemetry row per API review (route 'api'), the count behind the share `api-credits.mjs status` prints; the guard's route and the manual path both end here.
+  const routeRow = (ok, exit) => { try { appendLog('review-verdicts.jsonl', { at: new Date().toISOString(), source: 'api-review', route: 'api', route_reason: 'api', review_id: reviewId, diff_ref: String(o['diff-ref']).slice(0, 120), model: o.model, ok, exit }); } catch { /* telemetry never fails a review */ } };
   let r = null;
   if (runner === 'sdk') {
     r = await runApiSdk({
@@ -212,6 +214,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   if (!r.ok) {
     const idNote = r.ledgerError ? '' : ` (review id: ${reviewId})`; // no ledger entry, no id to record a fallback against
     out(r.unavailable ? `API review unavailable: ${r.reason}${idNote}` : `API review failed: ${r.reason}${idNote}`);
+    routeRow(false, r.unavailable ? EXIT_UNAVAILABLE : EXIT_FAILED);
     return r.unavailable ? EXIT_UNAVAILABLE : EXIT_FAILED;
   }
   const text = `${r.text}\n\n(review path: API credits, ${r.path || runner}, ${r.model}, ${r.turns} turn${r.turns === 1 ? '' : 's'}, $${r.usd.toFixed(2)}${(r.notes || []).length ? `; ${r.notes.join('; ')}` : ''}${r.ledgerError ? `; ${r.ledgerError}` : ''})`;
@@ -219,6 +222,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     try { writeFileSync(o['review-file'], `${text}\n`); } catch (e) { out(`API review failed: cannot write the review file (${e.code || 'error'})`); return EXIT_FAILED; }
   }
   out(text);
+  routeRow(true, EXIT_OK);
   return EXIT_OK;
 }
 

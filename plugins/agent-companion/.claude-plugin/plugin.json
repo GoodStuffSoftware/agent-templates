@@ -252,6 +252,18 @@
       "description": "Target fraction of writer reviews run on the API credits (default 0.5: alternate by a persisted counter). Pacing and the remaining balance can only lower it.",
       "default": 0.5
     },
+    "api_review_route": {
+      "type": "string",
+      "title": "API credits: route reviews from the spawn guard",
+      "description": "off (default), writers or all. The spawn guard asks the credit governor for each review spawn (a code-review TYPE with a diff range in the brief) and runs a routed one on the API credits through an ac-haiku call of api-review.mjs; writers = reviews spawned by subagents, all = the lead's too. RISK high, an Opus review, a brief line `API: no`, no diff range and any error stay as written. `api-credits.mjs status` prints the API share of all reviews.",
+      "default": "off"
+    },
+    "api_review_high": {
+      "type": "string",
+      "title": "API credits: RISK high reviews",
+      "description": "plan (default) keeps a review whose brief says RISK: high on a subagent; api lets the guard route it like the others.",
+      "default": "plan"
+    },
     "api_credits_item_estimate_usd": {
       "type": "number",
       "title": "API credits: estimated cost of one review (USD)",

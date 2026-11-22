@@ -18,6 +18,8 @@
 //                            spawn-guard parses it (null when absent or unusable; effort null for a no-effort model) (0.31.17)
 //                            Older rows carry none of these four; every reader treats a missing field as unknown.
 //   reviewed_branch          the first feat|fix|chore|docs|refactor|release|wip/<name> token in the brief (null when none) (0.31.17)
+//   route, route_reason      api | subagent, and why (api, plan-alternation, plan-cap, high-risk, fallback, off, no-range): copied from the spawn row's review_route fields (0.31.63);
+//                            scripts/api-review.mjs also appends one row per API review (source api-review, route api)
 //   post_pass_defect         always null on the row itself (unknown); append-only rows are never rewritten. A later FIX or BLOCK on
 //                            the same branch after a PASS appends an outcome row to telemetry/review-outcomes.jsonl instead, and
 //                            the register folds it back as post_pass_defect:true (an upper bound, see docs/TELEMETRY.md) (0.31.17)
@@ -257,6 +259,8 @@ function writeVerdictRow({ sid, tu, name, rv, pv, source, agentId, writer, branc
     reviewed_effort: writer?.effort ?? null,
     reviewed_branch: typeof branch === 'string' && branch ? branch : null,
     post_pass_defect: null,
+    route: orig && orig.review_route ? orig.review_route : 'subagent', // where the review ran (0.31.63): api | subagent
+    route_reason: orig ? orig.review_route_reason ?? null : null,      // why: api | plan-alternation | plan-cap | high-risk | fallback | off | no-range
     spawn_row_found: !!orig,
     source,
     agent_id: agentId || null,
