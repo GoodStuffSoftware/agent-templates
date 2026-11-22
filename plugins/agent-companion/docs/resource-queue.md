@@ -146,6 +146,14 @@ The shipped rule defaults: `max-hold` and `idle` enabled (both flag a live holde
 
 Every clear is appended once (only by the process that actually removed the entry; one that lost the cleanup race writes no row) to `clears.jsonl` in the ledger directory, one JSON object per line, rotated to `clears.jsonl.1` over 512 KB. Fields: `at` (epoch ms), `rule`, `type` (`lease`, `ticket` or `reservation`), `id`, `pid`, `label`, `project`, `repo`, `worktree`, `session`, `resources` (`{name: units}`; `{<resource>: 0}` for a reservation) and `evidence` (what the rule saw: ages, cpu share, ports, the limit). Rules that clear a dead holder record the pid; a `live-holder-ceiling` clear and a `manual` clear are logged like any other; a flag (`IDLE?`, `OVER TIME`, `HEARTBEAT STALE`) is not a clear and is not logged: it lives in `status` while the lease runs, with the same evidence plus the last probe record (`sample`: tree size, cpu delta, ports, busy-child matches, sample count) and its age (`sampleAgeMs`). `status` shows the newest as `recentClears`, and the session line shows one that is under 15 minutes old.
 
+### The grants log
+
+Every grant appends one JSON line to `grants.jsonl` in the ledger directory (rotated to `grants.jsonl.1` over 512 KB, like `clears.jsonl`); a write failure never blocks a grant. It answers whether RAM, the box or a named lane is the real limit. Fields: `ts` (epoch ms), `id` (lease id), `kind` (`run`, `full`, `targeted`), `label`, `project`, `requested` (`{box, <lane>: units}`), `ramMb`, `waitedMs`, `waitedBy` (`{resource: ms}`: each poll interval is split over the resources blocking the request at its start; `box`, `ram`, a lane name, `hold`, or a reserved resource), `limiting` (every resource that blocked it at any point), `backfilled` (it went ahead of a blocked head, see Admission), `overCapacity` (granted by the bounded wait over budget, with `overCap`: the lanes it went over, e.g. `["pool 2+1/2"]`), and `held` (`{box, ramMb}` held by other leases just before this grant). Grants of ci-local's own queue (`full`, `targeted`) are box waits: `waitedBy` is `{box: waitedMs}` when they waited.
+
+`resource-queue.mjs grants [--hours N] [--json]` (default 24 h; reads both log files, read only) prints the grant count, how many waited, median (mean of the middle two for an even count) and p90 (nearest rank) wait, backfilled and over-capacity counts, and for each limiting resource its wait time, its share of all attributed wait time and how many grants it limited. `--json` gives `{ok, dir, hours, count, waited, medianWaitMs, p90WaitMs, maxWaitMs, totalWaitMs, backfilled, overCapacity, limiting: [{resource, waitMs, share, grants}]}`.
+
+**Split self-check.** When live leases sit in another ledger (the old `%LOCALAPPDATA%\ci-budget` or an MSIX private copy, counted read-only, see Part 1), `status` prints one line `WARNING: split ledger: N live lease(s) in another ledger (<dir>: <n>; ...)` and `--json` carries `foreign: {count, dirs}`. No line when there are none.
+
 ### Reservations, hold and bound leases
 
 #### Reservations: step aside for a named group
@@ -203,6 +211,7 @@ node <plugin>/scripts/resource-queue.mjs unreserve <resource> [--for <group>]
 node <plugin>/scripts/resource-queue.mjs hold [--until <time>]
 node <plugin>/scripts/resource-queue.mjs resume
 node <plugin>/scripts/resource-queue.mjs status [--json] [--resource <name>] [--sample] [--strays]
+node <plugin>/scripts/resource-queue.mjs grants [--hours N] [--json]
 node <plugin>/scripts/resource-queue.mjs sweep
 node <plugin>/scripts/resource-queue.mjs release <lease-id>
 node <plugin>/scripts/resource-queue.mjs install-launcher
@@ -242,7 +251,8 @@ It picks the newest `plugins/cache/*/agent-companion/<version>` copy (falling ba
   reservations: [ { id, resource, forGroup, owner: { pid, session }, ownerAlive,
                     createdAt, expiresAt, remainingMs, reason } ],
   recentClears: [ { at, rule, type, id, pid, label, project, repo, worktree, session, resources, evidence } ],
-  legacyLocks, strays }
+  legacyLocks, strays,
+  foreign: { count, dirs: [ { dir, count } ] } }
 ```
 
 Times are epoch ms. `expiresAt` in `reservations` is the effective end, after the 4 hour cap. `blockedBy` lists resource names (and `hold`); `blockedReason` is the text of why (slots wanted vs available, held, outside load), `''` when nothing blocks; the box reason needs `--sample` (without a sample the box check is skipped and a job held only by outside load shows no reason). The text form prints it as a `why:` line under the head of the queue. Status does not sample the CPU unless asked and never throws. The key sets are pinned in `tests/resource-queue-status.test.mjs`. A reader ignores unknown keys and treats a missing `reservations` as empty.

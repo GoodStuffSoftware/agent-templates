@@ -28,7 +28,7 @@ import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from
 import { constants as osConstants } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  acquireResources, inspectLease, resourceStatus, formatResourceStatus, sweepLedger, lowerOwnPriority, releaseAll, REENTRY_ENV,
+  acquireResources, inspectLease, resourceStatus, formatResourceStatus, grantsSummary, formatGrantsSummary, sweepLedger, lowerOwnPriority, releaseAll, REENTRY_ENV,
   reserveResource, unreserveResource, holdMine, resumeMine, releaseLease,
 } from './ci-budget.mjs';
 import {
@@ -46,6 +46,7 @@ const USAGE = [
   '       resource-queue.mjs hold [--until <time>]    pause my own queued entries (keep their place)',
   '       resource-queue.mjs resume',
   '       resource-queue.mjs status [--json] [--resource <name>] [--sample] [--strays]',
+  '       resource-queue.mjs grants [--hours N] [--json]    summary of the grants log: median and p90 wait, share of wait time per limiting resource',
   '       resource-queue.mjs release <lease-id>       release one lease by hand (a hung live holder); the process is not touched',
   '       resource-queue.mjs sweep',
   '       resource-queue.mjs install-launcher',
@@ -537,6 +538,17 @@ export async function cli(argv, io = {}) {
         st.recentClears = st.recentClears.filter((c) => c.resources && only in c.resources);
       }
       out(json ? JSON.stringify(st, null, 2) : formatResourceStatus(st));
+      return 0;
+    }
+    if (cmd === 'grants') {
+      let json = false; let hours = 24;
+      for (let i = 0; i < rest.length; i += 1) {
+        if (rest[i] === '--json') json = true;
+        else if (rest[i] === '--hours') { hours = Number(flagValue(rest, i, '--hours')); i += 1; if (!(hours > 0)) throw new Error('bad --hours (want a positive number)'); }
+        else throw new Error(`unknown option "${rest[i]}"`);
+      }
+      const g = grantsSummary({ env, hours, ...(io.ledger ?? {}) });
+      out(json ? JSON.stringify(g, null, 2) : formatGrantsSummary(g));
       return 0;
     }
     if (cmd === 'release') {

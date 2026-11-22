@@ -13,7 +13,7 @@ import { makeWorld, settle } from './resource-queue-world.mjs';
 
 const keys = (o) => Object.keys(o).sort();
 
-const TOP = ['dir', 'generatedAt', 'legacyLocks', 'machine', 'ok', 'queue', 'recentClears', 'reservations', 'resources', 'schema', 'schemaVersion', 'strays'];
+const TOP = ['dir', 'foreign', 'generatedAt', 'legacyLocks', 'machine', 'ok', 'queue', 'recentClears', 'reservations', 'resources', 'schema', 'schemaVersion', 'strays'];
 const MACHINE = ['busyCores', 'cores', 'externalCores', 'freeRamMb', 'loaded', 'ramReserveMb', 'totalRamMb'];
 const RESOURCE = ['capacity', 'free', 'held', 'holders', 'name'];
 const HOLDER = [

@@ -71,7 +71,7 @@ import {
   mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, unlinkSync, statSync, existsSync,
 } from 'node:fs';
 import {
-  BOX, loadRules, capacityOf, claudeHome, ramReserveMb, liveVerdict, liveCeilingMs, appendClear, recentClears, scanStrays, NAME_RE, processTable,
+  BOX, loadRules, capacityOf, claudeHome, ramReserveMb, liveVerdict, liveCeilingMs, appendClear, recentClears, appendGrant, readGrants, summarizeGrants, scanStrays, NAME_RE, processTable,
 } from './lib/resource-rules.mjs';
 import { join, basename, dirname, resolve } from 'node:path';
 import {
@@ -1047,6 +1047,38 @@ function noopLease(ctx, units, kind) {
   return lease;
 }
 
+// What is held at the moment of a grant (box units, and RAM promised by the leases), for the grants row.
+function heldAtGrant(ctx, state) {
+  return { box: totals(ctx, state).held, ramMb: state.leases.reduce((a, l) => a + num(l.ramMb), 0) };
+}
+
+/**
+ * One row in grants.jsonl per grant (docs/resource-queue.md): ts, id, kind, label, project, requested
+ * ({box, <lane>: units}), ramMb, waitedMs, waitedBy ({resource: ms} while it waited), limiting (the resources
+ * that blocked it at any point), backfilled, overCapacity (+ overCap: what it went over), held ({box, ramMb}
+ * before this grant). Never throws.
+ */
+function recordGrant(ctx, lease, f) {
+  try {
+    appendGrant(ctx.dir, {
+      ts: ctx.now(), id: lease.id, kind: lease.kind, label: f.label ?? '', project: ctx.project || ctx.repo || '',
+      requested: { box: f.box ?? lease.units, ...(f.named ?? {}) }, ramMb: f.ramMb ?? 0,
+      waitedMs: Math.max(0, Math.round(f.waitedMs ?? lease.waitedMs ?? 0)),
+      waitedBy: f.waitedBy ?? {}, limiting: f.limiting ?? [], backfilled: Boolean(f.backfilled),
+      overCapacity: Boolean(f.overCapacity), ...(f.overCap?.length ? { overCap: f.overCap } : {}), held: f.held ?? { box: 0, ramMb: 0 },
+    });
+  } catch { /* a log failure never blocks the queue */ }
+}
+
+// ci-local's own queue (full and targeted leases): box is the only resource, so a wait is a box wait.
+function grantBoxLease(ctx, s, lo, extra = {}) {
+  const held = heldAtGrant(ctx, s);
+  const lease = createLease(ctx, lo);
+  const w = Math.max(0, lease.waitedMs ?? 0);
+  recordGrant(ctx, lease, { label: lo.label, box: lo.units, waitedMs: w, waitedBy: w > 0 ? { box: w } : {}, limiting: w > 0 ? ['box'] : [], held, ...extra });
+  return lease;
+}
+
 function createLease(ctx, {
   kind, units, heavy = 0, label = '', waitedMs = 0, resources = {}, ramMb = 0, limits = null, monitored = false,
   group = '', bindPid = 0,
@@ -1329,7 +1361,7 @@ function acquireFull(ctx, opts) {
             if (free < 1) return null;
             // A loaded machine (reserve not idle, or over the load threshold) gets one worker.
             const units = Math.min(load.over ? 1 : desired, Math.floor(free));
-            const lease = createLease(ctx, {
+            const lease = grantBoxLease(ctx, s, {
               kind: 'full', units, label: opts.label ?? '', waitedMs: ctx.now() - begin,
             });
             tryUnlink(ticketFile);
@@ -1351,7 +1383,7 @@ function acquireFull(ctx, opts) {
       }
       if (ctx.now() - begin >= ctx.queueMaxWaitMs) { // no unbounded wait: go on with one worker, over budget
         const lease = withAdmit(ctx, () => {
-          const l = createLease(ctx, { kind: 'full', units: 1, label: opts.label ?? '', waitedMs: ctx.now() - begin });
+          const l = grantBoxLease(ctx, readState(ctx, { reclaim: false }), { kind: 'full', units: 1, label: opts.label ?? '', waitedMs: ctx.now() - begin }, { overCapacity: true });
           tryUnlink(ticketFile);
           return l;
         });
@@ -1383,13 +1415,13 @@ function acquireExpress(ctx, opts) {
       const s = readState(ctx, { reclaim: true });
       const t = totals(ctx, s);
       if (t.held + 1 > ctx.budget + ctx.express) return null;
-      return createLease(ctx, { kind: 'targeted', units: 1, label: opts.label ?? '', waitedMs: ctx.now() - begin });
+      return grantBoxLease(ctx, s, { kind: 'targeted', units: 1, label: opts.label ?? '', waitedMs: ctx.now() - begin });
     });
     if (lease) return lease;
     if (ctx.now() - begin >= ctx.expressMaxWaitMs) { // no unbounded wait: go on over budget
-      const forced = withAdmit(ctx, () => createLease(ctx, {
+      const forced = withAdmit(ctx, () => grantBoxLease(ctx, readState(ctx, { reclaim: false }), {
         kind: 'targeted', units: 1, label: opts.label ?? '', waitedMs: ctx.now() - begin,
-      }));
+      }, { overCapacity: true }));
       ctx.log(`ci-budget: waited ${Math.round((ctx.now() - begin) / 1000)} s at the express headroom; `
         + `starting with 1 worker, over budget (CI_LOCAL_EXPRESS_MAX_WAIT_MS=${ctx.expressMaxWaitMs}).`);
       return forced;
@@ -1698,13 +1730,27 @@ export async function acquireResources(opts = {}) {
     ...(ctx.project ? { project: ctx.project } : {}), ...(ctx.session ? { session: ctx.session } : {}),
     ...(req.group ? { group: req.group } : {}),
   };
-  const grant = (units) => {
+  // Which resource blocked this request, and for how long: each poll interval is split over the resources
+  // that blocked it at the start of the interval; the last interval is closed at the grant.
+  const waitedBy = {}; const limited = new Set(); let prevBlockers = []; let lastAccrue = begin;
+  const accrue = (to) => {
+    const dt = to - lastAccrue; lastAccrue = to;
+    if (dt > 0) for (const r of prevBlockers) waitedBy[r] = (waitedBy[r] ?? 0) + dt / prevBlockers.length;
+  };
+  const grant = (units, s, extra = {}) => {
     const alive = req.bindPid > 0 && ctx.isAlive(req.bindPid);
     if (req.bindPid > 0 && !alive) ctx.log(`resource-queue: the bound pid ${req.bindPid} is not running any more; the lease belongs to this process instead.`);
-    return createLease(ctx, {
+    const held = heldAtGrant(ctx, s);
+    const lease = createLease(ctx, {
       kind: 'run', units, label, waitedMs: ctx.now() - begin, resources: req.named, ramMb: req.ramMb,
       limits: opts.limits ?? null, monitored: Boolean(opts.monitored), group: req.group, bindPid: alive ? req.bindPid : 0,
     });
+    accrue(ctx.now());
+    recordGrant(ctx, lease, {
+      label, box: units, named: req.named, ramMb: req.ramMb, waitedMs: ctx.now() - begin,
+      waitedBy: Object.fromEntries(Object.entries(waitedBy).map(([k, v]) => [k, Math.round(v)])), limiting: [...limited], held, ...extra,
+    });
+    return lease;
   };
   try {
     writeFileSync(ticketFile, JSON.stringify(ticket), { flag: 'wx' });
@@ -1739,7 +1785,7 @@ export async function acquireResources(opts = {}) {
           const s = readState(ctx, { reclaim: true });
           const f = evaluateFit(ctx, s, req, id, external);
           if (!f.ok) return { reasons: f.reasons, policy: f.policy };
-          const lease = grant(req.box);
+          const lease = grant(req.box, s, { backfilled: (f.passed ?? []).length > 0 });
           dropTicket();
           for (const hid of f.passed ?? []) { // starvation bound: count this pass on every head we went ahead of
             const pf = join(ctx.dir, `ticket-${hid}.passed`);
@@ -1755,6 +1801,9 @@ export async function acquireResources(opts = {}) {
         reasons = got.reasons; policy = got.policy;
       }
       const tickAt = ctx.now();
+      accrue(tickAt);
+      prevBlockers = [...new Set(reasons.map((r) => r.resource).filter(Boolean))];
+      for (const r of prevBlockers) limited.add(r);
       if (lastPolicy) excluded += tickAt - lastTick;
       lastTick = tickAt; lastPolicy = policy;
       const waited = tickAt - begin - excluded;
@@ -1776,7 +1825,7 @@ export async function acquireResources(opts = {}) {
             }
           }
           if (blocked.length) return { blocked };
-          const l = grant(req.box); dropTicket();
+          const l = grant(req.box, s, { overCapacity: true, overCap }); dropTicket();
           return { lease: l, overCap };
         });
         if (over.lease) {
@@ -1927,6 +1976,7 @@ export function resourceStatus(opts = {}) {
         busyCores: busyCores === null ? null : Math.round(busyCores * 10) / 10, externalCores: external, loaded,
       },
       resources, queue, reservations, recentClears: recentClears(ctx.dir, { now }), legacyLocks, strays,
+      foreign: foreignSummary(state),
     };
   } catch (err) {
     return {
@@ -1936,12 +1986,47 @@ export function resourceStatus(opts = {}) {
   }
 }
 
+// Live leases that sit in an older or other ledger (the old %LOCALAPPDATA%\ci-budget, MSIX private copies): {count, dirs}.
+function foreignSummary(state) {
+  const byDir = {};
+  for (const l of state.leases) if (l.foreign) byDir[l.foreignDir] = (byDir[l.foreignDir] ?? 0) + 1;
+  return { count: Object.values(byDir).reduce((a, b) => a + b, 0), dirs: Object.entries(byDir).map(([dir, count]) => ({ dir, count })) };
+}
+
+/**
+ * The grants summary (read-only): grant rows of the last `hours` (default 24) from grants.jsonl, summarised
+ * (count, median and p90 wait, share of wait time per limiting resource). Never throws.
+ */
+export function grantsSummary(opts = {}) {
+  try {
+    const ctx = makeCtx({ ...opts, log: () => {}, registerExit: false });
+    const hours = Number.isFinite(Number(opts.hours)) && Number(opts.hours) > 0 ? Number(opts.hours) : 24;
+    const rows = readGrants(ctx.dir, { sinceMs: hours * 3600_000, now: ctx.now() });
+    return { ok: true, dir: ctx.dir, hours, ...summarizeGrants(rows) };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+}
+
+export function formatGrantsSummary(g) {
+  if (!g.ok) return `resource queue: grants unavailable (${g.error})`;
+  if (!g.count) return `Grants in the last ${g.hours} h: none (ledger ${g.dir})`;
+  const lines = [`Grants in the last ${g.hours} h (ledger ${g.dir}): ${g.count}, ${g.waited} waited; wait median ${dur(g.medianWaitMs)}, p90 ${dur(g.p90WaitMs)}, max ${dur(g.maxWaitMs)}, total ${dur(g.totalWaitMs)}`];
+  lines.push(`  backfilled ${g.backfilled}, over capacity ${g.overCapacity}`);
+  if (!g.limiting.length) lines.push('  no grant waited on a resource');
+  for (const r of g.limiting) lines.push(`  limiting ${r.resource.padEnd(12)} ${String(Math.round(r.share * 100)).padStart(3)}% of wait time (${dur(r.waitMs)}, ${r.grants} grant${r.grants === 1 ? '' : 's'})`);
+  return lines.join('\n');
+}
+
 /** The text form of resourceStatus() (what `status` prints without --json). */
 export function formatResourceStatus(st) {
   if (!st.ok) return `resource queue: status unavailable (${st.error})`;
   const lines = [];
   const m = st.machine;
   lines.push(`Resource queue (ledger ${st.dir})`);
+  if (st.foreign?.count > 0) {
+    lines.push(`  WARNING: split ledger: ${st.foreign.count} live lease${st.foreign.count === 1 ? '' : 's'} in another ledger (${st.foreign.dirs.map((d) => `${d.dir}: ${d.count}`).join('; ')}); counted toward capacity, read only. Older versions still write there.`);
+  }
   lines.push(`  machine: ${m.cores} cores, RAM ${m.freeRamMb} MB free of ${m.totalRamMb} (reserve ${m.ramReserveMb} MB)`
     + (m.busyCores === null ? '' : `, cpu busy ${m.busyCores} cores, outside load ~${m.externalCores}${m.loaded ? ', LOADED' : ''}`));
   for (const r of st.resources) {

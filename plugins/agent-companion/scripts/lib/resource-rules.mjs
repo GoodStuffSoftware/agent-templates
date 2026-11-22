@@ -247,6 +247,76 @@ export function recentClears(dir, { limit = 20, sinceMs = 24 * 3600_000, now = D
   return out;
 }
 
+// ---------------------------------------------------------------- grants log
+
+export const grantsFile = (dir) => join(dir, 'grants.jsonl');
+
+/**
+ * Append one grant row (the shape is documented in docs/resource-queue.md). Same 512 KB rotation as
+ * clears.jsonl (to grants.jsonl.1). Never throws: a log failure never blocks the queue.
+ */
+export function appendGrant(dir, rec) {
+  try {
+    const file = grantsFile(dir);
+    try {
+      if (statSync(file).size > CLEARS_MAX_BYTES) renameSync(file, `${file}.1`);
+    } catch { /* no log yet */ }
+    appendFileSync(file, `${JSON.stringify(rec)}\n`);
+  } catch { /* a log failure never blocks the queue */ }
+}
+
+/** Grant rows with ts >= now - sinceMs, oldest first (reads grants.jsonl.1 too). Torn lines are skipped. */
+export function readGrants(dir, { sinceMs = 24 * 3600_000, now = Date.now() } = {}) {
+  const out = [];
+  for (const file of [`${grantsFile(dir)}.1`, grantsFile(dir)]) {
+    let raw = '';
+    try { raw = readFileSync(file, 'utf8'); } catch { continue; }
+    for (const line of raw.split('\n')) {
+      if (!line) continue;
+      try {
+        const r = JSON.parse(line);
+        if (r && Number(r.ts) >= now - sinceMs) out.push(r);
+      } catch { /* torn line */ }
+    }
+  }
+  return out;
+}
+
+// The wait attributed to each limiting resource by one row: its waitedBy, else its waitedMs split over `limiting`.
+function rowWaitBy(r) {
+  if (r.waitedBy && typeof r.waitedBy === 'object') return r.waitedBy;
+  if (Array.isArray(r.limiting) && r.limiting.length) return Object.fromEntries(r.limiting.map((x) => [x, (Number(r.waitedMs) || 0) / r.limiting.length]));
+  return {};
+}
+
+/**
+ * Summary of grant rows: count, median (mean of the two middle values for an even count) and p90 (nearest
+ * rank) of waitedMs, and per limiting resource the wait ms, the share of all attributed wait time and
+ * the number of grants it limited.
+ */
+export function summarizeGrants(rows) {
+  const waits = rows.map((r) => Math.max(0, Number(r.waitedMs) || 0)).sort((a, b) => a - b);
+  const mid = waits.length >> 1;
+  const medianWaitMs = !waits.length ? 0 : waits.length % 2 ? waits[mid] : Math.round((waits[mid - 1] + waits[mid]) / 2);
+  const p90WaitMs = waits.length ? waits[Math.min(waits.length - 1, Math.ceil(0.9 * waits.length) - 1)] : 0;
+  const by = {}; const grants = {};
+  for (const r of rows) {
+    const wb = rowWaitBy(r);
+    for (const [name, ms] of Object.entries(wb)) { by[name] = (by[name] ?? 0) + (Number(ms) || 0); grants[name] = (grants[name] ?? 0) + 1; }
+    for (const name of Array.isArray(r.limiting) ? r.limiting : []) if (!(name in wb)) grants[name] = (grants[name] ?? 0) + 1;
+  }
+  for (const name of Object.keys(grants)) by[name] ??= 0;
+  const attributed = Object.values(by).reduce((a, b) => a + b, 0);
+  const limiting = Object.entries(by).sort((a, b) => b[1] - a[1]).map(([resource, waitMs]) => ({
+    resource, waitMs: Math.round(waitMs), share: attributed > 0 ? Math.round((waitMs / attributed) * 1000) / 1000 : 0, grants: grants[resource] ?? 0,
+  }));
+  return {
+    count: rows.length, waited: waits.filter((w) => w > 0).length, medianWaitMs, p90WaitMs,
+    maxWaitMs: waits.length ? waits[waits.length - 1] : 0, totalWaitMs: waits.reduce((a, b) => a + b, 0),
+    backfilled: rows.filter((r) => r.backfilled).length, overCapacity: rows.filter((r) => r.overCapacity).length, limiting,
+  };
+}
+
 // ---------------------------------------------------------------- process table (spawns; never on the hook path)
 
 /**
