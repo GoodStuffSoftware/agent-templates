@@ -225,7 +225,7 @@ function buildThrowawayRepo() {
   ].join('\n'));
   writeFileSync(join(repo, 'scripts', 'ci-local.mjs'), readFileText(SCRIPT));
   mkdirSync(join(repo, 'plugins', 'agent-companion', 'scripts'), { recursive: true });
-  for (const rel of [['scripts', 'ci-budget.mjs'], ['scripts', 'lib', 'resource-rules.mjs'], ['config', 'resource-rules.json']]) { // ci-local imports it
+  for (const rel of [['scripts', 'ci-budget.mjs'], ['scripts', 'lib', 'resource-rules.mjs'], ['scripts', 'lib', 'reaper.mjs'], ['scripts', 'lib', 'live-capacity.mjs'], ['hooks', 'lib', 'context.mjs'], ['hooks', 'lib', 'routing-profile.mjs'], ['config', 'resource-rules.json']]) { // ci-local imports it
     mkdirSync(dirname(join(repo, 'plugins', 'agent-companion', ...rel)), { recursive: true });
     writeFileSync(join(repo, 'plugins', 'agent-companion', ...rel), readFileText(join(dirname(SCRIPT), '..', 'plugins', 'agent-companion', ...rel)));
   }
