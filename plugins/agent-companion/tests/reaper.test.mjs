@@ -330,7 +330,7 @@ test('processSnapshot spawns hidden and passes the ps flags / LC_ALL=C; a failin
   const rows = processSnapshot({ platform: 'linux', spawn: fake });
   assert.equal(rows.length, 1);
   assert.equal(calls[0].cmd, 'ps');
-  assert.deepEqual(calls[0].args, ['-A', '-o', 'pid=,ppid=,rss=,lstart=,args=']);
+  assert.deepEqual(calls[0].args, ['-A', '-o', 'pid=,ppid=,rss=,time=,lstart=,args=']);
   assert.equal(calls[0].opts.windowsHide, true);
   assert.equal(calls[0].opts.env.LC_ALL, 'C');
   const w = [];

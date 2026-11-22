@@ -338,32 +338,47 @@ function parseCimDate(s) {
 /** Windows: the JSON of one Get-CimInstance Win32_Process pass -> table rows. */
 export function parseWinJson(text) {
   const arr = [].concat(JSON.parse(text));
-  return arr.map((x) => ({
-    pid: x.p, ppid: x.pp, name: String(x.n ?? ''), exe: x.e ? String(x.e) : '', cmd: String(x.c ?? ''),
-    creationTime: parseCimDate(x.s), memMb: x.w == null ? null : Math.round(Number(x.w) / 1048576),
-  }));
+  return arr.map((x) => {
+    const row = {
+      pid: x.p, ppid: x.pp, name: String(x.n ?? ''), exe: x.e ? String(x.e) : '', cmd: String(x.c ?? ''),
+      creationTime: parseCimDate(x.s), memMb: x.w == null ? null : Math.round(Number(x.w) / 1048576),
+    };
+    // k = Kernel+User mode time in 100 ns units -> cpu ms (live capacity measures tree usage from it)
+    if (x.k != null && Number.isFinite(Number(x.k))) row.cpuMs = Math.round(Number(x.k) / 10000);
+    return row;
+  });
 }
 
 const MON = { Jan: 0, Feb: 1, Mar: 2, Apr: 3, May: 4, Jun: 5, Jul: 6, Aug: 7, Sep: 8, Oct: 9, Nov: 10, Dec: 11 };
 
+/** ps cpu time [DD-][HH:]MM:SS(.ss) -> ms, or null. */
+export function parsePsTime(t) {
+  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)$/.exec(String(t));
+  if (!m) return null;
+  return Math.round(((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 3600 + Number(m[3]) * 60 + Number(m[4])) * 1000);
+}
+
 /**
- * Linux/macOS: `ps -A -o pid=,ppid=,rss=,lstart=,args=` text -> table rows. lstart is "Sat Nov 21 10:00:00 2026"
+ * Linux/macOS: `ps -A -o pid=,ppid=,rss=,time=,lstart=,args=` text -> table rows (the time column is optional). lstart is "Sat Nov 21 10:00:00 2026"
  * (fixed field order under LC_ALL=C, whitespace padded; resolution 1 s, local time: only ever compared with itself).
  */
 export function parsePsOutput(text) {
   const rows = [];
   for (const l of String(text).split('\n')) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+[A-Za-z]{3}\s+([A-Za-z]{3})\s+(\d+)\s+(\d\d):(\d\d):(\d\d)\s+(\d{4})\s*(.*)$/.exec(l);
+    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(?:(\d[\d:.-]*)\s+)?[A-Za-z]{3}\s+([A-Za-z]{3})\s+(\d+)\s+(\d\d):(\d\d):(\d\d)\s+(\d{4})\s*(.*)$/.exec(l);
     if (!m) continue;
-    const mon = MON[m[4]];
+    const mon = MON[m[5]];
     if (mon === undefined) continue;
-    const cmd = m[10];
+    const cmd = m[11];
     const first = cmd.startsWith('/') ? cmd.split(/\s+/)[0] : '';
-    rows.push({
+    const row = {
       pid: Number(m[1]), ppid: Number(m[2]), name: baseOf(cmd.split(/\s+/)[0]), exe: first, cmd,
-      creationTime: new Date(Number(m[9]), mon, Number(m[5]), Number(m[6]), Number(m[7]), Number(m[8])).getTime(),
+      creationTime: new Date(Number(m[10]), mon, Number(m[6]), Number(m[7]), Number(m[8]), Number(m[9])).getTime(),
       memMb: Math.round(Number(m[3]) / 1024),
-    });
+    };
+    const cpuMs = m[4] ? parsePsTime(m[4]) : null;
+    if (cpuMs !== null) row.cpuMs = cpuMs;
+    rows.push(row);
   }
   return rows;
 }
@@ -374,14 +389,14 @@ export function processSnapshot({ platform = process.platform, spawn = spawnSync
     if (platform === 'win32') {
       const ps = '$ErrorActionPreference="Stop";Get-CimInstance Win32_Process | ForEach-Object { '
         + '[pscustomobject]@{p=$_.ProcessId;pp=$_.ParentProcessId;n=$_.Name;e=$_.ExecutablePath;c=$_.CommandLine;'
-        + 'w=[int64]$_.WorkingSetSize;s=$_.CreationDate} } | ConvertTo-Json -Compress';
+        + 'w=[int64]$_.WorkingSetSize;k=[int64]$_.KernelModeTime+[int64]$_.UserModeTime;s=$_.CreationDate} } | ConvertTo-Json -Compress';
       const r = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], {
         encoding: 'utf8', windowsHide: true, timeout: 20_000, maxBuffer: 64 * 1024 * 1024,
       });
       if (r.status !== 0 || !r.stdout) return null;
       return parseWinJson(r.stdout);
     }
-    const r = spawn('ps', ['-A', '-o', 'pid=,ppid=,rss=,lstart=,args='], {
+    const r = spawn('ps', ['-A', '-o', 'pid=,ppid=,rss=,time=,lstart=,args='], {
       encoding: 'utf8', windowsHide: true, timeout: 15_000, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' },
     });
     if (r.status !== 0 || !r.stdout) return null;

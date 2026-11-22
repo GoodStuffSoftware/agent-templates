@@ -267,7 +267,7 @@ export async function runUnderQueue({
   if (!off && req) {
     for (const [s, h] of early) process.on(s, h);
     lease = await (io.acquire ?? acquireResources)({
-      env, box: req.box, resources: req.resources, ramMb: req.ramMb, label, limits: req.limits, monitored: req.monitored,
+      env, cls: request.class ?? '', box: req.box, resources: req.resources, ramMb: req.ramMb, label, limits: req.limits, monitored: req.monitored,
       maxWaitMs: maxWaitSeconds === null ? undefined : maxWaitSeconds * 1000, log: err, group, bindPid, ...(io.ledger ?? {}),
     });
     for (const [s, h] of early) process.off(s, h);
