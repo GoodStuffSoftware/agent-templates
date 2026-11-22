@@ -102,6 +102,7 @@ Sidecars next to a lease or ticket:
 
 A request is admitted when every part of it fits at once:
 
+1. **FIFO, per resource, with bounded backfill (0.31.62).** A later box-only ticket may go first when, after its grant, `budget - held - request` still covers the box (and RAM) need of every ticket it passes; it never passes a ticket on a shared named lane, and a head passed over 6 times blocks it again.
 1. **FIFO, per resource.** Tickets are ordered by `(createdAt, pid)`. A ticket waits behind an earlier ticket only when they share a resource: a later ticket that wants only `app-e2e` is not blocked by an earlier one that wants only `box`. Only box-using tickets order against each other for the box. A ticket that is held or passed over (below) blocks nobody.
 2. **Units and CPU.** For `box:N`: `N <= budget - held - counted`, where `counted` is the part of the sampled outside load of Part 1 (busy cores our held units do not explain) that exceeds `cores - budget`. A blocked request says why: `box:12 wanted, 11 available of 16 (1 held, outside load ~20 cores; 4 count against the budget after 16 cores of headroom)`. A request that finds nothing else held always progresses. The headroom rules of Part 1 ("Headroom for hooks") apply unchanged.
 3. **Named resources.** Each requested name has `held + N <= capacity`.
@@ -250,7 +251,7 @@ Times are epoch ms. `expiresAt` in `reservations` is the effective end, after th
 
 ### Hook interface
 
-Hooks do not spawn the CLI to look: they import `scripts/ci-budget.mjs` and call `resourceStatus(opts)` in-process (the same object as `status --json`, no sampling, fail soft), and `scripts/resource-queue.mjs` for `installLauncher()` and `launcherPath()`. Measured by hand: the first import costs about 11 ms, the first `resourceStatus()` about 3 ms, a repeat under 1 ms. A hook must not take `admit.lock`, write the ledger, or wait.
+Hooks do not spawn the CLI to look: they import `scripts/ci-budget.mjs` and call `resourceStatus(opts)` in-process (the same object as `status --json`, no sampling, fail soft), and `scripts/resource-queue.mjs` for `installLauncher()` and `launcherPath()`. Measured by hand: the first import costs about 11 ms, the first `resourceStatus()` about 3 ms, a repeat under 1 ms. A hook must not take `admit.lock` or wait. Since 0.31.62 a status call does sweep the ledger (expired, dead-pid and over-ceiling entries are dropped, no process-table call), so a lease no waiter ever noticed is cleared; pass `sweep: false` to read only.
 
 ### The resource gate (PreToolUse, Bash)
 

@@ -862,3 +862,84 @@ test('lease heartbeat: the sidecar file is rewritten by a beat and the lease rec
     assert.equal(w.files(/^lease-/).length, 0, 'release removes the record and every sidecar');
   } finally { w.done(); }
 });
+
+// ---------------------------------------------------------------- leg 2: backfill, sweep on status, tombstone
+
+import { readdirSync as lsDir, writeFileSync as putFile } from 'node:fs';
+import { join as joinPath } from 'node:path';
+import { BACKFILL_MAX_PASSES } from '../scripts/ci-budget.mjs';
+
+const headTicket = (w) => lsDir(w.dir).find((n) => /^ticket-[0-9a-f]+\.json$/.test(n)).replace(/^ticket-|\.json$/g, '');
+
+test('backfill: a small box ticket goes first when the blocked head still fits afterwards; not when it would delay it', async () => {
+  const w = makeWorld({ budget: 10 });
+  try {
+    const a = await w.acq({ box: 2, resources: { 'app-e2e': 1 }, label: 'A' });
+    const pB = w.acq({ box: 4, resources: { 'app-e2e': 1 }, label: 'B' }); // blocked on app-e2e
+    w.t += 1;
+    const c = await w.acq({ box: 3, label: 'C' }); // 10 - 2 - 3 = 5 >= 4: cannot delay B
+    assert.equal(c.units, 3, 'C backfilled');
+    c.release();
+    const pD = w.acq({ box: 5, label: 'D' }); // 10 - 2 - 5 = 3 < 4: would delay B
+    await settle();
+    assert.equal(w.tickets().length, 2, 'D waits behind B');
+    a.release();
+    const b = await pB; b.release();
+    (await pD).release();
+  } finally { w.done(); }
+});
+
+test('backfill: an exclusive lane stays strict FIFO, and a head passed over the bound blocks backfill', async () => {
+  const w = makeWorld({ budget: 10 });
+  try {
+    const order = [];
+    const a = await w.acq({ box: 1, resources: { 'app-e2e': 1 }, label: 'A' });
+    const pB = w.acq({ box: 1, resources: { 'app-e2e': 1 }, label: 'B' }).then((l) => { order.push('B'); return l; });
+    w.t += 1;
+    const pC = w.acq({ box: 1, resources: { 'app-e2e': 1 }, label: 'C' }).then((l) => { order.push('C'); return l; });
+    await settle();
+    a.release();
+    await settle();
+    assert.deepEqual(order, ['B'], 'C waits for B on the exclusive lane');
+    (await pB).release(); (await pC).release();
+    const a2 = await w.acq({ box: 2, resources: { 'app-e2e': 1 }, label: 'A2' });
+    const pH = w.acq({ box: 2, resources: { 'app-e2e': 1 }, label: 'H' });
+    await settle();
+    putFile(joinPath(w.dir, `ticket-${headTicket(w)}.passed`), String(BACKFILL_MAX_PASSES));
+    w.t += 1;
+    const pS = w.acq({ box: 1, label: 'S' });
+    await settle();
+    assert.equal(w.tickets().length, 2, 'S is not backfilled past a head at the bound');
+    a2.release();
+    (await pH).release(); (await pS).release();
+  } finally { w.done(); }
+});
+
+test('a status call sweeps an over-ceiling lease and a dead-pid lease with nobody waiting', async () => {
+  const w = makeWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, limits: { maxHoldMs: 60_000 }, monitored: true, label: 'A', pid: 901 });
+    await w.acq({ box: 1, label: 'Z', pid: 902 });
+    w.dead.add(902);
+    assert.equal(w.leases().length, 2);
+    w.t += CEIL + 1000;
+    a.recordActivity(w.t, w.t);
+    resourceStatus({ ...w.opts });
+    assert.equal(w.leases().length, 0, 'both swept by status alone');
+  } finally { w.done(); }
+});
+
+test('a heartbeat after a clear does not put the lease back, even after 300 s', async () => {
+  const w = makeWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, limits: { maxHoldMs: 60_000 }, monitored: true, label: 'A', pid: 903 });
+    w.t += CEIL + 1000;
+    a.recordActivity(w.t, w.t);
+    resourceStatus({ ...w.opts });
+    assert.equal(w.leases().length, 0, 'cleared');
+    w.t += 6 * 60_000;
+    sweepLedger({ ...w.opts }); // the tombstone survives while pid 903 lives
+    a.beat();
+    assert.equal(w.leases().length, 0, 'not resurrected');
+  } finally { w.done(); }
+});
