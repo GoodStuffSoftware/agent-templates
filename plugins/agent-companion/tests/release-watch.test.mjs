@@ -1,618 +1,220 @@
-// The scout's Claude Code release watch (scripts/lib/release-watch.mjs), its
-// SessionStart line (hooks/scout-surface.mjs) and the scout_suppress option.
-// Fixture versions are 9.x so they sit above whatever `claude --version` says on
-// the machine running the suite. The network is never touched: the suite sets
-// AGENT_COMPANION_RELEASE_WATCH_NO_NET, and these tests that need a response
-// start a server on the loopback interface and clear it.
-import './isolate.mjs';
-import test from 'node:test';
+import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
-import { spawn } from 'node:child_process';
-import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { makeFixture, runHook, runScript, childEnv, PLUGIN_ROOT } from './helpers.mjs';
-import { stateFile } from '../hooks/lib/context.mjs';
-import {
-  topicsOf, parseChangelog, newerMatching, checkDue, fetchChangelogHead, CHECK_INTERVAL_MS, runReleaseWatch, markSeen, markDecided, triageFloor, undecidedOf, keepUndecided,
-} from '../scripts/lib/release-watch.mjs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 
-const CHANGELOG = [
-  '# Changelog',
-  '',
-  '## 9.0.3',
-  '',
-  '- Added `effort` to the Agent tool for a per-spawn setting',
-  '- Fixed a terminal rendering glitch in the status bar',
-  '',
-  '## 9.0.2',
-  '',
-  '- Fixed subagent auto-compact window being ignored',
-  '- Improved SendMessage delivery to stopped agents',
-  '- Fixed monitoring dashboards flickering',
-  '',
-  '## 9.0.1',
-  '',
-  '- Fixed an old hooks problem',
-  '',
-].join('\n');
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const SCRIPT = join(ROOT, 'scripts', 'release-watch.mjs');
+const HOUR = 3600e3;
+const T = Date.parse('2026-03-01T10:00:00Z');
 
-function serve(handler) {
-  return new Promise((resolve) => {
-    const hits = [];
-    const srv = createServer((req, res) => { hits.push({ url: req.url, range: req.headers.range }); handler(req, res, hits); });
-    srv.listen(0, '127.0.0.1', () => resolve({
-      url: `http://127.0.0.1:${srv.address().port}/CHANGELOG.md`,
-      hits,
-      close: () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(r); }),
-    }));
-  });
-}
-
-function okServer(body = CHANGELOG) {
-  return serve((req, res) => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end(body); });
-}
-
-// spawnSync would block the loopback server living in this process.
-function runDetect({ cwd, env = {}, timeout = 20000 }) {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [join(PLUGIN_ROOT, 'scripts', 'detect.mjs')], {
-      cwd, env: childEnv(env), windowsHide: true,
-    });
-    let out = '';
-    let err = '';
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { err += d; });
-    const timer = setTimeout(() => child.kill(), timeout);
-    child.on('close', (status) => {
-      clearTimeout(timer);
-      let json = null;
-      try { json = JSON.parse(out); } catch { /* leave null */ }
-      resolve({ status, json, stderr: err });
-    });
-  });
-}
-
-const WATCH_ENV = (url, extra = {}) => ({
-  AGENT_COMPANION_RELEASE_WATCH_NO_NET: '',
-  AGENT_COMPANION_RELEASE_WATCH_URL: url,
-  AGENT_COMPANION_RELEASE_WATCH_INSTALLED: '9.0.1',
-  ...extra,
+let tmp; let state; let claude;
+const env = () => ({ ...process.env, CLAUDE_CONFIG_DIR: claude, AGENT_COMPANION_STATE_DIR: state, AGENT_COMPANION_FAKE_NOW: '', CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_MINUTES: '' });
+beforeEach(() => {
+  tmp = mkdtempSync(join(tmpdir(), 'rw-'));
+  state = join(tmp, 'ac'); claude = join(tmp, 'claude');
+  mkdirSync(join(state, 'state'), { recursive: true }); mkdirSync(join(claude, 'plugins'), { recursive: true });
+  process.env.CLAUDE_CONFIG_DIR = claude; process.env.AGENT_COMPANION_STATE_DIR = state; delete process.env.AGENT_COMPANION_FAKE_NOW;
 });
 
-const releaseSig = (res) => (res.json?.signals || []).find((s) => s.kind === 'cli_release_available');
+const W = await import('../scripts/release-watch.mjs');
+const S = await import('../hooks/lib/release-watch-state.mjs');
+const installed = (t = T) => ({ plugins: { 'agent-companion@x': [{ version: '1.2.3', lastUpdated: new Date(t).toISOString() }] } });
+const file = (n) => join(state, 'state', n);
+const flag = [{ name: 'queue-clears', value: 3.6, detail: 'x' }];
 
-// ---------------------------------------------------------------------------
-// keyword extraction
-// ---------------------------------------------------------------------------
-
-test('topicsOf: every kept topic matches, and unrelated or UI-only text does not', () => {
-  const cases = [
-    ['Added a subagent frontmatter field', 'subagents'],
-    ['Fixed the Agent tool hanging', 'subagents'],
-    ['Fixed a SessionStart hook not firing', 'hooks'],
-    ['Fixed prompt cache misses after resume', 'cache'],
-    ['Fixed auto-compaction running twice', 'compaction'],
-    ['Fixed autoCompactWindow being ignored', 'compaction'],
-    ['Added effort levels', 'effort'],
-    ['Fixed CLAUDE_CODE_SUBAGENT_MODEL being ignored', 'models'],
-    ['Fixed the Sonnet 5.5 cache-read price shown in /cost', 'models'],
-    ['Fixed saved transcripts missing the last turn', 'transcripts'],
-    ['Fixed SendMessage to a stopped agent', 'SendMessage'],
-    ['Fixed worktree cleanup for subagents', 'worktree'],
-    ['Fixed Workflow subagents stalling', 'workflow'],
-    ['Fixed plugin hooks not reloading after an update', 'plugins'],
-  ];
-  for (const [text, topic] of cases) assert.ok(topicsOf(text).includes(topic), `${text} -> ${topic}; got ${topicsOf(text)}`);
-  const dropped = [
-    'Fixed a terminal rendering glitch in the status bar',
-    'Fixed monitoring dashboards flickering',
-    'Fixed the claude agents view losing its selection',
-    'Fixed compact y-axis labels in the usage chart',
-    'Fixed plugin install failing behind a proxy',
-    'Improved syntax highlighting caching',
-    'Added the Monitor tool card in the editor',
-    'Fixed the desktop app crashing',
-  ];
-  for (const text of dropped) assert.deepEqual(topicsOf(text), [], text);
-  // The mods runtime: the plugins/hooks/subagents labels are suppressed, other topics are not.
-  assert.deepEqual(topicsOf('Fixed hooks firing twice in the mods runtime ($.ui.render)'), []);
-  assert.deepEqual(topicsOf('Fixed a mods plugin hooks worker crash'), []);
-  assert.deepEqual(topicsOf('Fixed the mods panel ignoring effort settings'), ['effort']);
+test('schedule: eight checks at the decided hours', () => {
+  const s = W.buildSchedule(T, '1', null);
+  assert.deepEqual(s.due.map((d) => (d - T) / HOUR), [1, 2, 4, 8, 12, 16, 20, 24]);
+  assert.deepEqual(W.dueIndexes(s, T + 30 * 60e3), []);
+  assert.deepEqual(W.dueIndexes(s, T + 2 * HOUR), [0, 1]);
 });
 
-test('parseChangelog + newerMatching: only releases newer than installed, only matching items, newest first', () => {
-  const releases = parseChangelog(CHANGELOG);
-  assert.deepEqual(releases.map((r) => r.version), ['9.0.3', '9.0.2', '9.0.1']);
-  const newer = newerMatching(releases, '9.0.1');
-  assert.deepEqual(newer.map((r) => r.version), ['9.0.3', '9.0.2']);
-  assert.equal(newer[0].items.length, 1, 'the rendering item is dropped');
-  assert.equal(newer[1].items.length, 2, 'subagent + SendMessage kept, monitoring dropped');
-  assert.deepEqual(newer[0].items[0].topics.sort(), ['effort', 'subagents']);
+test('newestInstall picks the newest copy and ignores other plugins', () => {
+  const i = { plugins: { 'other@x': [{ lastUpdated: '2030-01-01T00:00:00Z' }], 'agent-companion@x': [{ version: 'a', lastUpdated: '2026-01-01T00:00:00Z' }, { version: 'b', lastUpdated: '2026-02-01T00:00:00Z' }] } };
+  assert.equal(W.newestInstall(i).version, 'b');
+  assert.equal(W.newestInstall({}), null);
 });
 
-test('parseChangelog joins an indented continuation line to its bullet', () => {
-  const r = parseChangelog('## 9.1.0\n- Fixed a hook that\n  also touched the cache\n- Other\n');
-  assert.equal(r[0].items.length, 2);
-  assert.match(r[0].items[0], /hook that also touched the cache/);
+test('tick: nothing due is a quiet no-op; catch-up covers all due checks once', () => {
+  let calls = 0; const run = () => { calls++; return null; };
+  let r = W.tick({ at: T + 10 * 60e3, installed: installed(), run, holdMinutes: 30 });
+  assert.equal(r.ran, false); assert.equal(calls, 0);
+  r = W.tick({ at: T + 11 * HOUR, installed: installed(), run, holdMinutes: 30 });
+  assert.deepEqual(r.checks, [1, 2, 3, 4]); assert.equal(calls, 1);
+  r = W.tick({ at: T + 11.5 * HOUR, installed: installed(), run, holdMinutes: 30 });
+  assert.equal(r.ran, false);
+  r = W.tick({ at: T + 30 * HOUR, installed: installed(), run, holdMinutes: 30 });
+  assert.deepEqual(r.checks, [5, 6, 7, 8]);
+  assert.equal(JSON.parse(readFileSync(file('release-watch-run.json'), 'utf8')).closed, true);
+  const rows = readFileSync(file('release-watch-checks.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(rows[0].late, true);
 });
 
-// ---------------------------------------------------------------------------
-// throttle
-// ---------------------------------------------------------------------------
-
-test('checkDue: due with no state, not due inside 24 h, due after, due when the clock moved back', () => {
-  const t0 = Date.parse('2026-10-09T00:00:00Z');
-  assert.equal(checkDue({}, t0), true);
-  assert.equal(checkDue({ lastAttemptAt: new Date(t0).toISOString() }, t0 + CHECK_INTERVAL_MS - 1), false);
-  assert.equal(checkDue({ lastAttemptAt: new Date(t0).toISOString() }, t0 + CHECK_INTERVAL_MS), true);
-  assert.equal(checkDue({ lastAttemptAt: new Date(t0 + 5000).toISOString() }, t0), true);
+test('tick: a new install re-arms the schedule and keeps the previous T as base', () => {
+  W.tick({ at: T + 1, installed: installed(), run: () => null });
+  const T2 = T + 48 * HOUR;
+  W.tick({ at: T2 + 1, installed: installed(T2), run: () => null });
+  const s = JSON.parse(readFileSync(file('release-watch-run.json'), 'utf8'));
+  assert.equal(s.T, T2); assert.equal(s.prevT, T); assert.deepEqual(s.done, []);
 });
 
-test('the scout asks the host once per 24 hours: a second run inside the window makes no request, the signal persists', async () => {
-  const { dir, cleanup } = makeFixture();
-  const srv = await okServer();
-  try {
-    const env = WATCH_ENV(srv.url, { AGENT_COMPANION_FAKE_NOW: '2026-10-09T00:00:00.000Z' });
-    const a = await runDetect({ cwd: dir, env });
-    assert.equal(a.status, 0, a.stderr);
-    assert.equal(srv.hits.length, 1);
-    assert.match(srv.hits[0].range, /^bytes=0-/, 'asks for the head of the file only');
-    const sig = releaseSig(a);
-    assert.ok(sig, JSON.stringify(a.json?.signals));
-    assert.match(sig.detail, /9\.0\.3 is out; installed 9\.0\.1/);
-    assert.match(sig.detail, /2 unseen release\(s\)/);
-    assert.match(sig.detail, /3 changelog item\(s\)/);
-
-    const b = await runDetect({ cwd: dir, env: { ...env, AGENT_COMPANION_FAKE_NOW: '2026-10-09T23:00:00.000Z' } });
-    assert.equal(srv.hits.length, 1, 'inside the window: no second request');
-    assert.ok(releaseSig(b), 'the unseen release still shows from the stored result');
-
-    const c = await runDetect({ cwd: dir, env: { ...env, AGENT_COMPANION_FAKE_NOW: '2026-10-10T00:00:01.000Z' } });
-    assert.equal(srv.hits.length, 2, 'past 24 h: asks again');
-    assert.ok(releaseSig(c));
-  } finally { await srv.close(); cleanup(); }
+test('tick: fail-open on missing install, corrupt run file and a throwing analysis', () => {
+  assert.equal(W.tick({ at: T, installed: {} }).installed, false);
+  writeFileSync(file('release-watch-run.json'), '{nope');
+  const r = W.tick({ at: T + 2 * HOUR, installed: installed(), run: () => { throw new Error('boom'); } });
+  assert.equal(r.ran, true); assert.deepEqual(r.flagged, []);
 });
 
-// ---------------------------------------------------------------------------
-// offline, failure, details file
-// ---------------------------------------------------------------------------
-
-test('offline (nothing listening): silent, exit 0, no signal, the attempt is recorded so it is not retried for 24 h', async () => {
-  const { dir, cleanup } = makeFixture();
-  const srv = await okServer();
-  const deadUrl = srv.url;
-  await srv.close(); // the port now refuses connections
-  try {
-    const res = await runDetect({ cwd: dir, env: WATCH_ENV(deadUrl) });
-    assert.equal(res.status, 0, res.stderr);
-    assert.equal(releaseSig(res), undefined);
-    assert.doesNotMatch(res.stderr, /release|fetch/i);
-    const st = JSON.parse(readFileSync(stateFile('release-watch.json'), 'utf8'));
-    assert.equal(st.lastOk, false);
-    assert.ok(st.lastAttemptAt);
-    assert.equal(existsSync(stateFile('cli-release-details.md')), false);
-  } finally { cleanup(); }
+test('tick CLI: exits 0 fast with no data at all', () => {
+  const t0 = Date.now();
+  const r = spawnSync(process.execPath, [SCRIPT, 'tick'], { env: env(), encoding: 'utf8', windowsHide: true });
+  assert.equal(r.status, 0);
+  assert.ok(Date.now() - t0 < 3000, 'under 3 s including node startup');
+  writeFileSync(join(claude, 'plugins', 'installed_plugins.json'), 'garbage');
+  assert.equal(spawnSync(process.execPath, [SCRIPT, 'tick'], { env: env(), encoding: 'utf8', windowsHide: true }).status, 0);
 });
 
-test('an HTTP error is a silent failure too', async () => {
-  const { dir, cleanup } = makeFixture();
-  const srv = await serve((req, res) => { res.writeHead(503); res.end('no'); });
-  try {
-    const res = await runDetect({ cwd: dir, env: WATCH_ENV(srv.url) });
-    assert.equal(res.status, 0, res.stderr);
-    assert.equal(releaseSig(res), undefined);
-    assert.equal(JSON.parse(readFileSync(stateFile('release-watch.json'), 'utf8')).lastReason, 'http 503');
-  } finally { await srv.close(); cleanup(); }
-});
-
-test('a host that never answers is cut off at the 3 s budget (fetchChangelogHead)', async () => {
-  const srv = await serve(() => { /* never respond */ });
-  try {
-    const t0 = Date.now();
-    const r = await fetchChangelogHead({ url: srv.url, timeoutMs: 400 });
-    assert.equal(r.ok, false);
-    assert.equal(r.reason, 'timeout');
-    assert.ok(Date.now() - t0 < 2500, `took ${Date.now() - t0} ms`);
-  } finally { await srv.close(); }
-});
-
-test('a server that ignores Range and streams a huge body is cut at maxBytes', async () => {
-  const big = `## 9.9.9\n- Fixed SessionStart hooks\n${'x'.repeat(5000)}\n## 9.9.8\n- Fixed subagents\n${'y'.repeat(200000)}`;
-  const srv = await okServer(big);
-  try {
-    const r = await fetchChangelogHead({ url: srv.url, maxBytes: 20000 });
-    assert.equal(r.ok, true);
-    assert.equal(r.truncated, true);
-    assert.ok(r.text.length < 21000);
-    assert.doesNotMatch(r.text, /9\.9\.8/, 'the cut-off last block is dropped');
-  } finally { await srv.close(); }
-});
-
-test('details file: lists every newer release, marks the unseen ones, names the topics', async () => {
-  const { dir, cleanup } = makeFixture();
-  const srv = await okServer();
-  try {
-    const res = await runDetect({ cwd: dir, env: WATCH_ENV(srv.url) });
-    assert.equal(res.status, 0, res.stderr);
-    const md = readFileSync(stateFile('cli-release-details.md'), 'utf8');
-    assert.match(md, /# Claude Code releases newer than 9\.0\.1/);
-    assert.match(md, /## 9\.0\.3 \(NEW\)/);
-    assert.match(md, /## 9\.0\.2 \(NEW\)/);
-    assert.match(md, /\[subagents, effort\] Added `effort` to the Agent tool/);
-    assert.match(md, /SendMessage delivery/);
-    assert.doesNotMatch(md, /rendering glitch/);
-    assert.doesNotMatch(md, /monitoring dashboards/);
-    assert.doesNotMatch(md, /## 9\.0\.1/);
-  } finally { await srv.close(); cleanup(); }
-});
-
-test('the local changelog cache backs up a failed fetch', async () => {
-  const { dir, cleanup } = makeFixture();
-  const srv = await okServer();
-  const dead = srv.url;
-  await srv.close();
-  try {
-    const cache = join(dir, '.claude', 'cache', 'changelog.md');
-    mkdirSync(dirname(cache), { recursive: true });
-    writeFileSync(cache, CHANGELOG);
-    const res = await runDetect({ cwd: dir, env: WATCH_ENV(dead) });
-    assert.equal(res.status, 0, res.stderr);
-    const sig = releaseSig(res);
-    assert.ok(sig, 'the cached changelog already names newer releases');
-    assert.equal(JSON.parse(readFileSync(stateFile('release-watch.json'), 'utf8')).source, 'local-cache');
-  } finally { cleanup(); }
-});
-
-test('release_watch off: no request, no signal', async () => {
-  const { dir, cleanup } = makeFixture();
-  const srv = await okServer();
-  try {
-    const res = await runDetect({ cwd: dir, env: WATCH_ENV(srv.url, { CLAUDE_PLUGIN_OPTION_RELEASE_WATCH: 'false' }) });
-    assert.equal(res.status, 0, res.stderr);
-    assert.equal(srv.hits.length, 0);
-    assert.equal(releaseSig(res), undefined);
-  } finally { await srv.close(); cleanup(); }
-});
-
-// ---------------------------------------------------------------------------
-// the SessionStart line and the seen-set
-// ---------------------------------------------------------------------------
-
-const hookCtx = (res) => res.json?.hookSpecificOutput?.additionalContext || '';
-
-test('main session: one line with versions, item count and details path; the next start is silent (seen-set)', async () => {
-  const { dir, cleanup } = makeFixture();
-  const srv = await okServer();
-  try {
-    await runDetect({ cwd: dir, env: WATCH_ENV(srv.url) });
-    const first = runHook('hooks/scout-surface.mjs', { session_id: 's-main-1', cwd: dir }, { cwd: dir });
-    assert.equal(first.status, 0, first.stderr);
-    const ctx = hookCtx(first);
-    assert.match(ctx, /Claude Code 9\.0\.3 is out \(installed 9\.0\.1\)/);
-    assert.match(ctx, /2 new release\(s\) \(9\.0\.2 to 9\.0\.3\)/);
-    assert.match(ctx, /3 relevant item\(s\)/);
-    assert.match(ctx, /morning brief/);
-    const relLine = ctx.split('\n').find((l) => l.includes('Claude Code 9.0.3'));
-    assert.ok(relLine.length < 260, `one short line, got ${relLine.length}`);
-    assert.equal(ctx.split('\n').filter((l) => l.includes('Claude Code 9.0.3')).length, 1, 'exactly one line');
-    // The generic scout block does not repeat the release signal.
-    assert.doesNotMatch(ctx, /cli_release_available/);
-
-    const second = runHook('hooks/scout-surface.mjs', { session_id: 's-main-2', cwd: dir }, { cwd: dir });
-    assert.doesNotMatch(hookCtx(second), /Claude Code 9\.0\.3/, 'surfaced once');
-    assert.doesNotMatch(hookCtx(second), /cli_release_available/);
-    assert.deepEqual(JSON.parse(readFileSync(stateFile('release-watch.json'), 'utf8')).seen.sort(), ['9.0.2', '9.0.3']);
-  } finally { await srv.close(); cleanup(); }
-});
-
-test('subagent session: gets nothing and does not use up the line', async () => {
-  const { dir, cleanup } = makeFixture();
-  const srv = await okServer();
-  try {
-    await runDetect({ cwd: dir, env: WATCH_ENV(srv.url) });
-    const sub = runHook('hooks/scout-surface.mjs', { session_id: 's-sub', agent_id: 'agent-abc', cwd: dir }, { cwd: dir });
-    assert.equal(sub.status, 0, sub.stderr);
-    assert.equal(sub.stdout.trim(), '', 'no output at all');
-    const viaPath = runHook('hooks/scout-surface.mjs', {
-      session_id: 's-sub2', cwd: dir, transcript_path: join(dir, 'p', 's', 'subagents', 'agent-x.jsonl'),
-    }, { cwd: dir });
-    assert.equal(viaPath.stdout.trim(), '');
-    const main = runHook('hooks/scout-surface.mjs', { session_id: 's-main', cwd: dir }, { cwd: dir });
-    assert.match(hookCtx(main), /Claude Code 9\.0\.3 is out/, 'the main session still gets it afterwards');
-  } finally { await srv.close(); cleanup(); }
-});
-
-test('seen releases leave the scout signal; a later release surfaces alone', async () => {
-  const { dir, cleanup } = makeFixture();
-  const srv = await okServer();
-  try {
-    const env = WATCH_ENV(srv.url, { AGENT_COMPANION_FAKE_NOW: '2026-10-09T00:00:00.000Z' });
-    await runDetect({ cwd: dir, env });
-    runHook('hooks/scout-surface.mjs', { session_id: 's1', cwd: dir }, { cwd: dir });
-
-    const quiet = await runDetect({ cwd: dir, env: { ...env, AGENT_COMPANION_FAKE_NOW: '2026-10-09T01:00:00.000Z' } });
-    assert.equal(releaseSig(quiet), undefined, 'seen: the scout stops reporting it');
-
-    // A new release lands upstream; the next daily check finds it.
-    const srv2 = await okServer(`## 9.0.4\n\n- Fixed SessionStart hooks firing twice\n\n${CHANGELOG.replace('# Changelog\n', '')}`);
-    try {
-      const later = await runDetect({ cwd: dir, env: WATCH_ENV(srv2.url, { AGENT_COMPANION_FAKE_NOW: '2026-10-11T00:00:00.000Z' }) });
-      const sig = releaseSig(later);
-      assert.ok(sig, JSON.stringify(later.json?.signals));
-      assert.match(sig.detail, /9\.0\.4 is out/);
-      assert.match(sig.detail, /1 unseen release\(s\)/);
-      assert.match(sig.detail, /1 changelog item\(s\)/);
-      const hook = runHook('hooks/scout-surface.mjs', { session_id: 's2', cwd: dir }, { cwd: dir });
-      assert.match(hookCtx(hook), /1 new release\(s\) \(9\.0\.4\)/);
-    } finally { await srv2.close(); }
-  } finally { await srv.close(); cleanup(); }
-});
-
-test('a machine that has caught up gets no line', async () => {
-  const { dir, cleanup } = makeFixture();
-  const srv = await okServer();
-  try {
-    await runDetect({ cwd: dir, env: WATCH_ENV(srv.url) });
-    // The scout last saw 9.0.3 installed.
-    writeFileSync(stateFile('baseline.json'), JSON.stringify({ version: '9.0.3 (Claude Code)' }));
-    const hook = runHook('hooks/scout-surface.mjs', { session_id: 's-up', cwd: dir }, { cwd: dir });
-    assert.doesNotMatch(hookCtx(hook), /Claude Code 9\.0\.3 is out/);
-  } finally { await srv.close(); cleanup(); }
-});
-
-test('release_watch off silences the line', async () => {
-  const { dir, cleanup } = makeFixture();
-  const srv = await okServer();
-  try {
-    await runDetect({ cwd: dir, env: WATCH_ENV(srv.url) });
-    const hook = runHook('hooks/scout-surface.mjs', { session_id: 's-off', cwd: dir }, {
-      cwd: dir, env: { CLAUDE_PLUGIN_OPTION_RELEASE_WATCH: 'false' },
-    });
-    assert.doesNotMatch(hookCtx(hook), /Claude Code 9\.0\.3/);
-  } finally { await srv.close(); cleanup(); }
-});
-
-// ---------------------------------------------------------------------------
-// suppression
-// ---------------------------------------------------------------------------
-
-// routing_trial_review_due fires model_benchmark_suggested alongside it
-// (tests/model-benchmark-suggestion.test.mjs).
-const TRIAL_NOW = { AGENT_COMPANION_FAKE_NOW: '2026-11-01T00:00:00.000Z' };
-// No shipped trial is review-dated since 0.31.48, so the due trial is a profile trial row past its reviewBy.
-function seedDueTrial(stateDir) {
-  mkdirSync(join(stateDir, 'config'), { recursive: true });
-  writeFileSync(join(stateDir, 'config', 'routing-profile.json'), JSON.stringify({
-    schema: 'agent-companion/routing-profile', schemaVersion: 1, revision: 3,
-    basedOn: { tableVersion: 7, tableUpdated: '2026-09-23' }, objective: 'api-cost', planUsageMultipliers: null, types: {},
-    rows: { explore: { state: 'trial', model: 'opus', effort: 'medium', cacheTtl: null, source: 'operator-observed', since: '2026-10-01', reviewBy: '2026-10-16', waivesFloor: null, note: null, provenance: null } },
-  }));
-}
-
-test('scout_suppress (env): the suppressed kind is neither emitted nor counted; the others are untouched', () => {
-  const { dir, stateDir, cleanup } = makeFixture();
-  try {
-    seedDueTrial(stateDir);
-    const plain = runScript('scripts/detect.mjs', [], { cwd: dir, env: TRIAL_NOW });
-    assert.equal(plain.status, 0, plain.stderr);
-    const nBench = plain.json.signals.filter((s) => s.kind === 'model_benchmark_suggested').length;
-    assert.ok(nBench > 0, 'precondition: the signal fires without the option');
-
-    const res = runScript('scripts/detect.mjs', [], {
-      cwd: dir, env: { ...TRIAL_NOW, CLAUDE_PLUGIN_OPTION_SCOUT_SUPPRESS: 'model_benchmark_suggested' },
-    });
-    assert.equal(res.status, 0, res.stderr);
-    assert.equal(res.json.signals.filter((s) => s.kind === 'model_benchmark_suggested').length, 0);
-    assert.equal(res.json.signals.length, plain.json.signals.length - nBench, 'not counted either');
-    assert.ok(res.json.signals.some((s) => s.kind === 'routing_trial_review_due'), 'the cause signal stays');
-    const latest = JSON.parse(readFileSync(stateFile('scout-latest.json'), 'utf8'));
-    assert.equal(latest.signals.length, res.json.signals.length);
-  } finally { cleanup(); }
-});
-
-test('scout_suppress through settings.json (the plugin config layer), with a reason, and a list', () => {
-  const { dir, stateDir, cleanup } = makeFixture();
-  try {
-    seedDueTrial(stateDir);
-    const f = join(dir, '.claude', 'settings.json');
-    mkdirSync(dirname(f), { recursive: true });
-    writeFileSync(f, JSON.stringify({
-      pluginConfigs: {
-        'agent-companion@agent-templates': {
-          options: {
-            scout_suppress: 'model_benchmark_suggested, spawn_activity',
-            scout_suppress_reason: 'no benchmark runs on this machine (operator rule)',
-          },
-        },
-      },
-    }));
-    const res = runScript('scripts/detect.mjs', [], { cwd: dir, env: TRIAL_NOW });
-    assert.equal(res.status, 0, res.stderr);
-    const kinds = res.json.signals.map((s) => s.kind);
-    assert.ok(!kinds.includes('model_benchmark_suggested'));
-    assert.ok(kinds.includes('routing_trial_review_due'));
-  } finally { cleanup(); }
-});
-
-test('suppressing cli_release_available stops the request, the signal and the line', async () => {
-  const { dir, cleanup } = makeFixture();
-  const srv = await okServer();
-  try {
-    const res = await runDetect({ cwd: dir, env: WATCH_ENV(srv.url, { CLAUDE_PLUGIN_OPTION_SCOUT_SUPPRESS: 'cli_release_available' }) });
-    assert.equal(res.status, 0, res.stderr);
-    assert.equal(srv.hits.length, 0);
-    assert.equal(releaseSig(res), undefined);
-    const ok = await runDetect({ cwd: dir, env: WATCH_ENV(srv.url) });
-    assert.ok(releaseSig(ok));
-    const hook = runHook('hooks/scout-surface.mjs', { session_id: 's-sup', cwd: dir }, {
-      cwd: dir, env: { CLAUDE_PLUGIN_OPTION_SCOUT_SUPPRESS: 'cli_release_available' },
-    });
-    assert.doesNotMatch(hookCtx(hook), /Claude Code 9\.0\.3/);
-  } finally { await srv.close(); cleanup(); }
-});
-
-test('the SessionStart block drops a suppressed kind already sitting in scout-latest.json, and its count', () => {
-  const { dir, cleanup } = makeFixture();
-  try {
-    const f = stateFile('scout-latest.json');
-    mkdirSync(dirname(f), { recursive: true });
-    const kinds = ['model_benchmark_suggested', 'model_benchmark_suggested', 'spawn_activity'];
-    writeFileSync(f, JSON.stringify({ checkedAt: new Date().toISOString(), signals: kinds.map((kind) => ({ kind, detail: 'd' })) }));
-    const res = runHook('hooks/scout-surface.mjs', { session_id: 's-filter', cwd: dir }, {
-      cwd: dir, env: { CLAUDE_PLUGIN_OPTION_SCOUT_SUPPRESS: 'model_benchmark_suggested' },
-    });
-    const ctx = hookCtx(res);
-    assert.match(ctx, /1 drift signal\(s\)/);
-    assert.doesNotMatch(ctx, /model_benchmark_suggested/);
-
-    const onlySuppressed = ['model_benchmark_suggested'];
-    writeFileSync(f, JSON.stringify({ checkedAt: new Date().toISOString(), signals: onlySuppressed.map((kind) => ({ kind, detail: 'd' })) }));
-    const quiet = runHook('hooks/scout-surface.mjs', { session_id: 's-filter2', cwd: dir }, {
-      cwd: dir, env: { CLAUDE_PLUGIN_OPTION_SCOUT_SUPPRESS: 'model_benchmark_suggested' },
-    });
-    assert.equal(quiet.stdout.trim(), '', 'nothing left to say');
-  } finally { cleanup(); }
-});
-
-// ---------------------------------------------------------------------------
-// review fixes (0.31.5)
-// ---------------------------------------------------------------------------
-
-const changelogUpTo = (top) => {
-  const lines = ['# Changelog', ''];
-  for (let v = top; v >= 1; v -= 1) lines.push(`## 9.0.${v}`, '', `- Fixed SessionStart hooks in release ${v}`, '');
-  return lines.join('\n');
-};
-const stubFetch = (body) => async () => ({ ok: true, status: 200, body: null, text: async () => body });
-
-function rwArgs(dir, extra = {}) {
+// ---- thresholds on invented metrics ----
+const tel = (o) => o;
+function metrics(over = {}) {
+  const w = { n: 40, finished: 40, unitsPerWorker: { mean: 1, p50: 0.8, p90: 2 }, peakCtxP90: 100000, over110kPct: 10, over150kPct: 0, noStatusPct: 5, partialPct: 10, blockedPct: 1, hookErrorWorkersPct: 40, apiErrorWorkers: 0, apiNonUsageWorkers: 0 };
   return {
-    installed: '9.0.0',
-    stateFilePath: join(dir, 'state', 'release-watch.json'),
-    detailsFilePath: join(dir, 'state', 'cli-release-details.md'),
-    claudeDirPath: join(dir, '.claude'),
-    ...extra,
+    spawns: { since: 100, base: 700, perHour: { since: 10, base: 10 } }, span: { since: 10, base: 168 },
+    telemetry: {}, bash: { since: { n: 100, failPct: 4 }, base: { n: 500, failPct: 4 } },
+    queueClears: { since: 0, base: 5, perHour: { since: 0, base: 0.03 } },
+    workers: { since: { ...w }, base: { ...w } }, hookSignatures: { since: {}, base: {} }, ...over,
   };
 }
+const names = (m) => W.evaluate(m).map((f) => f.name);
+const t = (since, base, ps, pb) => ({ since, base, per100spawns: { since: ps, base: pb } });
 
-test('the scout signal names the details file without an absolute path (the scrubber would turn it into <path>)', async () => {
-  const { dir, cleanup } = makeFixture();
-  const srv = await okServer();
-  try {
-    const res = await runDetect({ cwd: dir, env: WATCH_ENV(srv.url) });
-    const sig = releaseSig(res);
-    assert.ok(sig);
-    assert.match(sig.detail, /cli-release-details\.md in the scout state dir/);
-    assert.ok(!sig.detail.includes(dir), sig.detail);
-    assert.doesNotMatch(sig.detail, /<path>/);
-  } finally { await srv.close(); cleanup(); }
+test('evaluate: a quiet release flags nothing', () => assert.deepEqual(names(metrics()), []));
+test('evaluate: worker guard over 2x its pooled rate (n>=10), new guard (>=3), lead guard per hour', () => {
+  assert.ok(names(metrics({ telemetry: { 'denial:python-stdin/deny': t(30, 56, 30, 8) } })).includes('guard:python-stdin/deny'));
+  assert.deepEqual(names(metrics({ telemetry: { 'denial:python-stdin/deny': t(12, 56, 12, 8) } })), []);
+  assert.ok(names(metrics({ telemetry: { 'denial:fresh-guard/deny': t(3, 0, 3, null) } })).includes('guard:fresh-guard/deny'));
+  assert.ok(names(metrics({ telemetry: { 'denial:delegation/deny': t(100, 300, 100, 40) } })).includes('guard:delegation/deny'));
+});
+test('evaluate: spawn rewrites, queue, context, status, bash, api, runaway, bleed', () => {
+  assert.ok(names(metrics({ telemetry: { 'denial:fit/deny': t(4, 1, 4, 0.1) } })).includes('spawn-rewrites'));
+  assert.ok(names(metrics({ telemetry: { 'gate:denied': t(25, 40, 25, 6) } })).includes('queue-denied'));
+  assert.ok(names(metrics({ queueClears: { since: 31, base: 5, perHour: { since: 3.6, base: 0.06 } } })).includes('queue-clears'));
+  assert.ok(names(metrics({ telemetry: { 'handoff:hard/deny': t(3, 0, 3, 0) } })).includes('handoff-hard-deny'));
+  const m = metrics(); m.workers.since = { ...m.workers.since, over150kPct: 8, noStatusPct: 20, partialPct: 40, blockedPct: 9, hookErrorWorkersPct: 60, apiErrorWorkers: 3, apiNonUsageWorkers: 1, unitsPerWorker: { mean: 2, p50: 1, p90: 4 } };
+  const n = names(m);
+  for (const x of ['context-over-150k', 'no-final-status', 'partial-share', 'blocked-share', 'hook-error-share', 'api-errors', 'units-per-worker', 'units-p90']) assert.ok(n.includes(x), x);
+  assert.ok(names(metrics({ bash: { since: { n: 100, failPct: 9 }, base: { n: 1, failPct: 1 } } })).includes('worker-bash-fail'));
+  assert.ok(names(metrics({ telemetry: { 'runaway:fired': t(1, 0, 1, 0) } })).includes('runaway'));
+  assert.ok(names(metrics({ hookSignatures: { since: { 'PreToolUse:Bash boom': 6 }, base: {} } })).some((x) => x.startsWith('hook-signature')));
+});
+test('evaluate: too little data stays silent', () => {
+  const m = metrics({ spawns: { since: 3, base: 700, perHour: { since: 1, base: 1 } }, telemetry: { 'denial:fit/deny': t(3, 0, 100, 0) } });
+  m.workers.since.n = 3; m.workers.since.over150kPct = 90;
+  assert.deepEqual(names(m), []);
 });
 
-test('a stale local changelog never removes releases an earlier fetch found', async () => {
-  const { dir, cleanup } = makeFixture();
-  try {
-    const t0 = Date.parse('2026-10-09T00:00:00Z');
-    await runReleaseWatch(rwArgs(dir, { nowMs: t0, fetchImpl: stubFetch(changelogUpTo(6)) }));
-    const cache = join(dir, '.claude', 'cache', 'changelog.md');
-    mkdirSync(dirname(cache), { recursive: true });
-    writeFileSync(cache, changelogUpTo(4));
-    const failing = async () => { throw new Error('offline'); };
-    await runReleaseWatch(rwArgs(dir, { nowMs: t0 + 25 * 3600 * 1000, fetchImpl: failing }));
-    const st = JSON.parse(readFileSync(join(dir, 'state', 'release-watch.json'), 'utf8'));
-    assert.equal(st.lastOk, false);
-    assert.equal(st.latest, '9.0.6');
-    assert.deepEqual(st.releases.map((r) => r.version), ['9.0.6', '9.0.5', '9.0.4', '9.0.3', '9.0.2', '9.0.1']);
-    assert.equal(st.source, 'github');
-  } finally { cleanup(); }
+// ---- analyze on a fake data tree ----
+test('analyze: reads telemetry and worker transcripts of invented data', () => {
+  const tel2 = join(state, 'telemetry'); mkdirSync(tel2, { recursive: true });
+  const row = (o) => JSON.stringify(o) + '\n';
+  writeFileSync(join(tel2, 'spawns.jsonl'), row({ at: T + HOUR }) + row({ at: T + 2 * HOUR }) + row({ at: T - 2 * HOUR }));
+  writeFileSync(join(tel2, 'denials.jsonl'), row({ at: T + HOUR, guard: 'g', outcome: 'deny' }) + row({ at: T - HOUR, guard: 'g', outcome: 'deny' }));
+  const sd = join(claude, 'projects', 'C--proj', 'sess', 'subagents'); mkdirSync(sd, { recursive: true });
+  const ts = new Date(T + HOUR).toISOString();
+  const lines = [{ type: 'assistant', timestamp: ts, requestId: 'r1', message: { model: 'claude-sonnet', usage: { input_tokens: 1000, output_tokens: 100, cache_read_input_tokens: 200000 }, content: [{ type: 'text', text: 'STATUS: done' }] } }];
+  writeFileSync(join(sd, 'agent-a.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n'));
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(m.spawns.since, 2); assert.equal(m.spawns.base, 1);
+  assert.equal(m.telemetry['denial:g/deny'].since, 1);
+  assert.equal(m.workers.since.n, 1); assert.equal(m.workers.since.over150kPct, 100);
 });
 
-test('an HTTP 200 that is not a changelog counts as a failure and the local cache is used', async () => {
-  const { dir, cleanup } = makeFixture();
-  try {
-    const cache = join(dir, '.claude', 'cache', 'changelog.md');
-    mkdirSync(dirname(cache), { recursive: true });
-    writeFileSync(cache, changelogUpTo(2));
-    const r = await runReleaseWatch(rwArgs(dir, { nowMs: Date.now(), fetchImpl: stubFetch('<html>please sign in</html>') }));
-    const st = JSON.parse(readFileSync(join(dir, 'state', 'release-watch.json'), 'utf8'));
-    assert.equal(st.lastOk, false);
-    assert.equal(st.lastReason, 'unreadable changelog');
-    assert.equal(st.source, 'local-cache');
-    assert.ok(r.signal);
-  } finally { cleanup(); }
+// ---- state, hold, clear ----
+test('state: fail open on bad files', () => {
+  writeFileSync(file('release-watch-flag.json'), '{bad'); writeFileSync(file('release-hold.json'), 'xx');
+  assert.equal(S.isHoldActive(), false); assert.equal(S.flagLine(), null); assert.equal(S.noteReply(), false);
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: T }), null);
+  assert.doesNotThrow(() => S.clear());
 });
 
-test('a seen-mark written while the request is in flight survives the scout writing its state', async () => {
-  const { dir, cleanup } = makeFixture();
-  try {
-    const args = rwArgs(dir);
-    const t0 = Date.parse('2026-10-09T00:00:00Z');
-    await runReleaseWatch({ ...args, nowMs: t0, fetchImpl: stubFetch(changelogUpTo(3)) });
-    const slow = async () => {
-      markSeen(args.stateFilePath, ['9.0.1', '9.0.2', '9.0.3']); // a main session start, mid-request
-      return { ok: true, status: 200, body: null, text: async () => changelogUpTo(3) };
-    };
-    const r = await runReleaseWatch({ ...args, nowMs: t0 + 25 * 3600 * 1000, fetchImpl: slow });
-    assert.equal(r.signal, null, 'seen releases stay seen');
-    assert.deepEqual(JSON.parse(readFileSync(args.stateFilePath, 'utf8')).seen.sort(), ['9.0.1', '9.0.2', '9.0.3']);
-  } finally { cleanup(); }
+test('hold is written only after notifiedAt + delay with no reply', () => {
+  S.openFlag({ version: '1', flags: flag, at: T, check: '+1h' });
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 29 * 60e3 }), null);
+  assert.equal(S.isHoldActive(), false);
+  assert.equal(S.maybeHold({ holdMinutes: 0, at: T + 99 * HOUR }), null, '0 = notify only');
+  assert.ok(S.maybeHold({ holdMinutes: 30, at: T + 31 * 60e3 }));
+  assert.equal(S.isHoldActive(), true);
 });
 
-test('the 3 s budget holds through runReleaseWatch: a host that never answers ends silently, the attempt is recorded', async () => {
-  const { dir, cleanup } = makeFixture();
-  const srv = await serve(() => { /* never respond */ });
-  try {
-    const t0 = Date.now();
-    const r = await runReleaseWatch(rwArgs(dir, { nowMs: Date.now(), url: srv.url, timeoutMs: 300 }));
-    assert.equal(r.signal, null);
-    assert.ok(Date.now() - t0 < 2500);
-    const st = JSON.parse(readFileSync(join(dir, 'state', 'release-watch.json'), 'utf8'));
-    assert.equal(st.lastReason, 'timeout');
-  } finally { await srv.close(); cleanup(); }
+test('a reply before the hold stops the countdown; a reply during the hold does not lift it', () => {
+  S.openFlag({ version: '1', flags: flag, at: T });
+  assert.equal(S.noteReply(T + 60e3), true);
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 5 * HOUR }), null);
+  S.clear({ at: T + 6 * HOUR });
+  S.openFlag({ version: '1', flags: [{ name: 'other', value: 1 }], at: T + 7 * HOUR });
+  S.maybeHold({ holdMinutes: 30, at: T + 8 * HOUR });
+  assert.equal(S.isHoldActive(), true);
+  assert.equal(S.noteReply(T + 9 * HOUR), false);
+  assert.equal(S.isHoldActive(), true);
 });
 
-test('triage floor: the lower of the installed and the highest decided version; none decided means installed', () => {
-  assert.equal(triageFloor({}, '9.0.5'), '9.0.5');
-  assert.equal(triageFloor({ decided: ['9.0.2', '9.0.4'] }, '9.0.9'), '9.0.4');
-  assert.equal(triageFloor({ decided: ['9.0.7'] }, '9.0.3'), '9.0.3');
+test('clear lifts the hold, logs a row, and the cooldown suppresses the same flag unless it worsens', () => {
+  S.openFlag({ version: '1', flags: flag, at: T });
+  S.maybeHold({ holdMinutes: 30, at: T + HOUR });
+  const r = S.clear({ by: 'test', at: T + 2 * HOUR });
+  assert.deepEqual(r, { flagCleared: true, holdCleared: true });
+  assert.equal(S.isHoldActive(), false); assert.equal(existsSync(file('release-hold.json')), false);
+  assert.equal(S.flagLine(), null);
+  assert.equal(S.openFlag({ version: '1', flags: [{ name: 'queue-clears', value: 4 }], at: T + 3 * HOUR }), null, 'inside the 4 h cooldown, same size');
+  assert.ok(S.openFlag({ version: '1', flags: [{ name: 'queue-clears', value: 9 }], at: T + 3 * HOUR }), 'worsened 1.5x');
+  S.clear({ at: T + 3.5 * HOUR });
+  assert.ok(S.openFlag({ version: '1', flags: [{ name: 'queue-clears', value: 4 }], at: T + 8 * HOUR }), 'after the cooldown');
+  const rows = readFileSync(file('release-watch-checks.jsonl'), 'utf8').trim().split('\n');
+  assert.ok(rows.length >= 2);
 });
 
-test('a release the machine upgraded past stays queued until decided (range since the last triaged, not since installed)', async () => {
-  const { dir, cleanup } = makeFixture();
-  try {
-    const args = rwArgs(dir, { installed: '9.0.1' });
-    const t0 = Date.parse('2026-10-09T00:00:00Z');
-    await runReleaseWatch({ ...args, nowMs: t0, fetchImpl: stubFetch(changelogUpTo(4)) });
-    // Triage decides 9.0.2 and 9.0.4 only; 9.0.3 is left undecided (a failed store write).
-    markDecided(args.stateFilePath, ['9.0.2', '9.0.4']);
-    // The machine upgrades to 9.0.5 and a new release appears.
-    await runReleaseWatch({ ...args, installed: '9.0.5', nowMs: t0 + 25 * 3600 * 1000, fetchImpl: stubFetch(changelogUpTo(6)) });
-    const st = JSON.parse(readFileSync(args.stateFilePath, 'utf8'));
-    assert.deepEqual(undecidedOf(st, '9.0.5').map((r) => r.version), ['9.0.6', '9.0.5', '9.0.3']);
-  } finally { cleanup(); }
+test('flag line: open unanswered flag and hold, silent when answered', () => {
+  assert.equal(S.flagLine(), null);
+  S.openFlag({ version: '1.2.3', flags: flag, at: T, check: '+4h' });
+  const l = S.flagLine();
+  assert.match(l, /RELEASE WATCH 1\.2\.3/); assert.match(l, /PushNotification/); assert.match(l, /queue-clears/);
+  S.noteReply(T + 1);
+  assert.equal(S.flagLine(), null);
+  S.clear();
+  S.openFlag({ version: '1.2.3', flags: [{ name: 'z', value: 1 }], at: T });
+  S.maybeHold({ holdMinutes: 1, at: T + HOUR });
+  assert.match(S.flagLine(), /RELEASE HOLD/);
 });
 
-test('a first check with nothing decided does not queue the whole changelog', async () => {
-  const { dir, cleanup } = makeFixture();
-  try {
-    const args = rwArgs(dir, { installed: '9.0.4' });
-    await runReleaseWatch({ ...args, nowMs: Date.now(), fetchImpl: stubFetch(changelogUpTo(6)) });
-    const st = JSON.parse(readFileSync(args.stateFilePath, 'utf8'));
-    assert.deepEqual(st.releases.map((r) => r.version), ['9.0.6', '9.0.5']);
-  } finally { cleanup(); }
+// ---- hooks ----
+function hook(name, payload) {
+  return spawnSync(process.execPath, [join(ROOT, 'hooks', name)], { input: JSON.stringify(payload), env: { ...env(), AC_ATTENDED: '1' }, encoding: 'utf8', windowsHide: true, cwd: tmp });
+}
+test('hooks: lead sees the line on every prompt, a subagent never does, a prompt acks', () => {
+  S.openFlag({ version: '9', flags: flag, at: Date.now() });
+  const sub = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', agent_id: 'a1', prompt: 'x', cwd: tmp });
+  assert.equal(sub.stdout, '');
+  const lead = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'hello', cwd: tmp });
+  assert.match(lead.stdout, /RELEASE WATCH 9/);
+  const after = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'again', cwd: tmp });
+  assert.doesNotMatch(after.stdout, /RELEASE WATCH/, 'answered after the first genuine prompt');
+});
+test('hooks: a task notification is not a reply', () => {
+  S.openFlag({ version: '9', flags: flag, at: Date.now() });
+  hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: '<task-notification>done', cwd: tmp });
+  assert.match(hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'hi', cwd: tmp }).stdout, /RELEASE WATCH/);
+});
+test('hooks: SessionStart shows the line to a lead, not to a subagent', () => {
+  S.openFlag({ version: '9', flags: flag, at: Date.now() });
+  const lead = hook('scout-surface.mjs', { hook_event_name: 'SessionStart', session_id: 's', source: 'startup', cwd: tmp });
+  assert.match(lead.stdout, /RELEASE WATCH 9/);
+  const sub = hook('scout-surface.mjs', { hook_event_name: 'SessionStart', session_id: 's', agent_id: 'a1', source: 'startup', cwd: tmp });
+  assert.doesNotMatch(sub.stdout, /RELEASE WATCH/);
 });
 
-test('keepUndecided: a stored release with no topic items is dropped before the cut, so it cannot push an undecided one out', () => {
-  const rel = (n, items = [{ topics: ['hooks'], text: 'x' }]) => ({ version: `9.1.${n}`, items });
-  // 9.1.0 was stored with no items (never decided); 9.1.1 is undecided with items; 40 newer releases follow.
-  const fresh = []; for (let n = 2; n < 42; n++) fresh.push(rel(n));
-  const full = keepUndecided({ releases: [rel(0, []), rel(1)], decided: [] }, fresh).map((r) => r.version);
-  assert.equal(full.length, 40);
-  assert.ok(!full.includes('9.1.0'));
-  // With room to spare the empty one is still gone and the one with items stays.
-  assert.deepEqual(keepUndecided({ releases: [rel(0, []), rel(1)], decided: [] }, [rel(2)]).map((r) => r.version), ['9.1.2', '9.1.1']);
-  // The empty one, were it kept, would be the 40th and evict the undecided one with items.
-  const f39 = []; for (let n = 3; n < 42; n++) f39.push(rel(n)); // 39 fresh
-  const kept = keepUndecided({ releases: [rel(0, []), rel(1), rel(2)], decided: [] }, f39).map((r) => r.version);
-  assert.ok(kept.includes('9.1.2') && kept.includes('9.1.1') === false, 'newest 40 by version: 39 fresh + 9.1.2');
-});
+test('cleanup', () => { rmSync(tmp, { recursive: true, force: true }); });
+void tel;

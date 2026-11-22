@@ -24,7 +24,9 @@
 // The event name is taken from the payload. The drain's rename makes each
 // notice appear exactly once. Empty stdout when there is nothing queued.
 
-import { readStdin, passthrough, callerIsSubagent, opt } from './lib/context.mjs';
+import { readStdin, passthrough, callerIsSubagent, opt, stateRootPath } from './lib/context.mjs';
+import { flagLine as releaseWatchLine, noteReply } from './lib/release-watch-state.mjs';
+import { unattendedReason } from '../scripts/lib/usage/surface.mjs';
 import { drainNotices, renderNotices } from './lib/runaway.mjs';
 import { interruptedNotices } from './lib/interrupted-workers.mjs';
 import { checkSessionBudget, SESSION_BUDGET_DEFAULT_UNITS } from './lib/session-budget.mjs';
@@ -38,7 +40,17 @@ try {
   if (!event) passthrough();
   try { checkSessionBudget(p, { threshold: opt('session_budget_units', SESSION_BUDGET_DEFAULT_UNITS) }); } catch { /* advisory: never in the way */ }
   const interrupted = event === 'UserPromptSubmit' && opt('interrupted_worker_notice', true) ? interruptedNotices(p) : [];
-  const text = [renderNotices(drainNotices(p.session_id)), ...interrupted].filter(Boolean).join('\n');
+  // Release watch: the open-flag or hold line on every lead prompt; a genuine prompt then stops the hold countdown.
+  let watch = null;
+  if (event === 'UserPromptSubmit') {
+    try {
+      if (unattendedReason({ payload: p, root: stateRootPath() }) === null) {
+        watch = releaseWatchLine();
+        if (!/^\s*<task-notification/.test(String(p.prompt || ''))) noteReply();
+      }
+    } catch { watch = null; }
+  }
+  const text = [watch, renderNotices(drainNotices(p.session_id)), ...interrupted].filter(Boolean).join('\n');
   if (!text) passthrough();
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: event, additionalContext: text },
