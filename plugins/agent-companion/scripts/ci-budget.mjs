@@ -168,7 +168,7 @@ export function projectLabel(start) {
 // Windows: NOT under %LOCALAPPDATA%. The Claude desktop app is MSIX-packaged, so its sessions' writes to
 // %LOCALAPPDATA% land in the package's private copy (%LOCALAPPDATA%\Packages\<pkg>\LocalCache\Local) while
 // Task Scheduler daemons see only the real folder: two ledgers, so nothing was counted across the split
-// (confirmed live 2026-11-22). The claude home is outside AppData and seen identically by both. It is the
+// (confirmed live, 2026-11). The claude home is outside AppData and seen identically by both. It is the
 // durable config root (a sibling of config/, which holds the resource rules), not state/, which is derived
 // and deletable: a ledger deleted under live holders would let everyone over-admit.
 export function budgetDir(env = process.env) {
@@ -308,12 +308,12 @@ const CTX_KEYS = [
   'dir', 'budget', 'heavyCost', 'heavyMax', 'express', 'maxFull', 'pollMs', 'staleMs',
   'heartbeatMs', 'announceMs', 'sampleMs', 'off', 'legacyDir', 'foreignDirs', 'legacyUnits', 'heavyMaxWaitMs',
   'queueMaxWaitMs', 'expressMaxWaitMs', 'reserve', 'loadPct', 'sliceFactor', 'rules', 'session', 'project', 'freemem', 'totalmem', 'delay',
-  'reap', 'reapSeams', 'live', 'liveCfg', 'stuck',
+  'reap', 'reapSeams', 'live', 'liveCfg', 'stuck', 'mirrorDir',
 ];
 
 // ---------------------------------------------------------------- live capacity (scripts/lib/live-capacity.mjs)
 //
-// Option `live_capacity` (on | off, default on); `ctx.live` (boolean) overrides it, `ctx.liveCfg` overrides the numbers.
+// Option `live_capacity` (on | off, default on); `ctx.live` (boolean) takes precedence over it, `ctx.liveCfg` replaces the numbers.
 // Off = the declared charge everywhere (the pre-0.31.62 behaviour). Read lazily, once per ctx.
 function liveOn(ctx) {
   if (ctx.live === undefined) {
@@ -327,7 +327,7 @@ const lc = (ctx) => (ctx._lc ??= { ...LIVE_DEFAULTS, ...(ctx.liveCfg ?? {}) });
 
 // ---------------------------------------------------------------- stuck holders (scripts/lib/live-capacity.mjs, section "progress")
 //
-// Option `stuck_holder_policy` (flag | release, default flag); `ctx.stuck` {policy} overrides it. A live holder with no
+// Option `stuck_holder_policy` (flag | release, default flag); `ctx.stuck` {policy} takes precedence over it. A live holder with no
 // progress for the "stuck" rule's quiet window, past its expected hold, is always FLAGGED (STUCK in status and the
 // session line). With `release` the sweep also frees its lease (never the process). Unknown text = flag. Read lazily.
 function stuckPolicy(ctx) {
@@ -434,6 +434,9 @@ function makeCtx(o = {}) {
   // self-contained ledger (tests, other tools) and never reads the machine's real folders.
   const eenv = o.env ?? process.env;
   ctx.foreignDirs ??= (o.dir || eenv.CI_BUDGET_DIR) ? [] : legacyLedgerDirs(eenv);
+  // Rollout: copies still on the old Windows path write only the real %LOCALAPPDATA%\ci-budget, so each lease is mirrored
+  // there (a stub with its units, kept alive by the heartbeat) until every session and vendored copy has restarted.
+  ctx.mirrorDir ??= (process.platform === 'win32' && !o.dir && !eenv.CI_BUDGET_DIR && eenv.LOCALAPPDATA) ? join(eenv.LOCALAPPDATA, 'ci-budget') : null;
   ctx.legacyUnits = Math.min(ctx.legacyUnits ?? legacyRunUnits(ctx.cores), ctx.budget);
   ctx.now = o.now ?? Date.now;
   ctx.sleep = o.sleep ?? sleepMs;
@@ -513,6 +516,19 @@ function newId() {
 
 function tryUnlink(file) {
   try { unlinkSync(file); } catch { /* already gone */ }
+}
+
+// Old-path mirror (Windows rollout, see ctx.mirrorDir): `rec` writes or refreshes the lease stub and its heartbeat file in
+// the old ledger; null removes both. Best effort, and never when the mirror folder is the ledger itself.
+function mirrorLease(ctx, id, rec) {
+  if (!ctx.mirrorDir || resolve(ctx.mirrorDir) === resolve(ctx.dir)) return;
+  const f = join(ctx.mirrorDir, `lease-${id}.json`); const hb = join(ctx.mirrorDir, `lease-${id}.hb`);
+  try {
+    if (!rec) { tryUnlink(f); tryUnlink(hb); return; }
+    mkdirSync(ctx.mirrorDir, { recursive: true });
+    writeFileSync(f, JSON.stringify({ ...rec, heartbeatAt: ctx.now() }));
+    writeFileSync(hb, String(ctx.now()));
+  } catch { /* best effort */ }
 }
 
 function writeAtomic(ctx, file, obj) {
@@ -795,7 +811,7 @@ export function readState(ctx, { reclaim = true, cheap = false } = {}) {
       e.progress = null; e.stuck = null;
       if (e.kind === 'run' && e.boundPid === 0 && liveOn(ctx)) {
         e.use = readUse(ctx.dir, m[1]);
-        e.measure = measureOf(e.use, e.units + e.heavy * e.heavyCost, ctx.now(), lc(ctx));
+        e.measure = measureOf(e.use, e.units + e.heavy * e.heavyCost, ctx.now(), lc(ctx), e.expCpu);
       }
       let why = staleReason(ctx, e);
       leaseIds.add(m[1]);
@@ -815,6 +831,7 @@ export function readState(ctx, { reclaim = true, cheap = false } = {}) {
         // A cheap sweep (status, heartbeat) never asks the process table: a stale heartbeat with a live pid is left for a full sweep.
         if (reclaim && !(cheap && why === 'heartbeat is stale')) {
           const won = dropFile(file, hbFile, e.actFile, liveFile, e.useFile, e.progFile);
+          mirrorLease(ctx, e.id, null);
           endedLeases.push(e);
           if (won) { // only the process that removed it reports and logs it
             reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why });
@@ -852,6 +869,7 @@ export function readState(ctx, { reclaim = true, cheap = false } = {}) {
           // The tombstone first, so the owner's heartbeat does not put the lease back.
           writeTombstone(ctx, m[1], e.pid);
           const won = dropFile(file, hbFile, e.actFile, liveFile, e.useFile, e.progFile);
+          mirrorLease(ctx, e.id, null);
           endedLeases.push(e);
           if (won) reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why: `rule ${v.rule}` });
           if (won) noteClear(ctx, e, 'lease', v.rule, v.evidence);
@@ -1154,6 +1172,7 @@ const tick = () => {
       return;
     }
     try { fs.writeFileSync(workerData.hbFile, String(Date.now())); } catch {}
+    if (workerData.mirrorHbFile) { try { fs.writeFileSync(workerData.mirrorHbFile, String(Date.now())); } catch {} }
     if (gone) {
       try { fs.writeFileSync(workerData.leaseFile, JSON.stringify(Object.assign({}, rec, { heartbeatAt: Date.now() })), { flag: 'wx' }); } catch {}
     }
@@ -1180,7 +1199,7 @@ function startHeartbeat(ctx, { leaseFile, hbFile, clearedFile, rec, beat, onClea
     try {
       const flags = new Int32Array(new SharedArrayBuffer(8));
       const w = new Worker(HB_WORKER_SRC, {
-        eval: true, workerData: { leaseFile, hbFile, clearedFile, ms: ctx.heartbeatMs, rec, flags: flags.buffer },
+        eval: true, workerData: { leaseFile, hbFile, mirrorHbFile: ctx.mirrorDir && resolve(ctx.mirrorDir) !== resolve(ctx.dir) ? join(ctx.mirrorDir, basename(hbFile)) : null, clearedFile, ms: ctx.heartbeatMs, rec, flags: flags.buffer },
       });
       w.on('message', (m) => { if (m && m.cleared) onCleared(); });
       w.on('error', (err) => ctx.log(`ci-budget: heartbeat thread failed (${err.message}); the lease may be reclaimed as stale`));
@@ -1277,6 +1296,7 @@ function createLease(ctx, {
   if (expCpu != null && expCpu >= 0) rec.expCpu = expCpu;
   if (expRamMb > 0) rec.expRamMb = Math.trunc(expRamMb);
   writeFileSync(file, JSON.stringify(rec), { flag: 'wx' });
+  mirrorLease(ctx, id, rec);
   const tracker = makeUseTracker(lc(ctx)); // live capacity: this lease's measured usage, fed by track()
   const progress = makeProgressTracker(PROG_DEFAULTS, { ioOf: procIo }); // stuck-holder detector: cpu / io / spawn / output, fed by track()
   try { writeFileSync(hbFile, String(t0)); } catch { /* best effort: heartbeatAt in the lease still counts */ }
@@ -1299,6 +1319,7 @@ function createLease(ctx, {
     if (released || disowned) return;
     if (!existsSync(file) && existsSync(clearedFile)) { onCleared(); return; }
     try { writeFileSync(hbFile, String(ctx.now())); } catch { /* best effort */ }
+    mirrorLease(ctx, id, rec);
     if (ctx.now() - lastSweepAt >= 15_000 || ctx.now() < lastSweepAt) { // a heartbeat sweeps too, at most every 15 s
       lastSweepAt = ctx.now();
       let st = null;
@@ -1347,6 +1368,7 @@ function createLease(ctx, {
       heartbeat.stopSync();
       tryUnlink(file);
       tryUnlink(hbFile);
+      mirrorLease(ctx, id, null);
       tryUnlink(actFile);
       tryUnlink(join(ctx.dir, `lease-${id}.live`));
       tryUnlink(useFile(ctx.dir, id));
@@ -1377,7 +1399,7 @@ function createLease(ctx, {
         const tree = recordTree(table, ctx.pid, { prev: readTree(ctx.dir, id), now: ctx.now(), costMs });
         if (tree) writeTree(ctx.dir, id, tree);
         if (tree && liveOn(ctx)) {
-          const u = tracker.add(tree, table, ctx.now());
+          const u = tracker.add(tree, table, ctx.now(), rec.units + rec.heavy * ctx.heavyCost);
           if (u) writeUse(ctx.dir, id, u);
         }
         if (tree) {
@@ -1399,6 +1421,8 @@ function createLease(ctx, {
      */
     resize(spec, { wait = false, resample = false } = {}) {
       if (released) throw new Error('ci-budget: resize on a released lease');
+      // Released from outside (by hand or by a rule): a resize must not write the lease file back, which would undo it.
+      if (disowned || lease.checkCleared()) return { units: rec.units, heavy: rec.heavy };
       const s = typeof spec === 'number' ? { units: spec } : { ...spec };
       const want = {
         units: Math.max(0, Math.trunc(s.units ?? rec.units)),
@@ -1430,6 +1454,7 @@ function createLease(ctx, {
     try { heartbeat.stopSync(); } catch { /* best effort */ }
     tryUnlink(file);
     tryUnlink(hbFile);
+    mirrorLease(ctx, id, null);
     heartbeat.stop();
   }
 
@@ -1486,7 +1511,9 @@ function createLease(ctx, {
           got = { units: 0, heavy: 0 };
         } else if (got.units + got.heavy === 0) got.units = 1; // never below one worker (<= what it held)
         rec.units = got.units; rec.heavy = got.heavy; rec.heartbeatAt = ctx.now();
+        if (!mine && existsSync(clearedFile)) return satisfied(got); // dropped from outside while we waited: leave it dropped
         writeAtomic(ctx, file, rec);
+        mirrorLease(ctx, id, rec);
         heartbeat.setRecord(rec);
         try { writeFileSync(hbFile, String(ctx.now())); } catch { /* best effort */ }
         return satisfied(got);
@@ -1498,7 +1525,9 @@ function createLease(ctx, {
           rec.units = want.units > 0 ? Math.max(rec.units, 1) : rec.units;
           if (rec.units + rec.heavy === 0) rec.units = 1;
           rec.heartbeatAt = ctx.now();
+          if (!existsSync(file) && existsSync(clearedFile)) return; // dropped from outside: leave it dropped
           writeAtomic(ctx, file, rec);
+          mirrorLease(ctx, id, rec);
           heartbeat.setRecord(rec);
         });
         ctx.log(`ci-budget: waited ${Math.round((ctx.now() - begin) / 1000)} s for a heavy-lane slot; `
@@ -2338,7 +2367,7 @@ export function formatResourceStatus(st) {
           : `IDLE? (quiet ${dur(h.idleFlag.idleMs)} > ${dur(h.idleFlag.idleLimitMs)}, holder alive: kept, not released)`) : '',
         h.hbStale ? `HEARTBEAT STALE (no beat for ${dur(h.hbStale.heartbeatAgeMs)} > ${dur(h.hbStale.staleMs)}, pid verified alive: kept, not released)` : '',
         h.stuck || h.overTime || h.idleFlag || h.hbStale
-          ? `[flagged live holder: released by the sweep at ${h.ceilingMs ? `${dur(h.ceilingMs)} held` : 'no ceiling (never)'}, or when it exits; release by hand: ${h.releaseCommand}]` : ''].filter(Boolean).join(' ');
+          ? `[flagged live holder: ${h.stuck?.policy === 'release' ? 'released at the next sweep (stuck), or when it exits' : `released by the sweep at ${h.ceilingMs ? `${dur(h.ceilingMs)} held` : 'no ceiling (never)'}, or when it exits`}; release by hand: ${h.releaseCommand}]` : ''].filter(Boolean).join(' ');
       const liveTxt = h.measured || (h.charged != null && h.charged !== h.declared)
         ? `  declared ${h.declared} / charged ${h.charged}${h.measured ? ` / measured ${h.measured.cpu} cpu ${h.measured.ramMb} MB${h.measured.warm && h.measured.fresh ? '' : ' (warming up or stale: charged as declared)'}` : ' (expected from history)'}` : '';
       lines.push(`  ${h.kind.padEnd(8)} pid ${String(h.pid).padEnd(7)} ${h.units}u${liveTxt}  age ${dur(h.ageMs)}  heartbeat ${h.heartbeatAgeMs === null ? 'n/a' : `${dur(h.heartbeatAgeMs)} ago`}`
@@ -2435,6 +2464,7 @@ export function releaseLease(opts = {}) {
   const wasAlive = ctx.isAlive(e.pid) || (e.boundPid > 0 && ctx.isAlive(e.boundPid));
   writeTombstone(ctx, e.id, e.pid);
   const won = dropFile(e.file, e.hbFile, e.actFile, join(ctx.dir, `lease-${e.id}.live`), useFile(ctx.dir, e.id), progFile(ctx.dir, e.id));
+  mirrorLease(ctx, e.id, null);
   if (won) noteClear(ctx, e, 'lease', 'manual', {
     by: 'manual', session: ctx.session || null, byPid: num(ctx.env.CLAUDE_PID) || null, wasAlive,
     heldMs: Math.max(0, ctx.now() - num(e.startedAt)), pid: e.pid,

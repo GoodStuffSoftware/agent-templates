@@ -90,6 +90,31 @@ test('measureOf: not warm, stale, warm (floor and declared cap)', () => {
   assert.equal(measureOf(use({ win: [9, 0.4, 0.4, 0.4, 0.4] }), 8, now).charge, 1, 'only the last window counts');
 });
 
+test('measureOf: the ramped hold and the history cpu keep the charge up; a missing hold (older record) changes nothing', () => {
+  const use = (o) => ({ at: 1_000_000, n: 5, cpu: 0.2, ramMb: 400, ramPeakMb: 500, win: [0.2, 0.1, 0.2, 0.1], ...o });
+  const now = 1_010_000;
+  assert.equal(measureOf(use({}), 8, now).charge, 1, 'no hold field: the window alone');
+  assert.equal(measureOf(use({ hold: 5.4 }), 8, now).charge, 6, 'the hold is still falling');
+  assert.equal(measureOf(use({ hold: 20 }), 8, now).charge, 8, 'declared caps the hold');
+  assert.equal(measureOf(use({}), 8, now, LIVE_DEFAULTS, 3.2).charge, 4, 'never below the history cpu p90');
+  assert.equal(measureOf(use({}), 8, now, LIVE_DEFAULTS, 40).charge, 8, 'declared caps the history too');
+});
+
+test('makeUseTracker: the hold starts at declared and falls at most one unit per 25 s, rises at once; a quiet phase cannot take 8 to 1 in 100 s', () => {
+  const tree = { procs: [{ pid: 7, creationTime: 70 }] };
+  const tr = makeUseTracker();
+  let cpuMs = 0; let t = 5_000_000;
+  const feed = (cores, dt = 25_000) => { t += dt; cpuMs += Math.round(cores * dt); return tr.add(tree, [{ pid: 7, creationTime: 70, memMb: 10, cpuMs }], t, 8); };
+  assert.equal(tr.add(tree, [{ pid: 7, creationTime: 70, memMb: 10, cpuMs: 0 }], t, 8), null, 'baseline');
+  const holds = [];
+  for (let i = 0; i < 4; i += 1) holds.push(feed(0.1).hold); // 100 s of quiet
+  assert.ok(holds[0] > 6.5 && holds[0] <= 8, `first reading starts near declared (${holds[0]})`);
+  assert.ok(holds[3] >= 4.9, `100 s of quiet only drops it by about 4 units (${holds[3]})`);
+  for (let i = 1; i < holds.length; i += 1) assert.ok(holds[i - 1] - holds[i] <= 1.001, 'at most one unit per tick');
+  assert.equal(measureOf(feed(0.1), 8, t).charge, 4, 'charged by the hold, not the quiet window');
+  assert.equal(feed(9).hold, 9, 'a burst raises it at once');
+});
+
 test('effectiveBox: expected cpu rounded up inside [floor, declared]; declared when unknown', () => {
   assert.equal(effectiveBox(8, undefined), 8);
   assert.equal(effectiveBox(8, null), 8);
@@ -255,7 +280,7 @@ test('charge follows the measure after warm-up: an idle holder costs the floor a
       const rt = fakeProcs();
       w.busy = 1;
       const a = await w.acq({ box: 12, label: 'idle holder', pid: WRAPPER, reap: { policy: 'on' }, reapSeams: rt.reapSeams });
-      warm(w, rt, a, 0.3);
+      warm(w, rt, a, 0.3, 16); // the charge ramps down from declared, one unit per tick
       const h = boxHolder(w, 'idle holder');
       assert.equal(h.declared, 12);
       assert.equal(h.charged, live ? 1 : 12, live ? 'the floor' : 'declared, as before');
@@ -288,6 +313,8 @@ test('charge: warm and fresh measure charges ceil(peak of the window); declared 
     pump(w, rt, a, 40, 4); // far over declared
     assert.equal(boxHolder(w, 'busy holder').charged, 6, 'never above declared');
     pump(w, rt, a, 0.1, 4);
+    assert.equal(boxHolder(w, 'busy holder').charged, 2, 'the charge ramps down, it does not fall to the floor at once');
+    pump(w, rt, a, 0.1, 6);
     assert.equal(boxHolder(w, 'busy holder').charged, 1);
     w.t += LIVE_DEFAULTS.staleMs + 1_000; // the wrapper stopped ticking
     const h = boxHolder(w, 'busy holder');
@@ -357,7 +384,7 @@ test('status: each holder reports declared, charged, measured and expected; the 
     let st = resourceStatus({ ...w.opts });
     assert.equal(st.machine.liveCapacity, true);
     assert.equal(boxHolder(w, 'measured one').measured, null, 'nothing measured yet');
-    warm(w, rt, a, 2);
+    warm(w, rt, a, 2, 10);
     const h = boxHolder(w, 'measured one');
     assert.equal(h.declared, 6); assert.equal(h.charged, 2);
     assert.equal(h.measured.warm, true); assert.equal(h.measured.fresh, true); assert.equal(h.measured.cpu, 2); assert.equal(h.measured.ramMb, 640);
@@ -589,4 +616,23 @@ test('stuck: with no io counters (a snapshot without them) tree cpu alone never 
     assert.equal(h.progress.stuck, false);
     a.release();
   } finally { w.done(); }
+});
+
+test('io counters missing for the tree (elevated child) while other processes have them: no io witness, so never STUCK on tree cpu alone', () => {
+  const tree = progTree(41);
+  const mine = pt(41, 1, 410, { cpuMs: 1000 }); // no ioBytes: a protected child
+  const other = pt(99, 1, 990, { cpuMs: 10, ioBytes: 5000 }); // someone else's process has them
+  const first = sampleProgress(null, tree, [mine, other], 100_000);
+  assert.equal(first.haveIo, false, 'the tree has no io counters');
+  const tr = makeProgressTracker(PROG_DEFAULTS);
+  tr.add(tree, [mine, other], 100_000);
+  const rec = tr.add(tree, [mine, other], 125_000);
+  assert.equal(rec.ioBytes, null);
+  const now = 1_000_000;
+  const v = stuckOf({ prog: { ...rec, at: now - 10_000, lastAt: now - 900_000 }, startedAt: now - 1_800_000, maxHoldMs: null, rule: { quietMs: 120_000, defaultHoldMs: 240_000 }, now });
+  assert.equal(v.stuck, false);
+  assert.ok(!v.signals.includes('io'));
+  // the tree's own io counters make the witness
+  const withIo = sampleProgress(null, tree, [{ ...mine, ioBytes: 7 }, other], 100_000);
+  assert.equal(withIo.haveIo, true);
 });

@@ -405,7 +405,7 @@
     "reap_never": {
       "type": "string",
       "title": "Processes the reaper never stops",
-      "description": "Comma-separated names the reaper must never stop, on top of its built-in list (claude, Stream Deck). Each entry is a case-insensitive substring of the process name, executable path or command line, or a /regex/flags. Empty by default.",
+      "description": "Comma-separated names the reaper must never stop, on top of its built-in list (claude, Stream Deck, and shared daemons such as the Gradle and Kotlin daemons, adb, pm2, MSBuild node reuse, watchman, sccache, emulators). Each entry is a case-insensitive substring of the process name, executable path or command line, or a /regex/flags. Empty by default.",
       "default": ""
     },
     "lookup_role_policy": {

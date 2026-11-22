@@ -22,6 +22,7 @@ import { spawnSync } from 'node:child_process';
 import { appendRotatingJsonl } from './resource-rules.mjs';
 
 export const REAP_POLICIES = ['off', 'dry-run', 'on'];
+export const AFTER_LEASE_SLACK_MS = 1000; // clock and snapshot granularity
 export const ORPHAN_MAX_AGE_MS = 7 * 24 * 3600_000;
 export const reapsFile = (dir) => join(dir, 'reaps.jsonl');
 export const treeFile = (dir, id) => join(dir, `lease-${id}.tree`);
@@ -61,6 +62,26 @@ export function parseNever(spec) {
 
 // ---------------------------------------------------------------- pure selection
 
+/**
+ * Shared, machine-wide daemons a job may have been the first to start. They serve every session, so they (and what
+ * they run for others) are never reaped, whoever started them. Always applied; reap_never is added on top of it
+ * (union, never a replacement). Matched against name, exe path and command line separately.
+ */
+export const DEFAULT_NEVER = [
+  /GradleDaemon|KotlinCompileDaemon|org\.gradle\.launcher\.daemon/i,
+  /(^|[\\/])adb(\.exe)?$/i,
+  /\badb(\.exe)?"?\s+(-L\s|fork-server|start-server|server)/i,
+  /God Daemon|[\\/]pm2[\\/](lib|bin)[\\/]/i,
+  /\/nodemode:|\/nodeReuse:true|VBCSCompiler|dotnet(\.exe)?"?\s+build-server|MSBuild(\.exe)?"?\s+.*nodemode/i,
+  /watchman/i,
+  /(^|[\\/])sccache(-dist)?(\.exe)?$/i,
+  /\b(turbo|nx)\b.*\bdaemon\b|[\\/]nx[\\/]src[\\/]daemon[\\/]/i,
+  /fsmonitor--daemon/i,
+  /(^|[\\/])(gpg-agent|ssh-agent|dirmngr|scdaemon)(\.exe)?$/i,
+  /(^|[\\/])(emulator|qemu-system[^\\/]*)(\.exe)?$/i,
+];
+const daemonHit = (row) => DEFAULT_NEVER.find((re) => [row.name, row.exe, row.cmd].some((f) => f && re.test(String(f))));
+
 const baseOf = (p) => basename(String(p ?? '').replace(/\\/g, '/'));
 const slashless = (s) => String(s ?? '').replace(/\//g, '\\').toLowerCase();
 
@@ -75,6 +96,8 @@ export function protectedReason(row, never = []) {
   if (!Number.isInteger(row.pid) || row.pid <= 4) return 'system';
   if (isClaude(row)) return 'claude';
   if (isStreamDeck(row)) return 'streamdeck';
+  const daemon = daemonHit(row);
+  if (daemon) return `daemon:${daemon.source}`;
   const hit = never.find((n) => n.test(row));
   return hit ? `reap_never:${hit.src}` : null;
 }
@@ -139,7 +162,12 @@ export function recordTree(table, rootPid, { prev = null, now = Date.now(), cost
  * {rootAlive, targets, spared, stale}: targets deepest first, each {pid, creationTime, image, parentPid,
  * memMb, depth, how: 'recorded'|'descendant'}; spared {pid, image, why}; stale {pid, image, why:'gone'|'pid-reused'|'no-creation-time'}.
  */
-export function planReap({ table, tree, selfPid = process.pid, never = [] }) {
+export function planReap({ table, tree, selfPid = process.pid, never = [], leaseEnd = null }) {
+  // A process created after the lease ended (the recorded tree's last tick, unless the caller knows better) was
+  // started for someone else: never a target, never an anchor, and its children are not ours.
+  const endAt = Number.isFinite(leaseEnd) ? leaseEnd : (Number.isFinite(tree.at) ? tree.at : null);
+  const afterEnd = (r) => endAt != null && r.creationTime != null && r.creationTime > endAt + AFTER_LEASE_SLACK_MS;
+  const lateSpared = new Map();
   const byPid = new Map(table.map((r) => [r.pid, r]));
   const matches = (rec) => {
     const r = byPid.get(rec.pid);
@@ -174,6 +202,7 @@ export function planReap({ table, tree, selfPid = process.pid, never = [] }) {
     const cur = stack.pop();
     for (const k of kids.get(cur.pid) ?? []) {
       if (k.creationTime == null) continue; // cannot be verified later: leave it
+      if (afterEnd(k)) { if (!cand.has(k.pid)) lateSpared.set(k.pid, k); continue; }
       if (!cand.has(k.pid)) cand.set(k.pid, { row: k, how: 'descendant' });
       if (!seenAnchor.has(k.pid) && expandable(k)) { seenAnchor.add(k.pid); stack.push(k); }
     }
@@ -186,16 +215,20 @@ export function planReap({ table, tree, selfPid = process.pid, never = [] }) {
   };
   const targets = [];
   const spared = [];
+  for (const k of lateSpared.values()) if (!cand.has(k.pid)) spared.push({ pid: k.pid, image: k.name, why: 'after-lease' });
   for (const { row, how } of cand.values()) {
     let why = null;
     if (selfChain.has(row.pid)) why = 'self-or-ancestor';
+    else if (afterEnd(row)) why = 'after-lease';
     else if (row.pid === rootPid) why = 'tree-root';
     else why = protectedReason(row, never);
     if (!why) { // running under a protected process, between the target and the tree root
       let cur = row;
       for (let i = 0; i < 128; i += 1) {
         const p = parentOf(table, byPid, cur);
-        if (!p || p.pid === rootPid) break;
+        // The walk only crosses recorded processes up to the root: a parent outside the tree (pid 1, a subreaper,
+        // another session's shell) ends the chain and protects nothing, so a reparented leftover stays reapable.
+        if (!p || p.pid === rootPid || !cand.has(p.pid)) break;
         const pr = protectedReason(p, never);
         if (pr) { why = `under:${pr}`; break; }
         cur = p;
@@ -410,8 +443,24 @@ export function processSnapshot({ platform = process.platform, spawn = spawnSync
 function sleepSync(ms) { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch { /* no wait */ } }
 
 /**
- * Kill ONE vetted pid (never a tree). Windows: `taskkill /F /PID <pid>` (no /T: the caller kills children first
- * and only vetted pids); exit 128 = no such process (gone). POSIX: SIGTERM, wait, one fresh snapshot, SIGKILL only
+ * The Windows kill script: one hidden PowerShell call per target that re-checks the creation time right before
+ * stopping it (the plan comes from an earlier snapshot and Windows reuses pids fast). Exit codes: 0 stopped,
+ * 128 no such process, 129 creation time differs (skipped), 130 start time unreadable (not stopped), 1 Stop-Process failed.
+ */
+export function winKillScript({ pid, creationTime }) {
+  const n = Number(pid); const ct = Math.round(Number(creationTime));
+  return [
+    `$p = Get-Process -Id ${n} -ErrorAction SilentlyContinue`,
+    'if (-not $p) { exit 128 }',
+    'try { $ct = ([DateTimeOffset]$p.StartTime).ToUnixTimeMilliseconds() } catch { exit 130 }',
+    `if ([math]::Abs($ct - ${ct}) -gt 1000) { exit 129 }`,
+    `try { Stop-Process -Id ${n} -Force -ErrorAction Stop; exit 0 } catch { if (-not (Get-Process -Id ${n} -ErrorAction SilentlyContinue)) { exit 128 }; [Console]::Error.WriteLine($_.Exception.Message); exit 1 }`,
+  ].join('; ');
+}
+
+/**
+ * Kill ONE vetted pid (never a tree). Windows: a hidden PowerShell call that re-checks pid + creation time, then stops
+ * that one process (the caller kills children first and only vetted pids); exit 128 = no such process (gone). POSIX: SIGTERM, wait, one fresh snapshot, SIGKILL only
  * if the same pid + creation time is still running. Seams: spawn, kill (process.kill), snapshot, sleep.
  */
 export function realKill(target, {
@@ -420,9 +469,11 @@ export function realKill(target, {
 } = {}) {
   if (!Number.isInteger(target?.pid) || target.pid <= 4) return { ok: false, error: 'refused pid' };
   if (platform === 'win32') {
-    const r = spawn('taskkill', ['/F', '/PID', String(target.pid)], { encoding: 'utf8', windowsHide: true, timeout: 15_000 });
+    if (!Number.isFinite(target.creationTime)) return { ok: false, error: 'no creation time' }; // cannot be verified: never kill on a pid alone
+    const r = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winKillScript(target)], { encoding: 'utf8', windowsHide: true, timeout: 20_000 });
     if (r.status === 0) return { ok: true };
     if (r.status === 128) return { ok: true, gone: true };
+    if (r.status === 129) return { ok: true, gone: true, skipped: 'pid-reused' }; // the pid now belongs to another process: left alone
     return { ok: false, error: String(r.stderr || r.stdout || r.error || `exit ${r.status}`).trim().slice(0, 200) };
   }
   try { kill(target.pid, 'SIGTERM'); } catch (e) { return e?.code === 'ESRCH' ? { ok: true, gone: true } : { ok: false, error: String(e?.message ?? e) }; }
