@@ -161,7 +161,8 @@ test('run: without the token the same nested run queues behind its parent (contr
     // The exclusive lane is never granted over capacity: past the bound it keeps waiting (the test kills it).
     assert.match(got.err, /waiting past the 1 s bound for exclusive app-e2e/);
     assert.doesNotMatch(got.err, /OVER-CAPACITY|running over budget/);
-    assert.equal(got.status, null);
+    // Killed by the test's timeout: null where the signal ends the process, 143 where the CLI traps SIGTERM and exits (Linux).
+    assert.ok(got.status === null || got.status === 143, `killed while waiting, got ${got.status}`);
   } finally { b.done(); }
 });
 
