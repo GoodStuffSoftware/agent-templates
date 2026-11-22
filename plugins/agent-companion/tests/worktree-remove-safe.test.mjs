@@ -170,11 +170,11 @@ test('decision: relative path follows a cd earlier in the command', () => {
   } finally { s.done(); }
 });
 
-test('decision: no link, a missing tree, or another command passes through untouched', () => {
+test('decision: no link or another command passes through untouched; a path not found as typed is rewritten (unknown)', () => {
   const s = scene({ link: false });
   try {
     assert.equal(decide(`git worktree remove ${treeArg(s)}`, s).action, 'none');
-    assert.equal(decide(`git worktree remove ${slash(s.root)}/nope`, s).action, 'none');
+    assert.equal(decide(`git worktree remove ${slash(s.root)}/nope`, s).action, 'rewrite', 'git may resolve it by suffix: the script decides');
     assert.equal(decide('git worktree list', s).action, 'none');
     assert.equal(decide('git worktree add ../x', s).action, 'none');
     assert.equal(decide('echo "git worktree remove x"', s).action, 'none', 'text inside a quoted word is not a command');
@@ -283,4 +283,96 @@ test('hook: a compound line it cannot rewrite cleanly is denied; PowerShell is d
     assert.equal(ps.json.hookSpecificOutput.permissionDecision, 'deny');
     assert.ok(ps.json.hookSpecificOutput.permissionDecisionReason.includes('worktree-remove-safe.mjs'));
   } finally { s.done(); }
+});
+
+// --- review round 2: the gaps the first review found ---------------------------------------------
+
+test('decision: a double-quoted backslash path (Windows style) is seen, not mangled to C:Usersx', () => {
+  const s = scene();
+  try {
+    const bs = s.tree; // native separators: backslashes on Windows
+    const d = decide(`git worktree remove "${bs}"`, s);
+    assert.equal(d.action, 'rewrite');
+    assert.equal(d.command, `node '${slash(SCRIPT)}' "${bs}"`);
+    const esc = decide(`git worktree remove "${bs.replace(/\\/g, '\\\\')}"`, s);
+    assert.equal(esc.action, 'rewrite', 'an escaped backslash is one backslash');
+  } finally { s.done(); }
+});
+
+test('decision: a bare worktree name (git resolves it by unique suffix) is rewritten, and the script keeps the target safe', () => {
+  const s = scene();
+  try {
+    const d = decide('git worktree remove tree', s); // cwd is the repo; the tree is ../tree
+    assert.equal(d.action, 'rewrite');
+    assert.equal(d.command, `node '${slash(SCRIPT)}' tree`);
+    const r = runScript(['tree'], s.repo);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(existsSync(s.tree), false, 'git resolved the suffix name and removed the tree');
+    assert.equal(targetIntact(s), true, 'the target survived: links are unlinked before git sees a suffix name');
+  } finally { s.done(); }
+});
+
+test('script: no link is unlinked when git would refuse (dirty tree, main checkout, not a worktree)', () => {
+  const s = scene();
+  const plain = join(s.root, 'plain');
+  try {
+    writeFileSync(join(s.tree, 'dirty.txt'), 'x');
+    const dirty = runScript([s.tree], s.repo);
+    assert.notEqual(dirty.status, 0, 'git refuses a dirty tree without --force');
+    assert.ok(lstatSync(join(s.tree, 'node_modules')).isSymbolicLink(), 'the link is still there');
+    assert.equal(targetIntact(s), true);
+
+    symlinkSync(s.target, join(s.repo, 'nm'), 'junction');
+    const main = runScript([s.repo], s.tree);
+    assert.notEqual(main.status, 0, 'git refuses the main checkout');
+    assert.ok(lstatSync(join(s.repo, 'nm')).isSymbolicLink(), 'the main checkout keeps its link');
+
+    mkdirSync(plain);
+    symlinkSync(s.target, join(plain, 'nm'), 'junction');
+    const other = runScript([plain], s.repo);
+    assert.notEqual(other.status, 0, 'git refuses a directory that is not a worktree');
+    assert.ok(lstatSync(join(plain, 'nm')).isSymbolicLink(), 'a plain directory keeps its link');
+    assert.equal(targetIntact(s), true);
+  } finally { s.done(); }
+});
+
+test('decision: git -c / -- over a tree with no link run as written; over a link they are denied or rewritten', () => {
+  const plain = scene({ link: false });
+  const s = scene();
+  try {
+    assert.equal(decide(`git -c core.longpaths=true worktree remove ${slash(plain.tree)}`, plain).action, 'none');
+    assert.equal(decide(`git --no-pager worktree remove ${slash(plain.tree)}`, plain).action, 'none');
+    assert.equal(decide(`git worktree remove -- ${slash(plain.tree)}`, plain).action, 'none');
+    assert.equal(decide(`git worktree remove --no-such-flag ${slash(plain.tree)}`, plain).action, 'none');
+    assert.equal(decide(`git -c core.longpaths=true worktree remove ${treeArg(s)}`, s).action, 'deny', 'a link: cannot be rebuilt, so denied');
+    const dd = decide(`git worktree remove -- ${treeArg(s)}`, s);
+    assert.equal(dd.action, 'rewrite');
+    assert.equal(dd.command, `node '${slash(SCRIPT)}' ${treeArg(s)}`, '-- is dropped');
+    assert.equal(decide('git -c a=b worktree remove $d', s).action, 'deny', 'an unknown path is not assumed link-free');
+  } finally { s.done(); plain.done(); }
+});
+
+test('decision: command, env, time and sudo prefixes are looked through', () => {
+  const s = scene();
+  try {
+    for (const prefix of ['command ', 'env ', 'env FOO=1 ', 'time ', 'time -p ', 'sudo ', 'FOO=1 command ', 'exec ', 'nohup ']) {
+      const d = decide(`${prefix}git worktree remove ${treeArg(s)}`, s);
+      assert.equal(d.action, 'rewrite', prefix);
+      assert.equal(d.command, `${prefix}node '${slash(SCRIPT)}' ${treeArg(s)}`, prefix);
+    }
+  } finally { s.done(); }
+});
+
+test('hook: a heavy command beside a remove still gets the resource gate (deny, and rewrite with both rewrites)', () => {
+  const s = scene();
+  const out = mkdtempSync(join(tmpdir(), 'wrs-tail-'));
+  try {
+    const rm = `git worktree remove -f ${slash(s.tree)}`;
+    const deny = runHook('hooks/bash-tail.mjs', payload(`npx vitest run && ${rm}`, { cwd: s.repo }), { env: { AGENT_COMPANION_BASH_TAIL_DIR: out, CLAUDE_PLUGIN_OPTION_RESOURCE_GATE: 'deny' } });
+    assert.equal(deny.json.hookSpecificOutput.permissionDecision, 'deny', 'the heavy command is denied, not waved through by the remove rewrite');
+    const rew = runHook('hooks/bash-tail.mjs', payload(`npm ci && ${rm}`, { cwd: s.repo }), { env: { AGENT_COMPANION_BASH_TAIL_DIR: out, CLAUDE_PLUGIN_OPTION_RESOURCE_GATE: 'rewrite' } });
+    const cmd = rew.json.hookSpecificOutput.updatedInput.command;
+    assert.match(cmd, /resource-queue/, 'the gate wrapped the heavy command');
+    assert.match(cmd, /worktree-remove-safe\.mjs/, 'the remove is still rewritten');
+  } finally { s.done(); rmSync(out, { recursive: true, force: true }); }
 });

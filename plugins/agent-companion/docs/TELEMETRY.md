@@ -556,10 +556,12 @@ Written by `hooks/bash-tail.mjs` (the gate is its first step) when a heavy Bash 
 | `session_id` | string | the session |
 | `agent_type` | string | null | the caller's agent type |
 | `caller_is_subagent` | boolean | whether a subagent made the call |
-| `event` | string | `denied`, `hinted` or `rewritten` |
-| `mode` | string | the gate mode in force when it fired (`deny`, `rewrite` or `hint`) |
-| `classes` | string[] | the rules-file classes the command matched (`e2e`, `vitest-full`, `lint` ...) |
+| `event` | string | `denied`, `hinted` or `rewritten`; or `worktree-remove-denied` / `worktree-remove-rewritten` (the junction-safe `git worktree remove` step, option `worktree_remove_safe`, same file) |
+| `mode` | string | the gate mode in force when it fired (`deny`, `rewrite` or `hint`); absent on `worktree-remove-*` rows |
+| `classes` | string[] | the rules-file classes the command matched (`e2e`, `vitest-full`, `lint` ...); absent on `worktree-remove-*` rows |
+| `tool` | string | `Bash` or `PowerShell`; `rewritten` and `worktree-remove-*` rows |
 | `command_chars` | number | length of the command |
+| `count` | number | `worktree-remove-rewritten` rows only: how many `git worktree remove` calls were rewritten |
 | `run_in_background` | boolean | `rewritten` rows only |
 
 The queue itself keeps its own log of cleared leases, `clears.jsonl`, in the ledger directory (machine-wide, outside this folder; see resource-queue.md, "The clears log").

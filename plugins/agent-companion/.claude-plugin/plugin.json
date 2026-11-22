@@ -746,7 +746,7 @@
     "worktree_remove_safe": {
       "type": "boolean",
       "title": "Safe git worktree remove",
-      "description": "On by default. A `git worktree remove` of a tree that holds a Windows junction or a directory symlink (a shared node_modules, for instance) is rewritten to scripts/worktree-remove-safe.mjs, which removes each link as a link first, because git follows a junction and empties its target. A PowerShell command is denied with the rewritten command in the text unless resource_gate_powershell_rewrite is true. Not seen: bash -c, xargs and aliases. Off = the command runs exactly as written.",
+      "description": "On by default. A `git worktree remove` of a tree that holds a Windows junction or a directory symlink (a shared node_modules, for instance) is rewritten to scripts/worktree-remove-safe.mjs, which removes each link as a link first, because git follows a junction and empties its target. A PowerShell command is denied with the rewritten command in the text unless resource_gate_powershell_rewrite is true. Not seen: bash -c, xargs, aliases and a prefix that takes a value (sudo -u user git). Off = the command runs exactly as written.",
       "default": true
     },
     "shared_resources_line": {

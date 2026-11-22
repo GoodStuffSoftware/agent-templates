@@ -43,7 +43,9 @@
 // exit code, lines, bytes, characters returned). `skipped` rows only for a
 // command that WAS a known runner and was left alone, with the reason.
 // The gate writes telemetry/resource-gate.jsonl (denied | hinted | rewritten |
-// fallback rows: class, mode, command length; never the command text).
+// fallback rows: class, mode, command length; never the command text). The worktree-remove
+// step writes `worktree-remove-denied` and `worktree-remove-rewritten` rows to the same stream
+// (tool, command_chars, count; no mode or classes).
 
 import { readStdin, opt, passthrough, noteAgentType, appendLog, telemetryDir, callerIsSubagent, isFixtureSession, claudeDir, homeRoot, writeAndExit } from './lib/context.mjs';
 import { homedir } from 'node:os';
@@ -97,14 +99,15 @@ function permissionHit(p, command) {
 
 let input = null;
 let gateCommand = null; // the command after step 1, when the gate rewrote it
+let origCommand = null; // the caller's command, when step 0 rewrote it (steps 1 and 2 then see the rewritten text)
 let gateText = null; // additionalContext from step 1 (hint mode, rewrite note)
 
 // What the call becomes once the tail step is done (or skipped): the gate's
 // rewrite and note if there were any, otherwise nothing at all.
 function finish(command, extra = {}) {
   const out = { hookEventName: 'PreToolUse' };
-  const cmd = command ?? gateCommand;
-  if (cmd && input && cmd !== input.command) out.updatedInput = { ...input, command: cmd };
+  const cmd = command ?? gateCommand ?? (origCommand ? input.command : null);
+  if (cmd && input && cmd !== (origCommand ?? input.command)) out.updatedInput = { ...input, command: cmd };
   if (gateText) out.additionalContext = gateText;
   if (!out.updatedInput && !out.additionalContext) passthrough();
   Object.assign(out, extra);
@@ -136,8 +139,10 @@ try {
         if (w.action === 'deny') {
           writeAndExit(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: w.text } }));
         }
-        gateCommand = w.command;
-        finish();
+        // Fall through: the resource gate and the output tail run on the rewritten text, so one command
+        // still gets both rewrites (a heavy command next to the remove is queued or denied as usual).
+        origCommand = input.command;
+        input = { ...input, command: w.command };
       }
     }
   } catch { /* fails open: the command runs as written */ }
@@ -159,7 +164,7 @@ try {
         // that RUNS, so a rewrite is allowed only when no rule could match the
         // original (a rewrite must not step around `Bash(git push:*)`) or the
         // wrapped command.
-        rewriteAllowed: (wrapped) => permOk && !permissionHit(p, input.command) && !permissionHit(p, wrapped),
+        rewriteAllowed: (wrapped) => permOk && !permissionHit(p, origCommand ?? input.command) && !permissionHit(p, input.command) && !permissionHit(p, wrapped),
       });
       if (d.action === 'deny') {
         gateRow(p, { event: 'denied', mode, classes: d.classes, tool: p.tool_name, command_chars: input.command.length });

@@ -7,14 +7,15 @@
 // a call, so the rewrite lives in the hook that already owns them).
 //
 //   worktreeRemoveDecision(command, { cwd, shell }) ->
-//     { action: 'none' }                              nothing to do: not a worktree remove, tree missing, or no link in it
+//     { action: 'none' }                              nothing to do: not a worktree remove, or no link in the tree
 //     { action: 'rewrite', command, count }           each qualifying `git [-C d] worktree remove [-f] p` replaced in place
 //     { action: 'deny', text }                        a remove that cannot be rewritten cleanly
 //
 // A segment is rewritten in place (its original argument tokens, quoting and all, are kept, so
 // `$d` in a loop still expands in the same shell; nothing moves into a child shell). It
 // qualifies when its target tree exists and holds a link, or when the target cannot be known
-// from the text (a variable, a `cd` to a variable): the script is the safe superset and costs
+// from the text (a variable, a `cd` to a variable) or is not found as typed (git resolves a worktree by a
+// unique last path component too): the script is the safe superset and costs
 // one walk. Fails open: any error is { action: 'none' }.
 
 import { lstatSync } from 'node:fs';
@@ -30,6 +31,9 @@ const WALK_MS = 2000;
 const slash = (p) => String(p).replace(/\\/g, '/');
 const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!']);
 const ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
+// Command prefixes that run the next word as the command: skipped (with their own -x options) before `git`.
+// Not handled, listed as known gaps: options that take a value (`sudo -u user git`, `nice -n 5 git`).
+const PREFIXES = new Set(['command', 'env', 'time', 'sudo', 'exec', 'nohup', 'nice', 'builtin']);
 const baseName = (w) => slash(w).split('/').pop().replace(/\.exe$/i, '');
 const CD_NAMES = new Set(['cd', 'chdir', 'sl', 'set-location', 'pushd', 'push-location']);
 const POP_NAMES = new Set(['popd', 'pop-location']);
@@ -72,6 +76,9 @@ function literal(raw, ps) {
     else if (/^".*"$/s.test(v)) v = v.slice(1, -1);
     return v.includes('`') ? null : v;
   }
+  // Bash keeps a backslash inside double quotes unless it precedes $ ` " \ or a newline; wordsOf drops
+  // it everywhere, which turns "C:\Users\x" into C:Usersx.
+  if (/^"(?:[^"\\]|\\.)*"$/s.test(raw)) return raw.slice(1, -1).replace(/\\([$`"\\\n])/g, '$1');
   const w = wordsOf(raw);
   return w.length === 1 ? w[0] : null;
 }
@@ -82,6 +89,26 @@ function nativePath(p) {
   return m ? `${m[1].toUpperCase()}:/${m[2] ?? ''}` : p;
 }
 
+/**
+ * Best reading of a call this rewrite cannot rebuild (`git -c k=v worktree remove T`): the repo dir from
+ * any `-C` before `worktree`, and the single non-option word after `remove` as the path. null when
+ * there is not exactly one path word. It only decides whether the tree holds links, so an unclean call
+ * over a link-free tree runs untouched instead of being denied.
+ */
+function guessCall(toks, ps, wtIdx) {
+  let dir = null;
+  for (let j = 0; j + 1 < wtIdx; j += 1) if (literal(toks[j].raw, ps) === '-C') dir = toks[j + 1];
+  const args = [];
+  for (let j = wtIdx + 2; j < toks.length; j += 1) {
+    if (/^\d*[<>]|^&>/.test(toks[j].raw)) break;
+    const v = literal(toks[j].raw, ps);
+    if (v !== null && v.startsWith('-')) continue;
+    args.push(toks[j]);
+  }
+  if (args.length !== 1) return null;
+  return { dir, path: args[0], words: { dir: dir ? literal(dir.raw, ps) : null, path: literal(args[0].raw, ps) } };
+}
+
 /** One segment as a worktree-remove call: { spanStart, spanEnd, dir, flags, path } | { unclean } | null. */
 function parseSegment(seg, command, ps) {
   const text = command.slice(seg.start, seg.end);
@@ -89,7 +116,13 @@ function parseSegment(seg, command, ps) {
   let i = 0;
   while (i < toks.length) {
     const lit = literal(toks[i].raw, ps) ?? '';
-    if (KEYWORDS.has(lit) || ASSIGN.test(lit)) i += 1; else break;
+    if (KEYWORDS.has(lit) || ASSIGN.test(lit)) { i += 1; continue; }
+    if (!ps && PREFIXES.has(baseName(lit))) {
+      i += 1;
+      while (i < toks.length && /^-/.test(literal(toks[i].raw, ps) ?? '')) i += 1;
+      continue;
+    }
+    break;
   }
   if (i >= toks.length || baseName(literal(toks[i].raw, ps) ?? '') !== 'git') return null;
   const gitTok = toks[i];
@@ -101,13 +134,15 @@ function parseSegment(seg, command, ps) {
     if (v === '-C') { if (i + 1 >= toks.length) return null; dir = toks[i + 1]; i += 1; continue; }
     if (v !== null && v.startsWith('-')) {
       // Another global option before the subcommand: only a worktree remove makes it ours.
-      if (toks.slice(i).some((t, k) => literal(t.raw, ps) === 'worktree' && literal(toks[i + k + 1]?.raw, ps) === 'remove')) return { unclean: `an unsupported git option (${v}) before worktree remove`, spanStart: seg.start + gitTok.start, spanEnd: seg.start + toks[toks.length - 1].end };
+      const k = toks.findIndex((t, j) => j > i && literal(t.raw, ps) === 'worktree' && literal(toks[j + 1]?.raw, ps) === 'remove');
+      if (k >= 0) return { unclean: `an unsupported git option (${v}) before worktree remove`, guess: guessCall(toks, ps, k), spanStart: seg.start + gitTok.start, spanEnd: seg.start + toks[toks.length - 1].end };
       return null;
     }
     sawWorktree = v === 'worktree';
     break;
   }
   if (!sawWorktree || literal(toks[i + 1]?.raw, ps) !== 'remove') return null;
+  const wtIdx = i;
   i += 2;
   const flags = [];
   let path = null;
@@ -117,7 +152,8 @@ function parseSegment(seg, command, ps) {
     const v = literal(t.raw, ps);
     if (/^\d*[<>]|^&>/.test(t.raw)) break; // a redirect ends the arguments
     if (v !== null && (v === '--force' || /^-f+$/.test(v))) { flags.push(t); last = t; continue; }
-    if ((v !== null && v.startsWith('-')) || path) return { unclean: 'an option or extra argument this rewrite does not handle', spanStart: seg.start + gitTok.start, spanEnd: seg.start + toks[toks.length - 1].end };
+    if (v === '--') { last = t; continue; } // end of options: dropped from the rewrite (the script takes the path as is)
+    if ((v !== null && v.startsWith('-')) || path) return { unclean: 'an option or extra argument this rewrite does not handle', guess: guessCall(toks, ps, wtIdx), spanStart: seg.start + gitTok.start, spanEnd: seg.start + toks[toks.length - 1].end };
     path = t; last = t;
   }
   if (!path) return null; // git itself reports the usage error
@@ -150,7 +186,7 @@ function verdict(call, base, seam) {
   try {
     const st = lstatSync(tree);
     if (!st.isDirectory() || st.isSymbolicLink()) return 'none';
-  } catch { return 'none'; }
+  } catch { return 'unknown'; } // not there as typed: git may still resolve it (a unique last path component), so the script decides
   const r = seam(tree);
   return r.links.length || r.truncated ? 'links' : 'none';
 }
@@ -182,7 +218,11 @@ export function worktreeRemoveDecision(command, { cwd = process.cwd(), shell = '
     const hits = [];
     for (const seg of scanned.segments) {
       const call = parseSegment(seg, s, ps);
-      if (call?.unclean) { hits.push({ call, unclean: true }); continue; }
+      if (call?.unclean) {
+        // Deny only when the tree may hold links: a call over a link-free tree (git -c k=v ...) runs as written.
+        if (!call.guess || verdict(call.guess, base, seam) !== 'none') hits.push({ call, unclean: true });
+        continue;
+      }
       if (call) {
         const v = verdict(call, base, seam);
         if (v !== 'none') hits.push({ call, v });
