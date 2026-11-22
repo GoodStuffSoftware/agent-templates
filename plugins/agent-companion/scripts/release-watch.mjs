@@ -18,6 +18,8 @@ import { claudeDir, stateRootPath, opt } from '../hooks/lib/context.mjs';
 import * as S from '../hooks/lib/release-watch-state.mjs';
 import { unitsPerPercent } from '../hooks/lib/plan-allowance.mjs';
 
+// Session ids that only the install's live check writes (it feeds the guards invented commands and logs the denials). Exact ids, nothing guessed.
+export const SYNTHETIC_SESSIONS = new Set(['live-check']);
 export const CHECK_HOURS = [1, 2, 4, 8, 12, 16, 20, 24];
 export const LATE_MS = 2 * 3600e3;
 const HOUR = 3600e3;
@@ -86,7 +88,8 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, days = 7, sampl
   // What the hold itself caused (denials, refusals, anything logged while it was on) never counts toward a signal.
   const holdIv = holds || S.holdIntervals(nowMs);
   const inHold = (t) => holdIv.some(([a, b]) => t >= a && t <= b);
-  const rd = (f) => jsonl(join(telDir, f + '.jsonl'));
+  // Rows the install's live check writes (session_id "live-check") are synthetic: they never count in any telemetry metric.
+  const rd = (f) => jsonl(join(telDir, f + '.jsonl')).filter((r) => !SYNTHETIC_SESSIONS.has(r && r.session_id));
   const ts = (r) => (typeof r.at === 'number' ? r.at : Date.parse(r.at || r.ts || 0));
   const win = (r) => { const t = ts(r); if (inHold(t)) return null; return t >= W0 && t <= nowMs ? 'since' : t >= B0 && t < T ? 'base' : null; };
   const N = { since: 0, base: 0 };

@@ -411,5 +411,38 @@ test('usage: units per hour convert to percent of the weekly limit (28.6 units =
   assert.ok(a.usage.since.pctPerHour > 0);
 });
 
+test('live-check rows never count in any telemetry metric', () => {
+  const synth = (o) => ({ ...o, session_id: 'live-check' });
+  const real = (o) => ({ ...o, session_id: 'real-session-1' });
+  putRows('spawns.jsonl', [...spread(70, T - 7 * DAY, T, (at) => real({ at })), ...spread(19, T, T + HOUR, (at) => real({ at })), ...spread(5, T, T + HOUR, (at) => synth({ at }))]);
+  putRows('resource-gate.jsonl', [...spread(3, T, T + HOUR, (at) => real({ at, event: 'granted' })), ...spread(6, T, T + HOUR, (at) => synth({ at, event: 'denied' }))]);
+  putRows('denials.jsonl', spread(4, T, T + HOUR, (at) => synth({ at, guard: 'spawn-guard', outcome: 'deny' })));
+  const m = W.analyze({ T, nowMs: T + HOUR });
+  assert.equal(m.spawns.since, 19, 'live-check spawns are not counted');
+  assert.equal(m.telemetry['gate:denied'], undefined, 'live-check denials are not counted');
+  assert.equal(m.telemetry['gate:granted'].since, 3);
+  assert.equal(m.telemetry['denial:spawn-guard/deny'], undefined);
+  assert.ok(!W.evaluate(m).map((x) => x.name).includes('queue-denied'));
+  assert.ok(W.SYNTHETIC_SESSIONS.has('live-check'));
+});
+
+test('usage-source-empty is reported but never starts a hold', () => {
+  for (const k of ['flag', 'hold', 'run']) rmSync(S.paths()[k], { force: true });
+  const only = () => metrics({ spawns: { since: 100, base: 0, perHour: { since: 10, base: 0 } } });
+  assert.deepEqual(names(only()), ['usage-source-empty']);
+  let r = W.tick({ at: T + HOUR, installed: installed(), holdMinutes: 30, run: only });
+  assert.deepEqual(r.flagged, ['usage-source-empty']); assert.equal(S.flagIsOpen(), true);
+  assert.match(S.flagLine(), /usage-source-empty/); assert.match(S.flagLine(), /never starts a hold/);
+  for (const min of [31, 120, 24 * 60]) {
+    r = W.tick({ at: T + HOUR + min * 60e3, installed: installed(), holdMinutes: 30, run: only });
+    assert.equal(r.held, false, `no hold after ${min} min`);
+  }
+  assert.equal(S.isHoldActive(), false);
+  // beside a release flag the hold still starts, and names only the release flag
+  S.openFlag({ version: '1', flags: [{ name: 'usage-source-empty', value: 0, level: 0 }, { name: 'queue-denied', value: 30, level: 30 }], at: T + 5 * HOUR, check: '+4h' });
+  const h = S.maybeHold({ holdMinutes: 30, at: T + 5 * HOUR + 31 * 60e3 });
+  assert.ok(h, 'a release flag beside it still holds'); assert.match(h.reason, /queue-denied/); assert.doesNotMatch(h.reason, /usage-source-empty/);
+});
+
 test('cleanup', () => { rmSync(tmp, { recursive: true, force: true }); });
 void tel;

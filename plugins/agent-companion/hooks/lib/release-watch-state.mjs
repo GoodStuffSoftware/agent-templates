@@ -63,6 +63,10 @@ export function flagIsOpen(f = readFlag()) { return !!(f && Array.isArray(f.flag
 // cooldown[name] = { level, T, at }, and the flag comes back only when a later window's level is more than WORSEN_FACTOR
 // times the answered level. Levels are rates (per hour, per 100 spawns or a share), so a count that merely grows cannot get around it.
 // flags: [{ name, value, level?, detail? }]. Returns the flag object written, or null when nothing new.
+// Flags that report on the watch itself, not on the release: they show in the check, the tick and the flag line, but never start a hold
+// (a fresh install with no telemetry would otherwise hold all work).
+export const NO_HOLD_FLAGS = new Set(['usage-source-empty']);
+const holdable = (flags) => (Array.isArray(flags) ? flags : []).filter((x) => x && !NO_HOLD_FLAGS.has(x.name));
 const levelOf = (f) => (typeof f.level === 'number' ? f.level : typeof f.value === 'number' ? f.value : null);
 const answeredFor = (cool, name, T) => { const c = cool[name]; return c && c.T === T ? c : null; };
 export function openFlag({ version, T, check, flags, at = now() } = {}) {
@@ -158,13 +162,15 @@ export function maybeHold({ holdMinutes, at = now() } = {}) {
     if (!(delay > 0)) return null;
     const f = readFlag();
     if (!flagIsOpen(f) || f.ackedAt || isHoldActive()) return null;
+    const hf = holdable(f.flags);
+    if (!hf.length) return null; // only watch-health flags (usage-source-empty): report, never hold
     const n = Date.parse(f.notifiedAt);
     if (!(n > 0) || at < n + delay * 60e3) return null;
     const lc = lastRow('clear');
     if (lc && lc >= n) return null; // a clear after the notification: never hold on that flag
     const hold = {
       since: iso(at), version: f.version ?? null,
-      reason: `release watch flagged ${f.flags.map((x) => x.name).join(', ')} and nobody answered within ${delay} min`,
+      reason: `release watch flagged ${hf.map((x) => x.name).join(', ')} and nobody answered within ${delay} min`,
       flags: f.flags, workers: 'handoff', clearedAt: null,
     };
     if (!writeJson(paths().hold, hold)) return null;
@@ -211,7 +217,7 @@ export function flagLine() {
     const f = readFlag();
     if (!flagIsOpen(f) || f.ackedAt) return null;
     const names = f.flags.map((x) => x.name + (x.detail ? ` (${x.detail})` : '')).join('; ');
-    return `[agent-companion] RELEASE WATCH ${f.version || ''} check ${f.check ?? '?'}: ${names}. Push-notify the operator at once (PushNotification) and relay their answer. Unanswered, new agents and heavy jobs are held after the delay (option release_watch_hold_minutes); run \`node <plugin>/scripts/release-watch.mjs status\` for detail.`;
+    return `[agent-companion] RELEASE WATCH ${f.version || ''} check ${f.check ?? '?'}: ${names}. Push-notify the operator at once (PushNotification) and relay their answer. ${holdable(f.flags).length ? 'Unanswered, new agents and heavy jobs are held after the delay (option release_watch_hold_minutes); ' : 'This flag never starts a hold; '}run \`node <plugin>/scripts/release-watch.mjs status\` for detail.`;
   } catch { return null; }
 }
 
