@@ -8,6 +8,7 @@ import {
 } from './context.mjs';
 import { isParityType, selfReviewConfig, writerFromCaller } from './self-review.mjs';
 import { definitionPinExempt, ladderRewriteTarget } from './sg-helpers.mjs';
+import { rungStated } from './brief-directives.mjs';
 
 export function fitAndParity({
   declaredWeight, typeIsParity, weightLineExplicit, fitOn, model, autofilled, route, def, declaredKind,
@@ -33,7 +34,8 @@ export function fitAndParity({
   // Only a ROLE line the brief itself carries counts (declaredRole), never the role the guard inserts for a missing one.
   const effortPolicy = String(opt('effort_fit_policy', 'rewrite')).toLowerCase();
   const lookupPolicy = String(opt('lookup_role_policy', 'warn')).toLowerCase();
-  const rungDeclared = !!(decls.RUNG && String(decls.RUNG.rest || '').replace(/[\s*_`]/g, ''));
+  // `Rung: <why>` and `Rung reason: <why>` (0.31.62) both state why the lead chose this rung: no downward rewrite.
+  const rungDeclared = rungStated(String(input?.prompt || ''), decls);
   let fitRoute = route;
   let lookupRouted = false;
   if (lookupPolicy !== 'off' && declaredRole === 'lookup' && !rungDeclared && route && !typeIsParity && !pinned
@@ -66,6 +68,8 @@ export function fitAndParity({
     fit = rungDeclared && fit.effortOnly ? { ...fit, verdict: 'fit', statedRung: true } : { ...fit, soft: lookupRouted ? 'lookup' : 'effort' };
     if (fit.soft === 'lookup' && lookupPolicy !== 'rewrite') silentFixes.push(`lookup_role_logged:${fitRoute.model}/${fitRoute.effort || ''}`);
   }
+  // A stated rung also keeps a larger over-provision (model or two efforts above the table): never rewritten, never denied for it.
+  if (fit && fit.verdict === 'over' && !fit.soft && rungDeclared && !parityRoute) fit = { ...fit, verdict: 'fit', statedRung: true };
 
   // F1 on a critical parity-sized spawn (see parityFloor above): under only. Judged
   // here, before the parity notes, so the writer-less note can defer to it.

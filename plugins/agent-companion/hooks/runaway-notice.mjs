@@ -18,15 +18,11 @@
 // multiple of `session_budget_units` (default 350; 0 is off), queues one notice
 // that the drain below then delivers. It only ever advises.
 //
-// A third line source, on UserPromptSubmit only: background workers an interrupt of the lead cut off (lib/interrupted-workers.mjs,
-// option interrupted_worker_notice, default on), each reported once.
-//
 // The event name is taken from the payload. The drain's rename makes each
 // notice appear exactly once. Empty stdout when there is nothing queued.
 
 import { readStdin, passthrough, callerIsSubagent, opt } from './lib/context.mjs';
 import { drainNotices, renderNotices } from './lib/runaway.mjs';
-import { interruptedNotices } from './lib/interrupted-workers.mjs';
 import { checkSessionBudget, SESSION_BUDGET_DEFAULT_UNITS } from './lib/session-budget.mjs';
 
 const EVENTS = new Set(['UserPromptSubmit', 'PostToolUse']);
@@ -37,8 +33,7 @@ try {
   const event = EVENTS.has(p.hook_event_name) ? p.hook_event_name : null;
   if (!event) passthrough();
   try { checkSessionBudget(p, { threshold: opt('session_budget_units', SESSION_BUDGET_DEFAULT_UNITS) }); } catch { /* advisory: never in the way */ }
-  const interrupted = event === 'UserPromptSubmit' && opt('interrupted_worker_notice', true) ? interruptedNotices(p) : [];
-  const text = [renderNotices(drainNotices(p.session_id)), ...interrupted].filter(Boolean).join('\n');
+  const text = renderNotices(drainNotices(p.session_id));
   if (!text) passthrough();
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: event, additionalContext: text },
