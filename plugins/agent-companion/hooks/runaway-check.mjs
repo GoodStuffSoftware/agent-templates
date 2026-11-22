@@ -112,7 +112,7 @@ function contextCheck(p, path) {
   }
   const told = fresh.every((e) => e.phase === 'mid-run') ? 'it was told mid-run to hand off' : 'it was not reached mid-run';
   queueNotice(p.session_id, `[agent-companion] subagent context: ${who} ${parts.join(' and ')}; ${told}. `
-    + 'If it returned "DONE: partial, handoff at <path>", start a fresh worker on the same rung from that file (not a resume); otherwise split what it left into smaller briefs. Row in subagent-context.jsonl.');
+    + 'If it returned "DONE: partial, handoff at <path>", start a fresh worker on the same rung from that file (not a resume); otherwise brief ONE fresh same-rung worker with the whole remaining build scope (code, tests, fixes, landing), told to read only what the handoff or brief names; never split the remaining build across several writers. Review stays its own separate agent. Row in subagent-context.jsonl.');
 }
 
 // A worker that ended with "DONE: partial, handoff at <path>" (the handoff the context notice and the hard limit ask for): tell the lead,

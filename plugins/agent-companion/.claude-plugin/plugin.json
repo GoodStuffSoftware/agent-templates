@@ -779,6 +779,24 @@
       "description": "Deny a Read of lines this agent already read, when the file is unchanged since and the read is at least 2,000 characters. Fills the gap Claude Code's own 'file unchanged' stub leaves: a range inside an earlier larger read, or a repeat of an earlier range after another one. The denial says so in one sentence and the same call, repeated, runs. Per agent; cleared by an edit, any change of the file, and compaction. Off = every Read runs. Also CLAUDE_PLUGIN_OPTION_READ_DEDUPE=0.",
       "default": true
     },
+    "read_cap": {
+      "type": "boolean",
+      "title": "Read cap for subagents",
+      "description": "A subagent's Read of a text file with no limit, longer than the line count below, is capped to that many lines and the agent is told how many lines the file has and how to read the rest (offset and limit, or grep -n first). Whole-file Reads are the main way workers reach the context hand-off. Main thread, images, PDFs, notebooks and Reads that already have a limit are untouched. Off = every Read runs as asked. Also CLAUDE_PLUGIN_OPTION_READ_CAP=0.",
+      "default": true
+    },
+    "read_cap_lines": {
+      "type": "number",
+      "title": "Read cap: lines",
+      "description": "The cap of the subagent Read cap, in lines: a Read with no limit on a longer text file is limited to this many lines (a Read from an offset is capped only when more than this many lines remain).",
+      "default": 300
+    },
+    "interrupted_worker_notice": {
+      "type": "boolean",
+      "title": "Interrupted-worker notice",
+      "description": "An interrupt of the lead ends its in-flight background subagents without any notification (their transcripts end with '[Request interrupted by user]'). On the lead's next prompt, one line per such worker, once each: its name and description, when it was cut off, its last handoff file if it wrote one, and to respawn it fresh on the same rung from that file or its original brief. Off = no notice.",
+      "default": true
+    },
     "catchup_note": {
       "type": "boolean",
       "title": "Catch-up note",
