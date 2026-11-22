@@ -27,6 +27,7 @@ const heavy = (c, fs, cwd) => classes(c, fs, cwd).length > 0;
 test('classify: E2E full, affected, targeted (the spec path still boots the pool)', () => {
   assert.deepEqual(classes('npm run test:e2e'), ['e2e']);
   assert.deepEqual(classes('npm run test:e2e:affected'), ['e2e']);
+  assert.deepEqual(classes('npm run test:e2e:who'), ['e2e']); // widened: any e2e variant script is queued, only the non-test ones are exempt
   assert.deepEqual(classes('pnpm test:e2e'), ['e2e']);
   assert.deepEqual(classes('npm run test:e2e -- install-*.spec.ts'), ['e2e-spec']);
   assert.deepEqual(classes('npx playwright test e2e/game.spec.ts'), ['e2e-spec']);
@@ -37,7 +38,7 @@ test('classify: E2E full, affected, targeted (the spec path still boots the pool
 
 test('classify: E2E must-not-match list', () => {
   for (const c of [
-    'npm run test:e2e:who', 'npx playwright install chromium', 'npx playwright --version', 'grep -rn test:e2e package.json',
+    'npm run test:e2e:install', 'npx playwright install chromium', 'npx playwright --version', 'grep -rn test:e2e package.json',
     'echo "npm run test:e2e"', 'cat scripts/run-test-e2e.mjs', 'npx playwright test --list', 'npm run test:e2e -- --help',
   ]) assert.equal(heavy(c), false, c);
 });
@@ -504,7 +505,7 @@ test('compose: with the tail off, or a background run, only the gate rewrite is 
 test('compose: a command that is only tail-eligible is rewritten exactly as before (gate has no effect)', () => {
   const fx = makeFixture();
   try {
-    const off = runHook('hooks/bash-tail.mjs', pl('pytest -x'), { env: env(fx, { CLAUDE_PLUGIN_OPTION_RESOURCE_GATE: 'rewrite' }) });
+    const off = runHook('hooks/bash-tail.mjs', pl('mypy src'), { env: env(fx, { CLAUDE_PLUGIN_OPTION_RESOURCE_GATE: 'rewrite' }) });
     const base = runHook('hooks/bash-tail.mjs', pl('pytest -x'), { env: env(fx, { CLAUDE_PLUGIN_OPTION_RESOURCE_GATE: 'off' }) });
     assert.ok(off.json.hookSpecificOutput.updatedInput.command.includes('[ac-bash-tail]'));
     assert.ok(!off.json.hookSpecificOutput.updatedInput.command.includes('resource-queue'));
@@ -667,7 +668,7 @@ test('classify (PowerShell): the toolchain table is the same, the backtick is an
   assert.deepEqual(psClasses('cargo `\ntest'), ['test-suite'], 'a backtick continuation');
   assert.deepEqual(psClasses('npm ci; npm run build'), ['install', 'build']);
   assert.deepEqual(psClasses('Write-Output "cargo test"'), [], 'quoted text');
-  assert.deepEqual(psClasses('$env:RESOURCE_QUEUE = 0; cargo test').length, 0, 'opt-out is handled by the decision, see below');
+  assert.deepEqual(psClasses('$env:RESOURCE_QUEUE = 0; cargo test'), ['test-suite'], 'opt-out is handled by the decision, see below');
 });
 
 // --- the PowerShell gate: deny text, rewrite string, opt-out ------------------------------------
@@ -761,7 +762,7 @@ test('hook (PowerShell): with resource_gate_powershell_rewrite on, rewrite mode 
     assert.equal(out.updatedInput.description, 'run tests');
     // the option is for PowerShell only: a Bash rewrite never depended on it
     const b = runHook('hooks/bash-tail.mjs', pl('cargo test'), { env: env(fx, { CLAUDE_PLUGIN_OPTION_RESOURCE_GATE: 'rewrite' }) });
-    assert.match(b.json.hookSpecificOutput.updatedInput.command, /--shell bash -- 'cargo test'$/);
+    assert.match(b.json.hookSpecificOutput.updatedInput.command, /--shell bash -- .*cargo test/s); // a Bash rewrite, not a PowerShell one
     // and the permission-mode limit still applies on top
     const d = runHook('hooks/bash-tail.mjs', psl('cargo test', { permission_mode: 'default' }), { env: e });
     assert.equal(d.json.hookSpecificOutput.permissionDecision, 'deny');

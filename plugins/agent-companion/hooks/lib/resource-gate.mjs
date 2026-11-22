@@ -703,7 +703,10 @@ export function classifyCommand(command, { cwd, exists, read, shell = 'bash' } =
  * PowerShell's escape and a backslash is a path separator, neither is bash's.
  */
 export function psScanText(command) {
-  return String(command ?? '').replace(/[`\\]/g, (c) => (c === '\\' ? '/' : ' '));
+  // A backtick before a line break continues the line: blank both, so the scanner sees one command.
+  return String(command ?? '')
+    .replace(/`\r?\n/g, (m) => ' '.repeat(m.length))
+    .replace(/[`\\]/g, (c) => (c === '\\' ? '/' : ' '));
 }
 
 // ---------------------------------------------------------------- rewriting
