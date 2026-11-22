@@ -17,6 +17,7 @@ export const LIVE_DEFAULTS = Object.freeze({
   histRuns: 20, // newest rows read per key
   pct: 0.9, // high percentile used over samples and over runs
   warmingMs: 150_000, // how long a young lease counts as "still ramping" (its load is not in the busy sample yet)
+  rampDownPerS: 1 / 25, // the held charge falls at most this many units per second (1 unit per 25 s tick), so a quiet phase cannot free the box for a burst
 });
 
 export const usageFile = (dir) => join(dir, 'usage.jsonl');
@@ -64,7 +65,7 @@ export function readUse(dir, id) {
     if (!u || u.v !== 1 || !Number.isFinite(Number(u.at))) return null;
     return {
       at: num(u.at), n: Math.max(0, Math.trunc(num(u.n))), cpu: num(u.cpu), ramMb: num(u.ramMb), ramPeakMb: num(u.ramPeakMb),
-      win: Array.isArray(u.win) ? u.win.map(num) : [],
+      win: Array.isArray(u.win) ? u.win.map(num) : [], hold: u.hold == null ? null : num(u.hold),
     };
   } catch { return null; }
 }
@@ -73,16 +74,19 @@ export function removeUse(dir, id) { try { unlinkSync(useFile(dir, id)); } catch
 
 /**
  * The lease's measure as the ledger reads it: {warm, fresh, charge|null, cpu, ramMb, n, ageMs}.
- * charge = clamp(ceil(max of the last winN samples), floor, declared) once warm and fresh; else null (declared stays).
+ * charge = clamp(ceil(max of the last winN samples and the ramped hold), max(floor, expCpu), declared) once warm and fresh;
+ * else null (declared stays). The hold (use.hold, written by the tracker) falls at most rampDownPerS units per second from
+ * the declared size, so the charge does not drop to the floor during one quiet phase. A job with a history never charges
+ * below its own expected cpu (expCpu, its history cpuP90).
  */
-export function measureOf(use, declared, now, cfg = LIVE_DEFAULTS) {
+export function measureOf(use, declared, now, cfg = LIVE_DEFAULTS, expCpu = null) {
   if (!use) return null;
   const ageMs = Math.max(0, now - use.at);
   const fresh = ageMs <= cfg.staleMs;
   const warm = use.n >= cfg.warmN;
   let charge = null;
   if (fresh && warm && declared > 0) {
-    const peak = Math.max(0, ...use.win.slice(-cfg.winN), 0);
+    const peak = Math.max(0, ...use.win.slice(-cfg.winN), Number.isFinite(use.hold) ? use.hold : 0, Number.isFinite(expCpu) ? expCpu : 0);
     charge = Math.min(declared, Math.max(Math.min(cfg.floor, declared), Math.ceil(peak - 1e-9)));
   }
   return { warm, fresh, charge, cpu: use.cpu, ramMb: use.ramMb, n: use.n, ageMs };
@@ -126,11 +130,12 @@ export function sampleUse(prev, tree, table, now) {
 /** Accumulates one lease's readings; `use()` is the sidecar record, `row()` the history row. */
 export function makeUseTracker(cfg = LIVE_DEFAULTS) {
   let prev = null; let n = 0; let ramPeak = 0; let last = null;
+  let hold = null; let holdAt = 0; // ramped peak: rises at once, falls rampDownPerS per second
   const win = []; const cpus = [];
   return {
     get n() { return n; },
-    /** Feed one snapshot. Returns the .use record to write, or null (no cpu data: nothing to record). */
-    add(tree, table, now) {
+    /** Feed one snapshot (`declared` = the lease's size, where the hold starts). Returns the .use record to write, or null (no cpu data: nothing to record). */
+    add(tree, table, now, declared = null) {
       const s = sampleUse(prev, tree, table, now);
       if (!s) return null;
       prev = s;
@@ -138,10 +143,13 @@ export function makeUseTracker(cfg = LIVE_DEFAULTS) {
       if (s.cores !== null) {
         n += 1; win.push(s.cores); cpus.push(s.cores);
         if (win.length > cfg.winN) win.shift();
+        if (hold === null) { hold = Number.isFinite(declared) && declared > 0 ? declared : s.cores; holdAt = now; }
+        hold = Math.max(s.cores, Math.max(...win), hold - Math.max(0, now - holdAt) / 1000 * cfg.rampDownPerS);
+        holdAt = now;
         if (cpus.length > 2000) cpus.shift();
       }
       if (n === 0) return null; // still the baseline reading
-      last = { v: 1, at: now, n, win: win.map((x) => Math.round(x * 100) / 100), cpu: Math.round(win[win.length - 1] * 100) / 100, ramMb: Math.round(s.ramMb), ramPeakMb: Math.round(ramPeak) };
+      last = { v: 1, at: now, n, win: win.map((x) => Math.round(x * 100) / 100), cpu: Math.round(win[win.length - 1] * 100) / 100, hold: Math.round((hold ?? 0) * 100) / 100, ramMb: Math.round(s.ramMb), ramPeakMb: Math.round(ramPeak) };
       return last;
     },
     /** History row of this run, or null when it was too short to trust. */
@@ -233,7 +241,8 @@ export function sampleProgress(prev, tree, table, now, { ioOf = null, cfg = PROG
     if (Number.isFinite(io)) ioMap[p.pid] = io;
   }
   const haveCpu = table.some((r) => Number.isFinite(r.cpuMs));
-  const haveIo = table.some((r) => Number.isFinite(r.ioBytes)) || Object.keys(ioMap).length > 0;
+  // io counters of THIS tree's live pids, not of the whole table: an elevated or protected child has none, and that is not "io never moves".
+  const haveIo = Object.keys(ioMap).length > 0;
   if (!haveCpu && !haveIo) return null;
   const s = { at: now, pids, cpuMap, ioMap, cpuDelta: 0, ioDelta: 0, cpu: false, io: false, spawn: false, haveCpu, haveIo };
   if (prev && now - prev.at >= 1000) {

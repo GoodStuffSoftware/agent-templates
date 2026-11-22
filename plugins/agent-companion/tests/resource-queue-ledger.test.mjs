@@ -8,10 +8,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import './isolate.mjs';
-import { existsSync, writeFileSync, readFileSync, utimesSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, utimesSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { resourceStatus, formatResourceStatus, isPidAlive, sweepLedger, budgetDir } from '../scripts/ci-budget.mjs';
+import { resourceStatus, formatResourceStatus, isPidAlive, sweepLedger, budgetDir, acquire, releaseLease } from '../scripts/ci-budget.mjs';
 import { writeProg } from '../scripts/lib/live-capacity.mjs';
 import { makeWorld, baseRules, settle, GB, T0 } from './resource-queue-world.mjs';
 
@@ -1106,4 +1107,50 @@ test('release sticks for a hand release too: the wrapper timer notices through c
     assert.equal(w.leases().length, 0);
     a.release();
   } finally { w.done(); }
+});
+
+test('resize on a lease released from outside does not write the lease file back', () => {
+  const w = makeWorld({ cores: 64, budget: 16 });
+  try {
+    const a = acquire({ ...w.opts, kind: 'full', desired: 4 });
+    const [e] = w.leases();
+    assert.equal(a.resize(2).units, 2);
+    // released by hand: tombstone plus the lease file gone
+    writeFileSync(join(w.dir, `lease-${e.id}.cleared`), JSON.stringify({ by: 'manual', at: w.t }));
+    rmSync(join(w.dir, `lease-${e.id}.json`), { force: true });
+    const got = a.resize(3, { resample: true });
+    assert.equal(got.units, 2, 'nothing granted, nothing written');
+    assert.equal(w.leases().length, 0, 'the release is not undone');
+    assert.equal(a.disowned, true);
+    a.release();
+  } finally { w.done(); }
+});
+
+test('Windows rollout: each lease is mirrored into the old ledger (stub with units and heartbeat) and removed with it; never when the mirror is the ledger', () => {
+  const w = makeWorld({ cores: 64, budget: 16 });
+  const old = mkdtempSync(join(tmpdir(), 'rq-oldpath-'));
+  try {
+    const a = acquire({ ...w.opts, mirrorDir: old, kind: 'full', desired: 5 });
+    const [e] = w.leases();
+    const stub = () => JSON.parse(readFileSync(join(old, `lease-${e.id}.json`), 'utf8'));
+    assert.equal(stub().units, 5); assert.equal(stub().id, e.id); assert.equal(stub().repo, e.repo);
+    assert.ok(existsSync(join(old, `lease-${e.id}.hb`)), 'heartbeat file beside it');
+    a.resize(2);
+    assert.equal(stub().units, 2, 'a resize refreshes the stub');
+    a.release();
+    assert.equal(existsSync(join(old, `lease-${e.id}.json`)), false);
+    assert.equal(existsSync(join(old, `lease-${e.id}.hb`)), false);
+    // a hand release removes the stub too
+    const b = acquire({ ...w.opts, mirrorDir: old, kind: 'full', desired: 3 });
+    const id = w.leases()[0].id;
+    assert.ok(existsSync(join(old, `lease-${id}.json`)));
+    releaseLease({ ...w.opts, mirrorDir: old, id });
+    assert.equal(existsSync(join(old, `lease-${id}.json`)), false);
+    b.release();
+    // the mirror folder equal to the ledger writes nothing extra
+    const c = acquire({ ...w.opts, mirrorDir: w.dir, kind: 'full', desired: 1 });
+    assert.equal(w.leases().length, 1);
+    c.release();
+    assert.equal(w.leases().length, 0);
+  } finally { w.done(); rmSync(old, { recursive: true, force: true }); }
 });
