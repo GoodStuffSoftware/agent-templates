@@ -89,8 +89,9 @@ export function findWorktree(arg, { cwd, dir = null, git = 'git' } = {}) {
   const bySuffix = list.filter((w) => { const p = ci(w.path.replace(/\\/g, '/')); return p === want || p.endsWith(`/${want}`); });
   if (bySuffix.length === 1) return bySuffix[0];
   if (bySuffix.length > 1) return null;
-  // git resolves the argument by real path, so a link that points at a worktree finds it too.
-  const real = (p) => { try { return realpathSync(p); } catch { return p; } };
+  // git resolves the argument by real path, so a link that points at a worktree finds it too. `.native` also
+  // expands Windows 8.3 short names (a RUNNER~1 temp dir), which the JS realpath leaves as typed.
+  const real = (p) => { try { return realpathSync.native(p); } catch { return p; } };
   const abs = norm(real(resolve(dir ? resolve(cwd, dir) : cwd, arg)));
   const byPath = list.filter((w) => norm(real(w.path)) === abs);
   return byPath.length === 1 ? byPath[0] : null;
