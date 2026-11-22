@@ -34,6 +34,7 @@ import { execFileSyncHidden } from './lib/proc.mjs';
 import { opt, appendLog } from '../hooks/lib/context.mjs';
 import { REVIEW_INSTRUCTION as INSTRUCTION } from '../hooks/lib/self-review.mjs';
 import { tierFor } from '../hooks/lib/project-tier.mjs';
+import { briefHash } from '../hooks/lib/sg-review-route.mjs';
 import { apiVerdictFields, recordPostPassDefect } from '../hooks/lib/review-verdict.mjs';
 import { runApi, REVIEW_SYSTEM, reviewLimits, EXIT_OK, EXIT_USAGE, EXIT_UNAVAILABLE, EXIT_FAILED } from './lib/api-run.mjs';
 import { runApiSdk, DEFAULT_SDK_VERSION } from './lib/api-sdk-run.mjs';
@@ -185,7 +186,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   let projectTier = '';
   const routeRow = (ok, exit, text = null) => {
     try {
-      const row = { at: new Date().toISOString(), source: 'api-review', route: 'api', route_reason: 'api', review_id: reviewId, diff_ref: String(o['diff-ref']).slice(0, 120), model: o.model, ok, exit };
+      const row = { at: new Date().toISOString(), source: 'api-review', route: 'api', route_reason: 'api', review_id: reviewId, diff_ref: String(o['diff-ref']).slice(0, 120), model: o.model, ok, exit, ...(briefText ? { brief_hash: briefHash(briefText) } : {}) }; // brief_hash: the guard's repeat check
       const v = ok && text ? apiVerdictFields({ text, brief: briefText, sid: o['session-id'], tu: o['tool-use-id'], writer: o.writer, model: o.model, effort: o.effort, risk: o.risk, projectTier, branch: o.branch }) : null;
       if (v) Object.assign(row, v);
       appendLog('review-verdicts.jsonl', row);

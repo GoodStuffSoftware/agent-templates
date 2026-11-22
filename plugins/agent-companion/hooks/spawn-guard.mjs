@@ -55,7 +55,7 @@ import { projectRouteAndSelfReview } from './lib/sg-review-plan.mjs';
 import { writeSpawnRow } from './lib/sg-telemetry.mjs';
 import { hardDenials } from './lib/sg-deny.mjs';
 import { finishSpawn } from './lib/sg-finish.mjs';
-import { routeReview } from './lib/sg-review-route.mjs';
+import { routeReview, notePendingRouted } from './lib/sg-review-route.mjs';
 import { allowWith } from './lib/sg-helpers.mjs';
 import { writeOpusWriterRow } from './lib/opus-writer.mjs';
 
@@ -170,7 +170,10 @@ try {
   });
   if (opusRw) writeOpusWriterRow(opusRw.record);
   // A review routed to the API credits runs as an ac-haiku call of the API runner: nothing else is appended to its prompt.
-  if (reviewRoute && reviewRoute.updatedInput) allowWith(null, reviewRoute.updatedInput);
+  if (reviewRoute && reviewRoute.updatedInput) {
+    await notePendingRouted({ input, sid, isCanary, rewriteState, rewriteModule });
+    allowWith(null, reviewRoute.updatedInput);
+  }
   // The Opus-writer rewrite is silent: the fit note judges the spawn against the table's row for its TYPE (an opus row), which the
   // rewrite just left on purpose, so it is not said (it stays in the spawn row, fit). The self-review note is NOT dropped: it is about
   // the agent type that will run (a model-only rewrite of general-purpose or a project agent still has no protocol), so the lead still

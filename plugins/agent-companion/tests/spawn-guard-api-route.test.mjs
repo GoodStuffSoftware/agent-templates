@@ -87,6 +87,6 @@ test('fail open: an exception in the route step leaves the input unchanged', () 
     assert.ok(!u || u.subagent_type === 'agent-companion:ac-sonnet-high', `input must not be rewritten: ${res.stdout}`);
     const r = lastRow(stateDir);
     assert.equal(r.review_route, 'subagent');
-    assert.equal(r.review_route_reason, 'fallback');
+    assert.equal(r.review_route_reason, 'error');
   } finally { cleanup(); }
 });

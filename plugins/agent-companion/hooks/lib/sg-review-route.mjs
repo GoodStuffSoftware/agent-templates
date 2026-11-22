@@ -64,14 +64,14 @@ export function briefHash(brief) { return createHash('sha1').update(String(brief
 const REPEAT_WINDOW_MS = 30 * 60000;
 const PRUNE_AFTER_MS = 7 * 86400000;
 // Did the API runner already fail on this very brief in the last 30 minutes? (A caller that left `API: no` off would loop.)
-function failedRecently(hash, file, now) {
+export function failedRecently(hash, file, now) {
   try {
     return tailRecords(file, { bytes: 1024 * 1024, filter: (l) => l.includes(hash) })
       .some((r) => r && r.source === 'api-review' && r.ok === false && r.brief_hash === hash && now - Date.parse(r.at) <= REPEAT_WINDOW_MS);
   } catch { return false; }
 }
 // Brief and review files older than 7 days (the full brief text is kept on disk for the runner and the relay).
-function pruneBriefs(dir, now) {
+export function pruneBriefs(dir, now) {
   try {
     for (const n of readdirSync(dir)) {
       const f = join(dir, n);
@@ -139,13 +139,16 @@ export async function routeReview({
     if (mode !== 'writers' && mode !== 'all') return row('subagent', 'off');
     if (mode === 'writers' && !subagentCaller) return row('subagent', 'off');
     const marker = apiMarker(brief);
-    if (marker === 'no') return row('subagent', 'fallback');
-    const range = diffRangeOf(brief);
-    if (!range) return row('subagent', 'no-range');
+    if (marker === 'no') return row('subagent', 'caller-no');
+    const info = diffRangeInfo(brief);
+    if (!info.range) return row('subagent', info.ambiguous ? 'ambiguous-range' : 'no-range');
+    const range = info.range;
     const rm = declarationValue(decls || {}, 'RISK', '(low|mid|high)\\b');
     const risk = rm ? rm[1].toLowerCase() : null;
     const highMode = String((deps.opt || opt)('api_review_high', 'plan') || 'plan').toLowerCase();
     if ((risk === 'high' && highMode !== 'api') || (/opus/i.test(String(model || '')) && marker !== 'opus')) return row('subagent', 'high-risk');
+    const tdir = deps.telemetryDir ? deps.telemetryDir() : telemetryDir();
+    if (failedRecently(briefHash(brief), join(tdir, 'review-verdicts.jsonl'), Date.now())) return row('subagent', 'repeat');
     let d;
     if (deps.decide) d = deps.decide('review', { billing: null, env: process.env });
     else {
@@ -155,12 +158,13 @@ export async function routeReview({
     if (!d || d.decision !== 'api') {
       const why = String((d && d.reason) || '');
       if (/^alternation/.test(why)) return row('subagent', 'plan-alternation');
-      if (/^(no API key|failed closed|API runs failed)/.test(why) || !d) return row('subagent', 'fallback');
+      if (/^(no API key|failed closed|API runs failed)/.test(why) || !d) return row('subagent', 'governor-fallback');
       return row('subagent', 'plan-cap');
     }
     const id = String(p && p.tool_use_id || '').replace(/[^\w-]/g, '') || randomUUID();
     const dir = join(deps.stateDir ? deps.stateDir() : stateDir(), 'review-briefs');
     mkdirSync(dir, { recursive: true });
+    pruneBriefs(dir, Date.now());
     const briefFile = join(dir, `${id}.md`).replace(/\\/g, '/');
     const reviewFile = join(dir, `${id}-review.md`).replace(/\\/g, '/');
     writeFileSync(briefFile, String(brief || ''));
@@ -168,11 +172,13 @@ export async function routeReview({
       ...(updatedInput || input),
       subagent_type: 'agent-companion:ac-haiku',
       model: 'haiku',
-      prompt: runnerPrompt({ briefFile, reviewFile, range, writer: writerOf(decls || {}), risk, cwd: worktreeOf(brief, p && p.cwd), reviewModel: marker === 'opus' ? 'opus' : 'sonnet' }),
+      prompt: runnerPrompt({ briefFile, reviewFile, range, writer: writerOf(decls || {}), risk, cwd: worktreeOf(brief, p && p.cwd), sid: (p && p.session_id) || sid, tu: p && p.tool_use_id, reviewModel: marker === 'opus' ? 'opus' : 'sonnet' }),
     };
     delete out.effort;
+    delete out.isolation; // a worktree for a command runner is wasted, and the runner must see the brief's own worktree path
+    delete out.team_name;
     return { route: 'api', route_reason: 'api', updatedInput: out };
   } catch {
-    return row('subagent', 'fallback'); // fail open: the spawn runs as written
+    return row('subagent', 'error'); // fail open: the spawn runs as written
   }
 }
