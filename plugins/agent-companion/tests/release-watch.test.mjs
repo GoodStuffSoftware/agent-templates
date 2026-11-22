@@ -442,6 +442,15 @@ test('usage-source-empty is reported but never starts a hold', () => {
   S.openFlag({ version: '1', flags: [{ name: 'usage-source-empty', value: 0, level: 0 }, { name: 'queue-denied', value: 30, level: 30 }], at: T + 5 * HOUR, check: '+4h' });
   const h = S.maybeHold({ holdMinutes: 30, at: T + 5 * HOUR + 31 * 60e3 });
   assert.ok(h, 'a release flag beside it still holds'); assert.match(h.reason, /queue-denied/); assert.doesNotMatch(h.reason, /usage-source-empty/);
+  assert.deepEqual(h.flags.map((x) => x.name), ['queue-denied']); assert.doesNotMatch(S.holdDenyMessage(), /usage-source-empty/);
+  // an answered release flag is not revived by a later usage-source-empty
+  S.clear({ by: 'operator', at: T + 6 * HOUR });
+  for (const k of ['flag', 'hold']) rmSync(S.paths()[k], { force: true });
+  S.openFlag({ version: '1', flags: [{ name: 'queue-denied', value: 30, level: 30 }], at: T + 7 * HOUR, check: '+8h' });
+  S.noteReply(T + 7 * HOUR + 60e3);
+  S.openFlag({ version: '1', flags: [{ name: 'usage-source-empty', value: 0, level: 0 }], at: T + 8 * HOUR, check: '+8h' });
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 8 * HOUR + 31 * 60e3 }), null, 'answered queue-denied + usage-source-empty: no hold');
+  assert.equal(S.isHoldActive(), false);
 });
 
 test('cleanup', () => { rmSync(tmp, { recursive: true, force: true }); });

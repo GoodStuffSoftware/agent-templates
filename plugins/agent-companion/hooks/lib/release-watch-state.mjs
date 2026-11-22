@@ -84,7 +84,8 @@ export function openFlag({ version, T, check, flags, at = now() } = {}) {
     const open = flagIsOpen(old);
     const oldByName = new Map(open ? old.flags.map((o) => [o.name, o]) : []);
     // Renotify (restart the countdown) only for a name not already in the open flag, or one that doubled since it was raised.
-    const renotify = !open || fresh.some((f) => { const o = oldByName.get(f.name); const lo = o && levelOf(o); const l = levelOf(f); return !o || (lo > 0 && l > lo * WORSEN_FACTOR); });
+    // A watch-health flag (NO_HOLD_FLAGS) joining an answered flag never restarts the countdown: it could not hold, and it must not re-open the hold path of the flag already answered.
+    const renotify = !open || holdable(fresh).some((f) => { const o = oldByName.get(f.name); const lo = o && levelOf(o); const l = levelOf(f); return !o || (lo > 0 && l > lo * WORSEN_FACTOR); });
     const merged = open ? [...old.flags.filter((o) => !fresh.some((f) => f.name === o.name)), ...fresh] : fresh;
     const next = {
       version: version ?? old?.version ?? null,
@@ -171,10 +172,10 @@ export function maybeHold({ holdMinutes, at = now() } = {}) {
     const hold = {
       since: iso(at), version: f.version ?? null,
       reason: `release watch flagged ${hf.map((x) => x.name).join(', ')} and nobody answered within ${delay} min`,
-      flags: f.flags, workers: 'handoff', clearedAt: null,
+      flags: hf, workers: 'handoff', clearedAt: null,
     };
     if (!writeJson(paths().hold, hold)) return null;
-    appendRow({ at: iso(at), event: 'hold', version: hold.version, flags: f.flags.map((x) => x.name) });
+    appendRow({ at: iso(at), event: 'hold', version: hold.version, flags: hf.map((x) => x.name) });
     return hold;
   } catch { return null; }
 }

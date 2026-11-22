@@ -824,7 +824,7 @@
     "release_watch_hold_minutes": {
       "type": "number",
       "title": "Release watch: hold delay (minutes)",
-      "description": "The post-release watch (scripts/release-watch.mjs tick, run every 10 minutes by a scheduled job) checks the newest install at +1, +2, +4, +8, +12, +16, +20 and +24 hours. A flagged check opens a flag shown to lead sessions at SessionStart and on every prompt until the operator answers. If nobody answers within this many minutes of the notice, a hold is written (release-hold.json). 0 = notify only, never hold. The hold lifts only with `release-watch.mjs clear` or the words 'clear hold' / 'release hold'.",
+      "description": "The post-release watch (scripts/release-watch.mjs tick, run every 10 minutes by a scheduled job) checks the newest install at +1, +2, +4, +8, +12, +16, +20 and +24 hours. A flagged check opens a flag shown to lead sessions at SessionStart and on every prompt until the operator answers. If nobody answers within this many minutes of the notice, a hold is written (release-hold.json), except for a flag that only says the watch had nothing to measure (usage-source-empty), which never holds. 0 = notify only, never hold. The hold lifts only with `release-watch.mjs clear` or the words 'clear hold' / 'release hold'.",
       "default": 30
     },
     "catchup_note": {
