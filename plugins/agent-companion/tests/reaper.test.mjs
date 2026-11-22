@@ -343,17 +343,115 @@ test('processSnapshot spawns hidden and passes the ps flags / LC_ALL=C; a failin
   assert.equal(processSnapshot({ platform: 'linux', spawn: () => { throw new Error('x'); } }), null);
 });
 
-test('realKill on Windows: taskkill /F /PID <pid> only (never /T), hidden; 128 = gone; other exit = error', () => {
+test('realKill on Windows: one hidden PowerShell call that re-checks pid + creation time, stops that pid only; 128 = gone; 129 = pid reused, skipped; other exit = error', () => {
   const calls = [];
   const mk = (status) => (c, a, o) => { calls.push({ c, a, o }); return { status, stderr: 'ERROR: nope' }; };
-  assert.deepEqual(realKill({ pid: 4321 }, { platform: 'win32', spawn: mk(0) }), { ok: true });
-  assert.deepEqual(calls[0].a, ['/F', '/PID', '4321']);
-  assert.equal(calls[0].c, 'taskkill');
+  const t = { pid: 4321, creationTime: T0 + 77 };
+  assert.deepEqual(realKill(t, { platform: 'win32', spawn: mk(0) }), { ok: true });
+  assert.equal(calls[0].c, 'powershell.exe');
   assert.equal(calls[0].o.windowsHide, true);
-  assert.ok(!calls[0].a.includes('/T'));
-  assert.deepEqual(realKill({ pid: 4321 }, { platform: 'win32', spawn: mk(128) }), { ok: true, gone: true });
-  assert.equal(realKill({ pid: 4321 }, { platform: 'win32', spawn: mk(1) }).ok, false);
-  assert.equal(realKill({ pid: 3 }, { platform: 'win32', spawn: mk(0) }).ok, false, 'system pids refused');
+  const script = calls[0].a.at(-1);
+  assert.match(script, /Get-Process -Id 4321/);
+  assert.ok(script.includes(`${T0 + 77}`), 'the recorded creation time is in the script');
+  assert.ok(script.indexOf('exit 129') < script.indexOf('Stop-Process'), 'the creation-time check comes before the stop');
+  assert.ok(!/taskkill|\/T\b|-IncludeChildProcess/i.test(script), 'never a tree kill');
+  assert.deepEqual(realKill(t, { platform: 'win32', spawn: mk(128) }), { ok: true, gone: true });
+  assert.deepEqual(realKill(t, { platform: 'win32', spawn: mk(129) }), { ok: true, gone: true, skipped: 'pid-reused' });
+  assert.equal(realKill(t, { platform: 'win32', spawn: mk(130) }).ok, false, 'an unreadable start time is not killed');
+  assert.equal(realKill(t, { platform: 'win32', spawn: mk(1) }).ok, false);
+  assert.equal(realKill({ pid: 3, creationTime: T0 }, { platform: 'win32', spawn: mk(0) }).ok, false, 'system pids refused');
+  const before = calls.length;
+  assert.equal(realKill({ pid: 4321 }, { platform: 'win32', spawn: mk(0) }).ok, false, 'no creation time: never killed on a pid alone');
+  assert.equal(calls.length, before, 'and nothing was spawned');
+});
+
+// ---------------------------------------------------------------- shared daemons, lease end, reparented leftovers
+
+const daemonCases = [
+  ['the Gradle daemon', 'java.exe', 'java -Xmx2g org.gradle.launcher.daemon.bootstrap.GradleDaemon 8.10'],
+  ['the Kotlin compile daemon', 'java.exe', 'java org.jetbrains.kotlin.daemon.KotlinCompileDaemon --daemon'],
+  ['the adb server', 'adb.exe', 'adb -L tcp:5037 fork-server server --reply-fd 740'],
+  ['the pm2 daemon', 'node.exe', 'node C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\pm2\\lib\\Daemon.js'],
+  ['an MSBuild reuse node', 'MSBuild.exe', 'C:\\Program Files\\MSBuild\\MSBuild.exe /nologo /nodemode:1 /nodeReuse:true'],
+  ['the C# compiler server', 'VBCSCompiler.exe', 'VBCSCompiler.exe "-pipename:abc"'],
+  ['watchman', 'watchman.exe', 'watchman --foreground'],
+  ['sccache', 'sccache.exe', 'sccache.exe'],
+  ['the turbo daemon', 'node.exe', 'node turbo daemon --foreground'],
+  ['the git fsmonitor daemon', 'git.exe', 'git fsmonitor--daemon run'],
+  ['gpg-agent', 'gpg-agent.exe', 'gpg-agent --supervised'],
+  ['the emulator', 'emulator.exe', 'emulator -avd test_phone'],
+];
+for (const [label, name, cmd] of daemonCases) {
+  test(`never reaped, even recorded in the tree and with no reap_never set: ${label}`, () => {
+    const table = [...base(), row(210, 200, name, T0 + 20, { cmd }), row(211, 210, 'worker.exe', T0 + 21)];
+    const tree = treeOf(table);
+    assert.ok(tree.procs.some((p) => p.pid === 210));
+    const log = [];
+    const res = reapTree({ table, tree, selfPid: SELF, kill: killer(log) }); // never: [] on purpose
+    assert.ok(!log.includes(210));
+    assert.ok(!log.includes(211), 'what the daemon runs is not ours either');
+    assert.match(res.spared.find((s) => s.pid === 210).why, /^daemon:/);
+    assert.deepEqual(log, [400, 300, 200]);
+  });
+}
+
+test('reap_never is added to the built-in daemon list, not a replacement for it', () => {
+  const table = [...base(), row(210, 200, 'java.exe', T0 + 20, { cmd: 'java GradleDaemon 8.10' }), row(220, 200, 'oddserver.exe', T0 + 22)];
+  const plan = planReap({ table, tree: treeOf(table), selfPid: SELF, never: parseNever('oddserver') });
+  assert.deepEqual(plan.spared.map((s) => s.pid).sort(), [210, 220]);
+  assert.match(plan.spared.find((s) => s.pid === 210).why, /^daemon:/);
+  assert.match(plan.spared.find((s) => s.pid === 220).why, /^reap_never:oddserver/);
+});
+
+test('work a shared daemon started later for another session is not taken as a descendant', () => {
+  const table = [...base(), row(210, 200, 'java.exe', T0 + 20, { cmd: 'java GradleDaemon 8.10' })];
+  const tree = treeOf(table); // recorded at T0 + 100
+  const later = [...table, row(230, 210, 'java.exe', T0 + 100 + 60_000), row(231, 230, 'node.exe', T0 + 100 + 61_000)];
+  const plan = planReap({ table: later, tree, selfPid: SELF });
+  assert.ok(!plan.targets.some((t) => t.pid === 230 || t.pid === 231));
+  assert.deepEqual(plan.targets.map((t) => t.pid).sort(), [200, 300, 400]);
+});
+
+test('a live descendant created after the lease ended is spared, with its children, even under a recorded plain process', () => {
+  const tree = treeOf(base()); // at = T0 + 100
+  const table = [...base(), row(500, 400, 'late.exe', T0 + 100 + 5_000), row(501, 500, 'later.exe', T0 + 100 + 6_000)];
+  const plan = planReap({ table, tree, selfPid: SELF });
+  assert.ok(!plan.targets.some((t) => t.pid === 500 || t.pid === 501));
+  assert.equal(plan.spared.find((s) => s.pid === 500).why, 'after-lease');
+  // an explicit lease end from the caller wins over the tree's last tick
+  const wide = planReap({ table, tree, selfPid: SELF, leaseEnd: T0 + 100 + 10_000 });
+  assert.ok(wide.targets.some((t) => t.pid === 500) && wide.targets.some((t) => t.pid === 501));
+  // a recorded process whose creation time is after the end is spared as well
+  const early = planReap({ table: base(), tree, selfPid: SELF, leaseEnd: T0 - 5_000 });
+  assert.equal(early.targets.length, 0);
+  assert.equal(early.spared.find((s) => s.pid === 400).why, 'after-lease');
+});
+
+test('POSIX: a recorded leftover reparented to pid 1 (init) or a subreaper is reaped; the recorded root and unrecorded strangers are not', () => {
+  const table = [
+    row(1, 0, 'init', T0 - 10_000, { exe: '/sbin/init', cmd: '/sbin/init' }),
+    row(2000, 1, 'systemd', T0 - 9_000, { cmd: '/usr/lib/systemd/systemd --user' }), // a subreaper
+    row(SELF, 1, 'node', T0 + 2, { cmd: 'node resource-queue.mjs run' }),
+    row(200, SELF, 'sh', T0 + 10), row(300, 200, 'node', T0 + 11),
+    row(900, 1, 'other-session-server', T0 + 5), // unrecorded, also under init
+  ];
+  const tree = recordTree(table, SELF, { now: T0 + 100 });
+  // the wrapper exits: 200 and 300 are reparented, one to init, one to the subreaper
+  const after = [
+    table[0], table[1], table[5],
+    row(200, 1, 'sh', T0 + 10), row(300, 2000, 'node', T0 + 11),
+    row(301, 300, 'node', T0 + 40),
+  ];
+  const plan = planReap({ table: after, tree, selfPid: 7777 });
+  assert.deepEqual(plan.targets.map((t) => t.pid).sort((a, b) => a - b), [200, 300, 301]);
+  assert.ok(!plan.spared.some((s) => /^under:/.test(s.why)), 'init and the subreaper protect nothing');
+  assert.ok(!plan.targets.some((t) => t.pid === 900));
+});
+
+test('a recorded child under a recorded protected process is still spared (under:)', () => {
+  const table = [...base(), row(210, 200, 'StreamDeck.exe', T0 + 20), row(211, 210, 'cmd.exe', T0 + 21)];
+  const plan = planReap({ table, tree: treeOf(table), selfPid: SELF });
+  assert.match(plan.spared.find((s) => s.pid === 211).why, /^under:streamdeck/);
 });
 
 test('realKill on POSIX: SIGTERM, a fresh snapshot, SIGKILL only if the same pid + creation time still runs', () => {
