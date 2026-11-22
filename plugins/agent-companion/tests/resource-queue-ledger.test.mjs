@@ -661,17 +661,18 @@ test('box admission: the budget is never exceeded, whatever the headroom', async
   } finally { w.done(); }
 });
 
+// live: false: this is the budget-headroom arithmetic; the live free-CPU test is covered in resource-queue-live.test.mjs.
 test('box admission, small host: 4 cores with budget 2 has 2 cores of headroom; budget >= cores has none', async () => {
-  const small = makeWorld({ budget: 2, cores: 4 });
+  const small = makeWorld({ budget: 2, cores: 4, live: false });
   try {
     assert.equal((await admitWithOutside(small, 2, 1)).immediately, true, 'outside 2 is within the 2 cores of headroom');
   } finally { small.done(); }
-  const small2 = makeWorld({ budget: 2, cores: 4 });
+  const small2 = makeWorld({ budget: 2, cores: 4, live: false });
   try {
     assert.equal((await admitWithOutside(small2, 3, 1)).immediately, false, 'outside 3: 1 counts, 2 - 1 - 1 = 0 available');
   } finally { small2.done(); }
   for (const cores of [2, 1]) { // budget at or above the cores: no headroom, never a negative one
-    const w = makeWorld({ budget: 2, cores });
+    const w = makeWorld({ budget: 2, cores, live: false });
     try {
       assert.equal((await admitWithOutside(w, 1, 1)).immediately, false, `${cores} cores: every outside core counts`);
     } finally { w.done(); }
