@@ -35,7 +35,7 @@
 
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, appendFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { opt, stateFile } from '../../hooks/lib/context.mjs';
+import { opt, stateFile, telemetryDir, tailRecords } from '../../hooks/lib/context.mjs';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
 import { spawnSyncHidden } from './proc.mjs';
 import { priceUsage } from './pricing.mjs';
@@ -501,6 +501,26 @@ export function status({ now = Date.now(), cfg = loadConfig(), path = ledgerPath
   if (c.tripped) lines.push(`BREAKER TRIPPED ${c.tripped.at}: ${c.tripped.reason}; decide answers plan until the cycle ends or a probe succeeds`);
   else if (c.fails) lines.push(`${c.fails} billing/auth failure(s) in a row (trips at ${TRIP_AFTER})`);
   return { text: lines.join('\n'), total, cycle: cy, ledger: c };
+}
+
+// The API share of all reviews (0.31.63), from telemetry/review-verdicts.jsonl. An API review counts once, by the row api-review.mjs
+// writes on exit (source "api-review"); every other row counts as a subagent review unless it says route "api" (the verdict row of a
+// guard-routed review, which the api-review row already counts). Rows without a route (older ones) are subagent reviews.
+export function reviewShareLines({ now = Date.now(), file = join(telemetryDir(), 'review-verdicts.jsonl') } = {}) {
+  const day = new Date(now).toISOString().slice(0, 10);
+  const weekAgo = now - 7 * 86400000;
+  const t = { today: { api: 0, all: 0 }, week: { api: 0, all: 0 } };
+  try {
+    for (const r of tailRecords(file, { bytes: 8 * 1024 * 1024 })) {
+      const at = Date.parse(r && r.at);
+      if (!Number.isFinite(at) || at < weekAgo || at > now + 60000) continue;
+      const isApi = r.source === 'api-review';
+      if (!isApi && r.route === 'api') continue;
+      for (const [k, on] of [['today', String(r.at).slice(0, 10) === day], ['week', true]]) { if (!on) continue; t[k].all++; if (isApi) t[k].api++; }
+    }
+  } catch { /* an unreadable log shows zeros */ }
+  const f = (x) => `${x.api} of ${x.all} (${x.all ? Math.round((x.api / x.all) * 100) : 0}%) on the API`;
+  return [`review share today: ${f(t.today)}`, `review share last 7 days: ${f(t.week)}`];
 }
 
 // One line for the daily checkup or a brief: "API credits: reviews $X of $100, cycle day N".

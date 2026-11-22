@@ -14,7 +14,7 @@
 // options (see README "API credits"). Exit codes: 0 ok, 2 bad usage, 1 probe failed.
 
 import { isMain } from './lib/is-main.mjs';
-import { CATEGORIES, decide, record, recordFallback, reviewStats, reviewSummaryLine, status, summaryLine, billingStatusLines } from './lib/api-credits.mjs';
+import { CATEGORIES, decide, record, recordFallback, reviewStats, reviewSummaryLine, reviewShareLines, status, summaryLine, billingStatusLines } from './lib/api-credits.mjs';
 import { runApi, reviewLimitsLine } from './lib/api-run.mjs';
 import { getBilling, loadSpendConfig } from './lib/api-spend.mjs';
 import { opt } from '../hooks/lib/context.mjs';
@@ -79,7 +79,9 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     try { limits = `\n${reviewLimitsLine({ softRaw: opt('api_review_soft_usd', ''), hardRaw: opt('api_review_hard_usd', '') })}`; } catch { /* a bad limits setting never hides the ledger */ }
     const st = status({ now, cfg, env });
     const b = await billing();
-    out(st.text + limits + '\n' + billingStatusLines(b.ok ? b.snapshot : null, { cfg, entries: (st.ledger && st.ledger.entries) || [], now, reason: b.reason || '', cacheAgeMs: b.ok ? b.ageMs : null }).join('\n'));
+    let share = '';
+    try { share = `\n${reviewShareLines({ now }).join('\n')}`; } catch { /* the share never hides the ledger */ }
+    out(st.text + limits + share + '\n' + billingStatusLines(b.ok ? b.snapshot : null, { cfg, entries: (st.ledger && st.ledger.entries) || [], now, reason: b.reason || '', cacheAgeMs: b.ok ? b.ageMs : null }).join('\n'));
     return 0;
   }
   if (cmd === 'summary') { out(summaryLine({ now, cfg })); return 0; }
