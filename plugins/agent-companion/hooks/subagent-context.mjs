@@ -66,7 +66,7 @@ try {
   const handoffOn = handoffActive(hcfg, p.agent_type); // false: switch off or an exempt agent type; the compaction note is unaffected
 
   const path = resolveAgentTranscript(p);
-  const wantCtx = threshold > 0 || ceiling > 0 || stepsOn || (handoffOn && hcfg.hard > 0); // the step budget counts compactions itself
+  const wantCtx = threshold > 0 || ceiling > 0 || stepsOn || (handoffOn && (hcfg.hard > 0 || hcfg.held)); // the step budget counts compactions itself
   const sig = wantCtx ? readContextSignal(path) : null;
   const sizeLine = handoffOn ? threshold : 0;
   const kinds = threshold > 0 ? claimSignals(p.agent_id, sig, sizeLine, { fresh: true }) : [];
@@ -93,8 +93,8 @@ try {
   const hard = hardCheck(p, sig, { ...hcfg, on: handoffOn });
   if (hard) {
     appendLog(HANDOFF_LOG, hard.row);
-    recordDenial('handoff-hard-limit', p, `${p.tool_name} at ${sig.ctx} tokens, limit ${hcfg.hard}`);
-    deny(streakPrefix(noteDeny(p.agent_id)) + denyText(sig.ctx, hcfg.hard, noticeVariant(readBrief(path), p.agent_type), hard.why));
+    recordDenial('handoff-hard-limit', p, hard.held ? `${p.tool_name} while the release hold is on` : `${p.tool_name} at ${sig.ctx} tokens, limit ${hcfg.hard}`);
+    deny(streakPrefix(noteDeny(p.agent_id)) + denyText(sig ? sig.ctx : 0, hcfg.hard, noticeVariant(readBrief(path), p.agent_type), hard.why, hard.held));
   }
   if (handoffOn && sig && hcfg.hard > 0 && sig.ctx >= hcfg.hard) clearDeny(p.agent_id); // a call the limit let through ends the streak
 

@@ -8,7 +8,8 @@
 // AGENT_COMPANION_FAKE_NOW moves the clock for tests. Nothing here throws.
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync, renameSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { stateDir } from './context.mjs';
 
 export const COOLDOWN_MS = 4 * 3600e3;
@@ -34,7 +35,7 @@ export function readJson(file) {
   try {
     if (!existsSync(file)) return null;
     const v = JSON.parse(readFileSync(file, 'utf8'));
-    return v && typeof v === 'object' ? v : null;
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
   } catch { return null; }
 }
 
@@ -154,5 +155,18 @@ export function flagLine() {
     if (!flagIsOpen(f) || f.ackedAt) return null;
     const names = f.flags.map((x) => x.name + (x.detail ? ` (${x.detail})` : '')).join('; ');
     return `[agent-companion] RELEASE WATCH ${f.version || ''} check ${f.check ?? '?'}: ${names}. Push-notify the operator at once (PushNotification) and relay their answer. Unanswered, new agents and heavy jobs are held after the delay (option release_watch_hold_minutes); run \`node <plugin>/scripts/release-watch.mjs status\` for detail.`;
+  } catch { return null; }
+}
+
+// ---- the hold as seen by the guards ----
+// One message for every guard that refuses work while held. null when no hold (or on any read error: fail open).
+export function holdDenyMessage(what = 'new work') {
+  try {
+    if (!isHoldActive()) return null;
+    const h = readHold() || {};
+    const names = Array.isArray(h.flags) && h.flags.length ? h.flags.map((x) => x && x.name).filter(Boolean).join(', ') : 'unspecified';
+    const script = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'release-watch.mjs').replace(/\\/g, '/');
+    return `[agent-companion] A post-release hold is on since ${h.since || '?'} (release ${h.version || '?'}; flags: ${names}), so ${what} is refused. `
+      + `Tell the operator. Lift it with \`node "${script}" clear\`, or when the operator says "clear hold". The lead may still answer the operator; leases already granted keep running.`;
   } catch { return null; }
 }

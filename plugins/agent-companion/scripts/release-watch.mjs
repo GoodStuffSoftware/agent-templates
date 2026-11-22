@@ -177,7 +177,8 @@ export const TH = {
 };
 const REWRITE_GUARDS = new Set(['fit', 'inherit', 'type-required', 'routing-autofix']);
 
-export function evaluate(m) {
+// opts.first: the first check of an install. A guard key that has no baseline hits is then not flagged as new: the release itself may have introduced it.
+export function evaluate(m, opts = {}) {
   const flags = []; const f = (name, value, limit, detail) => flags.push({ name, value, limit, detail });
   if (!m) return flags;
   const sp = m.spawns; const ws = m.workers.since; const wb = m.workers.base;
@@ -185,7 +186,7 @@ export function evaluate(m) {
   const tel = Object.entries(m.telemetry);
   if (enough) {
     for (const [k, v] of tel) {
-      if (!k.startsWith('denial:')) continue;
+      if (!k.startsWith('denial:') || !k.endsWith('/deny')) continue; // only deny outcomes count; warn, autofix and rewrite rows never flag
       const guard = k.slice(7).split('/')[0];
       if (REWRITE_GUARDS.has(guard)) continue;
       if (guard === 'delegation') {
@@ -194,10 +195,11 @@ export function evaluate(m) {
         continue;
       }
       const ps = v.per100spawns.since; const pb = v.per100spawns.base;
+      if (v.base === 0 && opts.first) continue;
       if (v.base === 0 && v.since >= TH.newGuardMin) f(`guard:${k.slice(7)}`, v.since, TH.newGuardMin, `new guard, ${v.since} hits`);
       else if (v.since >= TH.guardMinN && pb > 0 && ps > TH.guardFactor * pb) f(`guard:${k.slice(7)}`, ps, +(TH.guardFactor * pb).toFixed(1), `${ps}/100 spawns vs ${pb}`);
     }
-    const rw = tel.filter(([k]) => k.startsWith('denial:') && REWRITE_GUARDS.has(k.slice(7).split('/')[0])).reduce((s, [, v]) => s + v.since, 0);
+    const rw = tel.filter(([k]) => k.startsWith('denial:') && k.endsWith('/deny') && REWRITE_GUARDS.has(k.slice(7).split('/')[0])).reduce((s, [, v]) => s + v.since, 0);
     const rw100 = per(rw, sp.since);
     if (rw100 > TH.rewritePer100) f('spawn-rewrites', rw100, TH.rewritePer100, `${rw} rewrites/denials per ${sp.since} spawns`);
     const gd = tel.filter(([k]) => k.startsWith('gate:') && /denied/.test(k)).reduce((s, [, v]) => s + v.since, 0);
@@ -248,7 +250,7 @@ export function tick({ at = S.now(), installed, holdMinutes, run = analyze } = {
       let metrics = null; let flags = [];
       try {
         metrics = run({ T: sch.T, nowMs: at, baseFrom: sch.prevT || undefined });
-        flags = evaluate(metrics);
+        flags = evaluate(metrics, { first: sch.done.length === 0 });
       } catch (e) { flags = []; metrics = { error: String(e && e.message || e) }; }
       const late = at - sch.due[last] > LATE_MS;
       sch.done = [...sch.done, ...due];
@@ -291,7 +293,7 @@ export function main(A = process.argv.slice(2)) {
       const T = Date.parse(argOf(A, '--since')); if (!(T > 0)) { console.error('check needs --since <ISO>'); return 2; }
       const bf = argOf(A, '--base-from');
       const m = analyze({ T, baseFrom: bf ? Date.parse(bf) : undefined, days: Number(argOf(A, '--days')) || 7, sample: Number(argOf(A, '--sample')) || 500 });
-      console.log(JSON.stringify({ ...m, flags: evaluate(m) }, null, 1)); return 0;
+      console.log(JSON.stringify({ ...m, flags: evaluate(m, { first: true }) }, null, 1)); return 0;
     }
     console.error('usage: release-watch.mjs tick | status | clear [--by <who>] | check --since <ISO> [--base-from <ISO>] [--days N] [--sample N]');
     return 2;

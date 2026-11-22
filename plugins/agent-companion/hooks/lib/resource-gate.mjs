@@ -34,6 +34,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isCloudSession } from './context.mjs';
+import { holdDenyMessage } from './release-watch-state.mjs';
 
 const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts');
 export const GATE_MODES = ['rewrite', 'deny', 'hint', 'off'];
@@ -912,6 +913,8 @@ export async function gateDecision(command, { cwd, mode = DEFAULT_GATE_MODE, env
     const heavy = found.heavy.filter((h) => isClass(rules, h.class));
     if (!heavy.length) return none;
     const classes = [...new Set(heavy.map((h) => h.class))];
+    const heldText = holdDenyMessage('this heavy command');
+    if (heldText) return { action: 'deny', classes, command: null, text: heldText, held: true };
     const launcher = launcherFor(loaded.claudeHome, exists ?? existsSync);
     const heaviest = (cs) => cs.slice().sort((a, b) => boxOf(rules, b) - boxOf(rules, a))[0];
     const wrapped = rewriteCommand(command, heavy, found.flags, launcher, heaviest, shell);

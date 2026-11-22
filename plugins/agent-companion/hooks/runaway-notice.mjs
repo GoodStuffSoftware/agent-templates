@@ -25,7 +25,7 @@
 // notice appear exactly once. Empty stdout when there is nothing queued.
 
 import { readStdin, passthrough, callerIsSubagent, opt, stateRootPath } from './lib/context.mjs';
-import { flagLine as releaseWatchLine, noteReply } from './lib/release-watch-state.mjs';
+import { flagLine as releaseWatchLine, noteReply, isHoldActive, clear as clearWatch } from './lib/release-watch-state.mjs';
 import { unattendedReason } from '../scripts/lib/usage/surface.mjs';
 import { drainNotices, renderNotices } from './lib/runaway.mjs';
 import { interruptedNotices } from './lib/interrupted-workers.mjs';
@@ -45,8 +45,16 @@ try {
   if (event === 'UserPromptSubmit') {
     try {
       if (unattendedReason({ payload: p, root: stateRootPath() }) === null) {
-        watch = releaseWatchLine();
-        if (!/^\s*<task-notification/.test(String(p.prompt || ''))) noteReply();
+        const prompt = String(p.prompt || '');
+        const genuine = !/^\s*<(task-notification|system-reminder|command-)/.test(prompt);
+        // The operator's words lift a hold: a short genuine prompt saying "clear hold" or "release hold".
+        if (genuine && isHoldActive() && prompt.length <= 80 && /(^|[\s"'`])(clear|release) hold\b/i.test(prompt)) {
+          clearWatch({ by: 'prompt' });
+          watch = '[agent-companion] The release hold is lifted on the operator\'s word: new agents, heavy jobs and running workers carry on.';
+        } else {
+          watch = releaseWatchLine();
+          if (genuine) noteReply();
+        }
       }
     } catch { watch = null; }
   }

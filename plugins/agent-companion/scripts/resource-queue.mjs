@@ -37,6 +37,8 @@ import {
   BOX, NAME_RE, loadRules, classOf, ruleOf, limitsFor, parseRam, sampleTree, claudeHome,
 } from './lib/resource-rules.mjs';
 
+import { holdDenyMessage } from '../hooks/lib/release-watch-state.mjs';
+
 export { resourceStatus, formatResourceStatus, acquireResources, reserveResource, unreserveResource, holdMine, resumeMine, releaseLease };
 
 const SELF = fileURLToPath(import.meta.url);
@@ -253,6 +255,9 @@ export async function runUnderQueue({
   const env = io.env ?? process.env;
   const err = io.err ?? ((l) => process.stderr.write(`${l}\n`));
   const spawnFn = io.spawn ?? spawn;
+  // Post-release hold: no new admissions (a lease already granted keeps running and releases normally).
+  const held = holdDenyMessage('a new queue admission');
+  if (held) { err(held); return 75; }
   // --shell bash: the one argument is a bash command line, run byte for byte. No bash
   // means the command does not run: another shell would change what it does.
   let bash = null;
