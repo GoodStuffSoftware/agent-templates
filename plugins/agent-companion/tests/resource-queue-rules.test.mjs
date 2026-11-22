@@ -624,7 +624,7 @@ test('buildRequest: a class supplies defaults, explicit flags override, {cwd} is
 test('runUnderQueue hands every sample record to the lease sidecar, and a failed read leaves the sidecar alone', async () => {
   const { EventEmitter } = await import('node:events');
   const calls = [];
-  const lease = { id: 'x', off: false, cleared: false, bound: false, release() {}, recordActivity: (...a) => calls.push(a) };
+  const lease = { id: 'x', off: false, cleared: false, bound: false, release() {}, checkCleared: () => false, recordActivity: (...a) => calls.push(a) };
   const child = new EventEmitter(); child.pid = 4242; child.kill = () => {};
   const evs = [{ n: 1, size: 3 }, null, { n: 3, size: 4 }];
   let i = 0;
