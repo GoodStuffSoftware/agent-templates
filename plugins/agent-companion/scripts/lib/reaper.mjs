@@ -345,6 +345,8 @@ export function parseWinJson(text) {
     };
     // k = Kernel+User mode time in 100 ns units -> cpu ms (live capacity measures tree usage from it)
     if (x.k != null && Number.isFinite(Number(x.k))) row.cpuMs = Math.round(Number(x.k) / 10000);
+    // io = read+write+other transfer bytes (a progress signal for the stuck-holder detector)
+    if (x.io != null && Number.isFinite(Number(x.io))) row.ioBytes = Number(x.io);
     return row;
   });
 }
@@ -389,7 +391,8 @@ export function processSnapshot({ platform = process.platform, spawn = spawnSync
     if (platform === 'win32') {
       const ps = '$ErrorActionPreference="Stop";Get-CimInstance Win32_Process | ForEach-Object { '
         + '[pscustomobject]@{p=$_.ProcessId;pp=$_.ParentProcessId;n=$_.Name;e=$_.ExecutablePath;c=$_.CommandLine;'
-        + 'w=[int64]$_.WorkingSetSize;k=[int64]$_.KernelModeTime+[int64]$_.UserModeTime;s=$_.CreationDate} } | ConvertTo-Json -Compress';
+        + 'w=[int64]$_.WorkingSetSize;k=[int64]$_.KernelModeTime+[int64]$_.UserModeTime;s=$_.CreationDate;'
+        + 'io=[int64]$_.ReadTransferCount+[int64]$_.WriteTransferCount+[int64]$_.OtherTransferCount} } | ConvertTo-Json -Compress';
       const r = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], {
         encoding: 'utf8', windowsHide: true, timeout: 20_000, maxBuffer: 64 * 1024 * 1024,
       });

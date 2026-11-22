@@ -396,6 +396,12 @@
       "description": "\"on\" (default): a held box lease is charged what its process tree really uses (measured CPU, after about 80 s, never above its declared size, never below 1), a new job whose history is known is charged its usual usage, admission also needs free CPU and RAM above the reserve, and total charged units never exceed the physical cores. Unknown jobs, and any lease without a fresh measure, keep their declared size. Needs reap_policy not \"off\" (the measuring rides the reap tick). \"off\": every lease costs its declared size, as before 0.31.62. Change takes effect for the next process that reads the ledger.",
       "default": "on"
     },
+    "stuck_holder_policy": {
+      "type": "string",
+      "title": "Resource queue: what to do with a stuck holder",
+      "description": "A run lease whose process tree made no progress (CPU time, I/O counters, new or ended processes, probe activity) for 15 minutes while it is past its expected hold is shown as STUCK in status and the session's Shared resources line. \"flag\" (default): show it and keep the lease. \"release\": the sweep also frees the lease so others can run; the process is never stopped and may still be running. Any other value counts as \"flag\". Needs reap_policy not \"off\" (the progress sampling rides the reap tick). The window and expected hold are the \"stuck\" rule in config/resource-rules.json.",
+      "default": "flag"
+    },
     "reap_never": {
       "type": "string",
       "title": "Processes the reaper never stops",

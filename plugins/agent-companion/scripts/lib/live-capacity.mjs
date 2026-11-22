@@ -2,6 +2,7 @@
 // Pure helpers plus the small sidecar / history files; the ledger (ci-budget.mjs) calls these.
 //   lease-<id>.use   {v, at, n, win[], cpu, ramMb, ramPeakMb}  written by the wrapper's tree timer
 //   usage.jsonl      one row per finished, measured lease (key, cpuP90, ramMaxMb, n, durMs, ...)
+//   lease-<id>.prog  progress of the tree (cpu, io, spawn, output): the stuck-holder detector (section "progress")
 
 import { readFileSync, writeFileSync, renameSync, unlinkSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -152,6 +153,157 @@ export function makeUseTracker(cfg = LIVE_DEFAULTS) {
       };
     },
   };
+}
+
+// ---------------------------------------------------------------- progress (stuck-holder detector, leg 4b)
+//
+// The wrapper spawns the child with inherited stdio, so it cannot see output bytes. Progress is therefore read from
+// the tree: cpu time (cpuMs), I/O transfer counters (ioBytes: Win32_Process Read+Write+Other, /proc/<pid>/io on
+// Linux), a pid appearing or disappearing, and (for a future piped path) noteOutput(bytes). A lease is STUCK only
+// when none of these moved for the rule's quiet window AND it is past its expected hold; tree cpu alone never
+// counts (a verdict needs the io counters or output bytes as a second witness). Written to lease-<id>.prog.
+//   lease-<id>.prog  {v, at, n, lastAt, sig:{cpu,io,spawn,out}, cpuMs, ioBytes, outBytes}  (sig = last time each moved)
+
+export const PROG_DEFAULTS = Object.freeze({
+  cpuMinFrac: 0.005, // tree cpu delta that counts as progress: 0.5% of one core over the interval
+  ioMinBytes: 1024, // tree I/O transfer delta that counts as progress
+  staleMs: 150_000, // a progress record older than this is not trusted (the wrapper stopped ticking)
+  quietMs: 15 * 60_000, // default quiet window (rule "stuck": quietMs)
+  defaultHoldMs: 30 * 60_000, // default expected hold when the lease has no limit (rule "stuck": defaultHoldMs)
+});
+
+export const progFile = (dir, id) => join(dir, `lease-${id}.prog`);
+
+export function writeProg(dir, id, rec) {
+  try {
+    const file = progFile(dir, id);
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(rec));
+    renameSync(tmp, file);
+    return true;
+  } catch { return false; }
+}
+
+export function readProg(dir, id) {
+  try {
+    const p = JSON.parse(readFileSync(progFile(dir, id), 'utf8'));
+    if (!p || p.v !== 1 || !Number.isFinite(Number(p.at))) return null;
+    const sig = p.sig && typeof p.sig === 'object' ? p.sig : {};
+    return {
+      at: num(p.at), n: Math.max(0, Math.trunc(num(p.n))), lastAt: num(p.lastAt),
+      sig: { cpu: num(sig.cpu), io: num(sig.io), spawn: num(sig.spawn), out: num(sig.out) },
+      cpuMs: p.cpuMs == null ? null : num(p.cpuMs), ioBytes: p.ioBytes == null ? null : num(p.ioBytes), outBytes: num(p.outBytes),
+    };
+  } catch { return null; }
+}
+
+export function removeProg(dir, id) { try { unlinkSync(progFile(dir, id)); } catch { /* gone */ } }
+
+/** Cumulative I/O bytes of one pid on Linux (rchar + wchar of /proc/<pid>/io), or null. Seam: read(path) -> text. */
+export function procIo(pid, { platform = process.platform, read = (p) => readFileSync(p, 'utf8') } = {}) {
+  if (platform !== 'linux') return null;
+  try {
+    const t = read(`/proc/${pid}/io`);
+    const r = /^rchar:\s*(\d+)/m.exec(t); const w = /^wchar:\s*(\d+)/m.exec(t);
+    return r || w ? num(r?.[1]) + num(w?.[1]) : null;
+  } catch { return null; }
+}
+
+// The process snapshot is taken by a child of the wrapper (a PowerShell or ps), which is in the table that tick and
+// gone the next: it must not read as a pid appearing and disappearing.
+const isSnapshotProbe = (r) => /Get-CimInstance Win32_Process/i.test(String(r.cmd ?? '')) || /^ps\s+-A\s+-o\s/.test(String(r.cmd ?? ''));
+
+/**
+ * One progress reading of the lease's tree (the wrapper itself is not in `tree.procs`). Returns null when the table
+ * carries neither cpu time nor io counters; else {at, pids[], cpuMap, ioMap, cpuDelta, ioDelta, cpu, io, spawn, haveCpu, haveIo}.
+ * The first reading has no baseline (no deltas, all flags false). ioOf(pid) is the fallback io reader (Linux /proc).
+ */
+export function sampleProgress(prev, tree, table, now, { ioOf = null, cfg = PROG_DEFAULTS } = {}) {
+  if (!tree || !Array.isArray(table)) return null;
+  const byPid = new Map(table.map((r) => [r.pid, r]));
+  const pids = []; const cpuMap = {}; const ioMap = {};
+  for (const p of tree.procs ?? []) {
+    const r = byPid.get(p.pid);
+    if (!r || (r.creationTime != null && p.creationTime != null && r.creationTime !== p.creationTime)) continue;
+    if (isSnapshotProbe(r)) continue;
+    pids.push(p.pid);
+    if (Number.isFinite(r.cpuMs)) cpuMap[p.pid] = r.cpuMs;
+    let io = Number.isFinite(r.ioBytes) ? r.ioBytes : null;
+    if (io === null && ioOf) { try { io = ioOf(p.pid); } catch { io = null; } }
+    if (Number.isFinite(io)) ioMap[p.pid] = io;
+  }
+  const haveCpu = table.some((r) => Number.isFinite(r.cpuMs));
+  const haveIo = table.some((r) => Number.isFinite(r.ioBytes)) || Object.keys(ioMap).length > 0;
+  if (!haveCpu && !haveIo) return null;
+  const s = { at: now, pids, cpuMap, ioMap, cpuDelta: 0, ioDelta: 0, cpu: false, io: false, spawn: false, haveCpu, haveIo };
+  if (prev && now - prev.at >= 1000) {
+    const before = new Set(prev.pids);
+    s.spawn = pids.some((p) => !before.has(p)) || prev.pids.some((p) => !pids.includes(p));
+    for (const [pid, ms] of Object.entries(cpuMap)) {
+      const b = prev.cpuMap[pid];
+      if (b !== undefined) s.cpuDelta += Math.max(0, ms - b);
+      else if ((byPid.get(Number(pid))?.creationTime ?? 0) >= prev.at - 1000) s.cpuDelta += ms;
+    }
+    for (const [pid, v] of Object.entries(ioMap)) {
+      const b = prev.ioMap[pid];
+      if (b !== undefined) s.ioDelta += Math.max(0, v - b);
+      else if ((byPid.get(Number(pid))?.creationTime ?? 0) >= prev.at - 1000) s.ioDelta += v;
+    }
+    s.cpu = s.cpuDelta / (now - prev.at) >= cfg.cpuMinFrac;
+    s.io = s.ioDelta >= cfg.ioMinBytes;
+  }
+  return s;
+}
+
+/** Accumulates one lease's progress; add() returns the .prog record to write (or null: no signal available). */
+export function makeProgressTracker(cfg = PROG_DEFAULTS, { ioOf = null } = {}) {
+  let prev = null; let n = 0; let lastAt = 0; let outBytes = 0;
+  const sig = { cpu: 0, io: 0, spawn: 0, out: 0 };
+  let cpuMs = null; let ioBytes = null;
+  return {
+    get n() { return n; },
+    /** The wrapper saw `bytes` of the child's output (unused by the inherited-stdio wrapper; for a piped path). */
+    noteOutput(bytes, now = Date.now()) {
+      if (!(bytes > 0)) return;
+      outBytes += Math.trunc(bytes); sig.out = now; lastAt = Math.max(lastAt, now);
+    },
+    add(tree, table, now) {
+      const s = sampleProgress(prev, tree, table, now, { ioOf, cfg });
+      if (!s) return null;
+      const first = prev === null;
+      prev = s; n += 1;
+      if (first) { lastAt = Math.max(lastAt, now); } // the baseline reading counts as progress: the clock starts here
+      if (s.cpu) sig.cpu = now;
+      if (s.io) sig.io = now;
+      if (s.spawn) sig.spawn = now;
+      if (s.cpu || s.io || s.spawn) lastAt = Math.max(lastAt, now);
+      cpuMs = s.haveCpu ? Object.values(s.cpuMap).reduce((a, b) => a + b, 0) : null;
+      ioBytes = s.haveIo ? Object.values(s.ioMap).reduce((a, b) => a + b, 0) : null;
+      return { v: 1, at: now, n, lastAt, sig: { ...sig }, cpuMs, ioBytes, outBytes };
+    },
+  };
+}
+
+/**
+ * The stuck verdict for one lease. `prog` is readProg(), `act` the idle-probe sidecar ({sampledAt, activeAt}) or null,
+ * `maxHoldMs` the lease's expected hold (limitsFor) or null, `rule` the "stuck" rule ({quietMs, defaultHoldMs}).
+ * Returns null when there is no fresh progress record with two readings; else
+ * {stuck, quietMs, quietLimitMs, heldMs, expectedHoldMs, signals[], by}. `by` names the signal that moved last.
+ * Stuck needs quiet >= quietLimit AND held > expected hold AND a second witness besides tree cpu (io counters or output).
+ */
+export function stuckOf({ prog, act = null, startedAt = 0, maxHoldMs = null, rule = null, now, cfg = PROG_DEFAULTS }) {
+  if (!prog || prog.n < 2 || now - prog.at > cfg.staleMs) return null;
+  const quietLimitMs = Number.isFinite(rule?.quietMs) && rule.quietMs > 0 ? rule.quietMs : cfg.quietMs;
+  const expectedHoldMs = maxHoldMs > 0 ? maxHoldMs : (Number.isFinite(rule?.defaultHoldMs) && rule.defaultHoldMs > 0 ? rule.defaultHoldMs : cfg.defaultHoldMs);
+  const probeAt = act && now - num(act.sampledAt) <= cfg.staleMs ? num(act.activeAt) : 0;
+  const times = { ...prog.sig, probe: probeAt };
+  let by = ''; let last = Math.max(prog.lastAt, num(startedAt));
+  for (const [k, v] of Object.entries(times)) if (v > 0 && v >= last) { last = v; by = k; }
+  const quietMs = Math.max(0, now - last);
+  const heldMs = Math.max(0, now - (num(startedAt) || now));
+  const signals = [...(prog.cpuMs !== null ? ['cpu'] : []), ...(prog.ioBytes !== null ? ['io'] : []), 'spawn', ...(prog.outBytes > 0 ? ['output'] : []), ...(act ? ['probe'] : [])];
+  const witness = prog.ioBytes !== null || prog.outBytes > 0;
+  return { stuck: witness && quietMs >= quietLimitMs && heldMs > expectedHoldMs, quietMs, quietLimitMs, heldMs, expectedHoldMs, signals, by };
 }
 
 // ---------------------------------------------------------------- history

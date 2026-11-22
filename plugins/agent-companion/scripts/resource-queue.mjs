@@ -326,17 +326,14 @@ export async function runUnderQueue({
     return e.code === 'EACCES' ? 126 : 127;
   }
 
-  let probeTimer = null; let probeNoted = false;
+  let probeTimer = null;
   if (lease && !lease.off && request.monitored) {
     const rules = io.rules ?? loadRules(env);
     const idleRule = ruleOf(rules, 'idle') ?? {};
     const sampleMs = io.probeMs ?? idleRule.sampleMs ?? 30_000;
     let prev = null; let activeAt = Date.now();
     probeTimer = setInterval(() => {
-      if (lease.cleared && !probeNoted) {
-        probeNoted = true;
-        err(`resource-queue: this lease was cleared by a rule (see "status --json" recent clears); the command keeps running.`);
-      }
+      if (lease.checkCleared()) return; // released from outside: the lease logs it once; no more probing or recording
       const s = (io.probe ?? sampleTree)(child.pid, { prev, minCpuPct: idleRule.minCpuPct ?? 5, ...request.probe });
       if (!s) return; // unreadable: leave the sidecar alone, the lease reads "unknown", never "idle"
       prev = s;
@@ -352,7 +349,7 @@ export async function runUnderQueue({
   if (lease && !lease.off && !lease.bound && request.reapTree !== false && lease.trackable) {
     const rc = reapSettings(io.ledger ?? {});
     const tick = () => {
-      if (lease.released) return;
+      if (lease.released || lease.checkCleared()) return; // released from outside: stop tracking, the child finishes unleased
       try { lease.track(); } catch { /* best effort */ }
       reapTimer = setTimeout(tick, rc.trackMs);
       reapTimer.unref?.();
