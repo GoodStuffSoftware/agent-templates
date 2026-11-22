@@ -413,19 +413,23 @@ test('REAL: reaps its own spawned child + grandchild, spares an unrelated siblin
     const table = processSnapshot();
     assert.ok(table, 'real process snapshot');
     const tree = recordTree(table, H.pid);
-    assert.deepEqual(tree.procs.map((p) => p.pid).sort(), [ids.c, ids.g].sort(), 'tree = child + grandchild only');
+    const inTree = tree.procs.map((p) => p.pid);
+    // On Windows each node child also owns a conhost.exe: those are tree members too and are reaped with it.
+    assert.ok(inTree.includes(ids.c) && inTree.includes(ids.g), 'child + grandchild recorded');
+    assert.ok(tree.procs.every((p) => /^(node|conhost)(.exe)?$/.test(p.image)), JSON.stringify(tree.procs));
     assert.ok(!tree.procs.some((p) => p.pid === sibling.pid));
     writeTree(dir, 'real', tree);
     // The wrapper (H) is "dead" for the orphan pass only if it is gone; here reap the live tree directly, as release does.
     const res = reapTree({ table: processSnapshot(), tree, selfPid: process.pid, policy: 'on', kill: (t) => realKill(t), logDir: dir, lease: 'real', why: 'release' });
-    assert.equal(res.targets.length, 2);
+    assert.deepEqual(res.targets.map((t) => t.pid).sort(), [...inTree].sort(), 'exactly the recorded tree');
     assert.ok(res.targets.every((t) => t.ok), JSON.stringify(res.targets));
     await new Promise((r) => setTimeout(r, 500));
     assert.equal(alive(ids.c), false, 'child gone');
     assert.equal(alive(ids.g), false, 'grandchild gone');
+    for (const pid of inTree) assert.equal(alive(pid), false, `tree member ${pid} gone`);
     assert.equal(alive(sibling.pid), true, 'unrelated sibling alive');
     assert.equal(alive(H.pid), true, 'the wrapper itself is not a target');
-    assert.equal(res.targets[0].pid, ids.g, 'grandchild killed first');
+    assert.ok(res.targets.findIndex((t) => t.pid === ids.g) < res.targets.findIndex((t) => t.pid === ids.c), 'grandchild killed before its parent');
   } finally {
     for (const p of spawned) { try { p.kill(); } catch { /* gone */ } } // only processes this test spawned
     rmSync(dir, { recursive: true, force: true });
