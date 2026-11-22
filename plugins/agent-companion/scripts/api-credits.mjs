@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // api-credits.mjs — the API-credit governor (ledger: <state root>/state/api-credits.json).
 //
-//   node api-credits.mjs decide <category>              prints "api" or "plan", then one reason line (billed spend from the Admin API plus booked spend after the last complete day; "booked only, not verified against billing" without an admin key or network)
+//   node api-credits.mjs decide <category> [--peek]     (--peek: do not advance the review alternation counter) prints "api" or "plan", then one reason line (billed spend from the Admin API plus booked spend after the last complete day; "booked only, not verified against billing" without an admin key or network)
 //   node api-credits.mjs record <category> <usd> <meta> --api-key-source ANTHROPIC_API_KEY  appends spend; without the flag it is refused (exit 2, nothing booked, a line in api-credits-rejects.jsonl)
 //   node api-credits.mjs status                         spend by category, the pace, what is left, the review limits in force, then billed spend (month and cycle, by workspace, key and model), the booked figure beside it, gaps, credits left (estimate), workspace limits
 //   node api-credits.mjs record-fallback <review id> [--reason <r>]  marks a review as redone on the plan (the id api-review.mjs printed)
@@ -28,6 +28,9 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--now') { now = Date.parse(argv[++i]); if (!Number.isFinite(now)) { out('bad --now'); return 2; } } else args.push(argv[i]);
   }
+  const peekAt = args.indexOf('--peek'); // 0.31.63: decide without advancing the review counter
+  const peek = peekAt >= 0;
+  if (peek) args.splice(peekAt, 1);
   const [cmd, ...rest] = args;
   let cfg;
   try { cfg = cfgIn || loadSpendConfig(); } catch { cfg = null; }
@@ -42,7 +45,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     if (!cfg) { out('plan'); out('failed closed: unreadable configuration'); return 0; }
     // Nothing is fetched for a category that fails closed anyway, and a failed or absent billing source never blocks the decision.
     const b = CATEGORIES.includes(rest[0]) ? await billing() : { ok: false };
-    const d = decide(rest[0], { now, cfg, env, billing: b.ok ? b.snapshot : null });
+    const d = decide(rest[0], { now, cfg, env, billing: b.ok ? b.snapshot : null, peek });
     out(d.decision); out(d.reason);
     return 0;
   }

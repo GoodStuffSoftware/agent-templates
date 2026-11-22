@@ -297,7 +297,9 @@ export function spendView(billing, category, { cfg, cy, entries, now }) {
 // With a billing snapshot the figures are billed spend through the last complete UTC day plus the booked spend after it.
 // Without one (no admin key, no network) they are the booked figures and every reason says so.
 
-export function decide(category, { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), env = process.env, billing = null } = {}) {
+// `peek` (0.31.63): answer without advancing the review alternation counter (turn.review), so status and diagnostics
+// never flip the next real routing decision. Only the spawn guard's call (and a writer's manual path) advances it.
+export function decide(category, { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), env = process.env, billing = null, peek = false } = {}) {
   const plan = (reason) => ({ decision: 'plan', reason });
   try {
     if (!CATEGORIES.includes(category)) return plan(`unknown category "${category}"`);
@@ -323,7 +325,7 @@ export function decide(category, { now = Date.now(), cfg = loadConfig(), path = 
         const t = c.turn.review || 0;
         const r = cfg.reviewRatio;
         const api = Math.ceil((t + 1) * r - 1e-9) > Math.ceil(t * r - 1e-9);
-        c.turn.review = t + 1;
+        if (!peek) c.turn.review = t + 1;
         if (!api) return plan(`alternation: review turn ${t} stays on the plan (target ${(r * 100).toFixed(0)}% api)`);
         return { decision: 'api', reason: `review turn ${t} on credits: spent $${spent.toFixed(2)} (${basis}) of $${cap.toFixed(2)} pace cap, $${(cfg.budget - total).toFixed(2)} left${tag}` };
       }
