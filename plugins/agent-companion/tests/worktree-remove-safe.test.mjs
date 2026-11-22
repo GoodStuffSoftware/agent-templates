@@ -234,6 +234,9 @@ test('decision: PowerShell is a denial carrying the rewritten command unless psR
 const payload = (command, extra = {}) => ({
   hook_event_name: 'PreToolUse', session_id: 'sess-wrs', tool_name: 'Bash', tool_input: { command, description: 'd' },
   permission_mode: 'bypassPermissions', ...extra,
+  // The hook walks up from cwd reading project settings; the scene lives under the real home (tmpdir), where that walk would
+  // reach the operator's own settings.json. The sandbox home is the walk's stop, so the commands below use absolute paths.
+  cwd: process.env.AGENT_COMPANION_HOME_OVERRIDE,
 });
 
 test('hook: rewrites through updatedInput (any permission mode, no permissionDecision), and the rewritten line really runs safely', () => {
