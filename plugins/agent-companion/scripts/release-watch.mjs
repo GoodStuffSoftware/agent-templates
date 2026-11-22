@@ -80,7 +80,7 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, days = 7, sampl
   const root = stateRootPath();
   telDir = telDir || join(dataRoot(), 'telemetry');
   projectsDir = projectsDir || join(claudeDir(), 'projects');
-  // The machine-wide queue data (LOCALAPPDATA) is read unless this is a sandboxed test process (isolate.mjs sets the home override); a scratch state dir does not hide it.
+  // The machine-wide queue data (LOCALAPPDATA) is read unless this is a sandboxed test process (isolate.mjs sets the sandbox home switch); a scratch state dir does not hide it.
   clearsFiles = clearsFiles || [...new Set([process.env.CI_BUDGET_DIR && join(process.env.CI_BUDGET_DIR, 'clears.jsonl'), join(dataRoot(), 'ci-budget', 'clears.jsonl'), join(root, 'ci-budget', 'clears.jsonl'),
     !process.env.AGENT_COMPANION_HOME_OVERRIDE && process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'ci-budget', 'clears.jsonl')].filter(Boolean).map((p) => p.replace(/\\/g, '/')))];
   const B0 = baseFrom > 0 ? baseFrom : T - days * 24 * HOUR;
