@@ -10,7 +10,7 @@ import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { sweepLedger } from '../scripts/ci-budget.mjs';
 import { runUnderQueue, cli, buildRequest } from '../scripts/resource-queue.mjs';
-import { treeFile, reapsFile } from '../scripts/lib/reaper.mjs';
+import { treeFile, reapsFile, parseWinJson, processSnapshot } from '../scripts/lib/reaper.mjs';
 import { makeWorld } from './resource-queue-world.mjs';
 
 const WRAPPER = 9000;
@@ -237,7 +237,7 @@ test('runUnderQueue runs the tracking timer for a run lease, not when the class 
     const calls = { track: 0, released: false };
     const lease = {
       id: 'fake-lease', dir: '', trackable: true, bound: false, off: false, cleared: false,
-      get released() { return calls.released; }, track() { calls.track += 1; }, release() { calls.released = true; },
+      get released() { return calls.released; }, track() { calls.track += 1; }, release() { calls.released = true; }, checkCleared() { return false; },
     };
     return { calls, lease };
   };

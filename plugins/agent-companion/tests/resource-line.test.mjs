@@ -223,3 +223,22 @@ test('a live holder flagged IDLE? shows it in the line and changes the signature
     a.release();
   } finally { w.done(); }
 });
+
+test('a live holder with a stuck verdict shows STUCK (not IDLE?/OVER) and changes the signature', async () => {
+  const w = makeWorld({ budget: 8 });
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, limits: { idleMs: 300_000, minHoldMs: 0 }, monitored: true, label: 'gate', project: 'proj-a' });
+    w.t += 400_000;
+    a.recordActivity(w.t, w.t - 350_000); // quiet on the probe: IDLE? alone
+    const st = status(w);
+    const before = resourceSignature(st, w.t);
+    assert.match(renderSharedResources(st, { now: w.t }), /IDLE\?/);
+    const h = st.resources.flatMap((r) => r.holders).find((x) => x.label === 'gate');
+    h.stuck = { quietMs: 1_380_000, quietLimitMs: 900_000, heldMs: 1_800_000, expectedHoldMs: 1_200_000, signals: ['cpu', 'io'], by: 'io', policy: 'flag' };
+    const line = renderSharedResources(st, { now: w.t });
+    assert.match(line, /app-e2e 1\/1: gate@proj-a [^;]*STUCK 23m/);
+    assert.doesNotMatch(line, /IDLE\?|OVER/);
+    assert.notEqual(resourceSignature(st, w.t), before);
+    a.release();
+  } finally { w.done(); }
+});

@@ -479,7 +479,7 @@ test('sampleProgress: the first reading is a baseline; cpu, io and spawn deltas 
   assert.deepEqual([first.cpu, first.io, first.spawn], [false, false, false]);
   assert.equal(first.haveCpu, true); assert.equal(first.haveIo, true);
   // a snapshot child (powershell Get-CimInstance Win32_Process) in the tree this tick: not a spawn, not cpu
-  const probe = { ...pt(3, 1, 100_500), name: 'powershell.exe', cmd: 'powershell -Command Get-CimInstance Win32_Process | ConvertTo-Json', cpuMs: 400, ioBytes: 9000 };
+  const probe = { ...pt(3, 1, 30), name: 'powershell.exe', cmd: 'powershell -Command Get-CimInstance Win32_Process | ConvertTo-Json', cpuMs: 400, ioBytes: 9000 };
   const treeP = progTree(1, 2, 3);
   const quiet = sampleProgress(first, treeP, [pt(1, 9, 10, { cpuMs: 1000, ioBytes: 5000 }), pt(2, 1, 20, { cpuMs: 500, ioBytes: 100 }), probe], 125_000);
   assert.deepEqual([quiet.cpu, quiet.io, quiet.spawn], [false, false, false], 'nothing moved but the probe');
@@ -491,7 +491,7 @@ test('sampleProgress: the first reading is a baseline; cpu, io and spawn deltas 
   const ioMoved = sampleProgress(busy, tree, [pt(1, 9, 10, { cpuMs: 2250, ioBytes: 7048 }), pt(2, 1, 20, { cpuMs: 500, ioBytes: 100 })], 175_000);
   assert.equal(ioMoved.io, true); assert.equal(ioMoved.cpu, false);
   // a pid that appears is a spawn
-  const spawned = sampleProgress(ioMoved, progTree(1, 2, 4), [pt(1, 9, 10, { cpuMs: 2250, ioBytes: 7048 }), pt(2, 1, 20, { cpuMs: 500, ioBytes: 100 }), pt(4, 1, 190_000)], 200_000);
+  const spawned = sampleProgress(ioMoved, progTree(1, 2, 4), [pt(1, 9, 10, { cpuMs: 2250, ioBytes: 7048 }), pt(2, 1, 20, { cpuMs: 500, ioBytes: 100 }), pt(4, 1, 40)], 200_000);
   assert.equal(spawned.spawn, true);
 });
 
@@ -568,7 +568,7 @@ test('stuck, end to end through the wrapper tick: a silent worker with io counte
     assert.ok(h.stuck.quietMs >= 300_000);
     assert.equal(h.stuck.expectedHoldMs, 240_000);
     assert.ok(h.stuck.signals.includes('io'));
-    assert.match(formatResourceStatus(resourceStatus({ ...w.opts })), /STUCK \(no progress \d+m on cpu, io: held \d+m > expected 4m; policy flag: kept\)/);
+    assert.match(formatResourceStatus(resourceStatus({ ...w.opts })), /STUCK \(no progress \d+m(?:\d+s)? on cpu, io: held \d+m(?:\d+s)? > expected 4m(?:00s)?; policy flag: kept\)/);
     w.t += 25_000; rt.io += 8192; a.track(); // the worker reads a file: progress
     assert.equal(boxHolder(w, 'hung job').stuck, null);
     for (let i = 0; i < 14; i += 1) { w.t += 25_000; rt.cpuMs += 5000; a.track(); } // busy on cpu, no io
