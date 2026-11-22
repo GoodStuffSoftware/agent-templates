@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { claudeDir, stateRootPath, opt } from '../hooks/lib/context.mjs';
 import * as S from '../hooks/lib/release-watch-state.mjs';
+import { unitsPerPercent } from '../hooks/lib/plan-allowance.mjs';
 
 export const CHECK_HOURS = [1, 2, 4, 8, 12, 16, 20, 24];
 export const LATE_MS = 2 * 3600e3;
@@ -44,6 +45,10 @@ export function dueIndexes(sch, at) {
 }
 
 // ---------- analysis (port of the one-shot recipe) ----------
+// Where the measured data lives: telemetry rows and queue clears are the machine's, never the watch's. AGENT_COMPANION_STATE_DIR moves only
+// the watch's own run, flag, hold and checks files (S.paths()). Before 0.31.63 a scratch state dir also pointed the telemetry read at an empty
+// dir, so a check counted zero spawns and reported zero usage while the transcripts (read from the claude dir) still showed workers.
+export const dataRoot = () => join(claudeDir(), 'agent-companion');
 const per = (a, b) => (b ? +(100 * a / b).toFixed(1) : null);
 const jsonl = (file) => {
   try { return readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); } catch { return []; }
@@ -71,11 +76,11 @@ export function isFailureClear(r) {
 // the tick passes the previous check's time, so each check is a rate over its own window, not a running count since install).
 export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, days = 7, sample = 500, telDir, projectsDir, clearsFiles, holds } = {}) {
   const root = stateRootPath();
-  telDir = telDir || join(root, 'telemetry');
+  telDir = telDir || join(dataRoot(), 'telemetry');
   projectsDir = projectsDir || join(claudeDir(), 'projects');
-  // The real machine-wide queue data is read only when the state dir is the real one (a scratch state dir keeps tests and sandbox runs off it).
-  clearsFiles = clearsFiles || [...new Set([process.env.CI_BUDGET_DIR && join(process.env.CI_BUDGET_DIR, 'clears.jsonl'), join(root, 'ci-budget', 'clears.jsonl'),
-    !process.env.AGENT_COMPANION_STATE_DIR && process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'ci-budget', 'clears.jsonl')].filter(Boolean).map((p) => p.replace(/\\/g, '/')))];
+  // The machine-wide queue data (LOCALAPPDATA) is read unless this is a sandboxed test process (isolate.mjs sets the home override); a scratch state dir does not hide it.
+  clearsFiles = clearsFiles || [...new Set([process.env.CI_BUDGET_DIR && join(process.env.CI_BUDGET_DIR, 'clears.jsonl'), join(dataRoot(), 'ci-budget', 'clears.jsonl'), join(root, 'ci-budget', 'clears.jsonl'),
+    !process.env.AGENT_COMPANION_HOME_OVERRIDE && process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'ci-budget', 'clears.jsonl')].filter(Boolean).map((p) => p.replace(/\\/g, '/')))];
   const B0 = baseFrom > 0 ? baseFrom : T - days * 24 * HOUR;
   const W0 = winFrom > 0 ? Math.max(winFrom, T) : T;
   // What the hold itself caused (denials, refusals, anything logged while it was on) never counts toward a signal.
@@ -182,9 +187,22 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, days = 7, sampl
       apiNonUsageWorkers: a.filter((x) => x.api && !/usage_limit/.test(String(x.api))).length,
     };
   }
-  out.estUnitsPerHour = { since: +(out.spawns.perHour.since * out.workers.since.unitsPerWorker.mean).toFixed(1), base: +(out.spawns.perHour.base * out.workers.base.unitsPerWorker.mean).toFixed(1) };
+  out.estUnitsPerHour = { since: +(out.spawns.perHour.since * out.workers.since.unitsPerWorker.mean).toFixed(2), base: +(out.spawns.perHour.base * out.workers.base.unitsPerWorker.mean).toFixed(2) };
+  out.usage = usageOf(out);
   out.hookSignatures = { since: sig.since, base: sig.base };
   return out;
+}
+
+// Worker usage as a share of the weekly limit: plan units per hour divided by the units that are 1% of the week (28.6 shipped,
+// plan-allowance.mjs). `src` names why a side is empty: no spawn rows (telemetry) or no worker transcripts.
+export function usageOf(m, unitsPerPct = unitsPerPercent()) {
+  const side = (w) => {
+    const sp = m.spawns.perHour[w]; const wk = m.workers[w];
+    const u = +(sp * wk.unitsPerWorker.mean).toFixed(2);
+    const why = [m.spawns[w] === 0 ? 'no spawn rows in telemetry' : null, wk.n === 0 ? 'no worker transcripts' : null].filter(Boolean);
+    return { unitsPerHour: u, pctPerHour: +(u / unitsPerPct).toFixed(3), empty: !(u > 0), why };
+  };
+  return { unitsPerPercent: unitsPerPct, since: side('since'), base: side('base') };
 }
 
 // ---------- thresholds (design section 1) ----------
@@ -203,6 +221,12 @@ export function evaluate(m, opts = {}) {
   const flags = []; const f = (name, value, limit, detail, level = value) => flags.push({ name, value, level, limit, detail });
   if (!m) return flags;
   const sp = m.spawns; const ws = m.workers.since; const wb = m.workers.base;
+  {
+    // The token-bleed half of the watch has nothing to judge when the usage source is empty: that is an error, never a quiet "clean".
+    const us = usageOf(m);
+    const bad = us.base.empty ? ['baseline', us.base] : sp.since >= TH.minSpawns && us.since.empty ? ['window', us.since] : null;
+    if (bad) f('usage-source-empty', 0, 0, `usage source empty (${bad[0]}: ${bad[1].why.join(', ') || 'zero units'}), the usage metric measured nothing`, 0);
+  }
   const enough = sp.since >= TH.minSpawns; const wEnough = ws.n >= TH.minWorkers;
   const tel = Object.entries(m.telemetry);
   if (enough) {
@@ -321,7 +345,9 @@ export function main(A = process.argv.slice(2)) {
       const T = Date.parse(argOf(A, '--since')); if (!(T > 0)) { console.error('check needs --since <ISO>'); return 2; }
       const bf = argOf(A, '--base-from');
       const m = analyze({ T, baseFrom: bf ? Date.parse(bf) : undefined, days: Number(argOf(A, '--days')) || 7, sample: Number(argOf(A, '--sample')) || 500 });
-      console.log(JSON.stringify({ ...m, flags: evaluate(m) }, null, 1)); return 0;
+      const flags = evaluate(m);
+      const verdict = flags.length ? `FLAG ${flags.map((x) => x.name).join(', ')}` : 'clean';
+      console.log(JSON.stringify({ ...m, verdict, flags }, null, 1)); return 0;
     }
     console.error('usage: release-watch.mjs tick | status | clear [--by <who>] | check --since <ISO> [--base-from <ISO>] [--days N] [--sample N]');
     return 2;

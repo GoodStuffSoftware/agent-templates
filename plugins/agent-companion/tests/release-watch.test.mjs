@@ -1,6 +1,6 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -120,7 +120,7 @@ test('evaluate: too little data stays silent', () => {
 
 // ---- analyze on a fake data tree ----
 test('analyze: reads telemetry and worker transcripts of invented data', () => {
-  const tel2 = join(state, 'telemetry'); mkdirSync(tel2, { recursive: true });
+  const tel2 = join(claude, 'agent-companion', 'telemetry'); mkdirSync(tel2, { recursive: true });
   const row = (o) => JSON.stringify(o) + '\n';
   writeFileSync(join(tel2, 'spawns.jsonl'), row({ at: T + HOUR }) + row({ at: T + 2 * HOUR }) + row({ at: T - 2 * HOUR }));
   writeFileSync(join(tel2, 'denials.jsonl'), row({ at: T + HOUR, guard: 'g', outcome: 'deny' }) + row({ at: T - HOUR, guard: 'g', outcome: 'deny' }));
@@ -220,7 +220,7 @@ test('hooks: SessionStart shows the line to a lead, not to a subagent', () => {
 // ---- 0.31.63 fix round: one test per fix, invented data ----
 const rowj = (o) => JSON.stringify(o) + '\n';
 const DAY = 24 * HOUR;
-const putRows = (name, rows, dir = 'telemetry') => { const d = join(state, dir); mkdirSync(d, { recursive: true }); writeFileSync(join(d, name), rows.map(rowj).join('')); };
+const putRows = (name, rows, dir = 'telemetry') => { const d = join(dir === 'telemetry' ? join(claude, 'agent-companion') : state, dir); mkdirSync(d, { recursive: true }); writeFileSync(join(d, name), rows.map(rowj).join('')); };
 const spread = (n, from, to, mk) => Array.from({ length: n }, (_, i) => mk(from + ((to - from) * (i + 0.5)) / n, i));
 
 test('B1: queue-clears counts failure clears only and judges them against the 7-day baseline', () => {
@@ -305,7 +305,17 @@ test('new guard keys flag on rate, not presence', () => {
 });
 
 // ---- replay: install, checks at +1,2,4,8,12,16,20,24 h ----
+// Worker transcripts (the units half of the usage metric): one small worker every `everyMs` from `from` to `to`.
+let wseq = 0;
+function putWorkers(from, to, everyMs, units = { input_tokens: 40000, output_tokens: 2000 }) {
+  const sd = join(claude, 'projects', 'C--proj', 'sess', 'subagents'); mkdirSync(sd, { recursive: true });
+  for (let at = from; at < to; at += everyMs) {
+    const n = wseq++;
+    writeFileSync(join(sd, `agent-w${n}.jsonl`), JSON.stringify({ type: 'assistant', timestamp: new Date(at).toISOString(), requestId: `rq${n}`, message: { model: 'claude-sonnet', usage: units, content: [{ type: 'text', text: 'STATUS: done' }] } }) + '\n');
+  }
+}
 function seedRoutine(upTo, extraDenials = []) {
+  putWorkers(T - 7 * DAY, T, 6 * HOUR); putWorkers(T, T + upTo, HOUR / 2);
   putRows('spawns.jsonl', [...spread(1176, T - 7 * DAY, T, (at) => ({ at })), ...spread(Math.round(5 * upTo / HOUR), T, T + upTo, (at) => ({ at }))]);
   putRows('denials.jsonl', [...spread(20, T - 7 * DAY, T, (at) => ({ at, guard: 'demo-guard', outcome: 'deny' })), ...spread(Math.round(upTo / HOUR / 2), T, T + upTo, (at) => ({ at, guard: 'demo-guard', outcome: 'deny' })), ...extraDenials]);
   putRows('clears.jsonl', [...spread(14, T - 7 * DAY, T, (at) => ({ at, rule: 'pid-dead', type: 'lease', label: 'build' })),
@@ -339,6 +349,66 @@ test('replay: a real spike in the same replay still flags and holds', () => {
   assert.equal(r.held, false);
   assert.equal(W.tick({ at: T + 8 * HOUR + 31 * 60e3, installed: installed(), holdMinutes: 30 }).held, true);
   assert.equal(S.isHoldActive(), true);
+});
+
+// ---- 0.31.63 usage metric: a scratch state dir must not hide the telemetry ----
+const checkRun = (scratch, since) => spawnSync(process.execPath, [SCRIPT, 'check', '--since', new Date(since).toISOString()], { env: { ...env(), AGENT_COMPANION_STATE_DIR: scratch, AGENT_COMPANION_FAKE_NOW: String(T + 3 * HOUR) }, encoding: 'utf8', windowsHide: true });
+
+test('usage: the state-dir override moves only the watch\'s own files, never the telemetry or usage data', () => {
+  putRows('spawns.jsonl', [...spread(70, T - 7 * DAY, T, (at) => ({ at })), ...spread(30, T, T + 3 * HOUR, (at) => ({ at }))]);
+  putWorkers(T - 7 * DAY, T, 6 * HOUR); putWorkers(T, T + 3 * HOUR, HOUR / 2);
+  // a decoy under the scratch state dir that the watch must NOT read
+  const scratch = join(tmp, 'scratch-state'); mkdirSync(join(scratch, 'telemetry'), { recursive: true });
+  writeFileSync(join(scratch, 'telemetry', 'spawns.jsonl'), rowj({ at: T + HOUR }).repeat(99));
+  process.env.AGENT_COMPANION_STATE_DIR = scratch;
+  try { for (const k of ['run', 'flag', 'hold', 'checks']) assert.ok(S.paths()[k].startsWith(scratch.replace(/\\/g, '/')) || S.paths()[k].startsWith(scratch), `${k} follows the override`); }
+  finally { process.env.AGENT_COMPANION_STATE_DIR = state; }
+  const before = existsSync(join(scratch, 'state')) ? readdirSync(join(scratch, 'state')) : [];
+  const r = checkRun(scratch, T);
+  assert.equal(r.status, 0, r.stderr);
+  const m = JSON.parse(r.stdout);
+  assert.equal(m.spawns.since, 30, 'real telemetry, not the decoy'); assert.equal(m.spawns.base, 70);
+  assert.ok(m.workers.since.n > 0 && m.workers.base.n > 0);
+  assert.ok(m.estUnitsPerHour.since > 0 && m.estUnitsPerHour.base > 0, 'a scratch state dir no longer zeroes the usage metric');
+  assert.ok(m.usage.since.pctPerHour > 0 && m.usage.base.pctPerHour > 0);
+  assert.equal(m.verdict, 'clean');
+  const after = existsSync(join(scratch, 'state')) ? readdirSync(join(scratch, 'state')) : [];
+  assert.deepEqual(after, before, 'check wrote none of the watch\'s own files');
+});
+
+test('usage: an empty usage source is an error the verdict names, never a quiet clean', () => {
+  // spawns in the telemetry but no worker transcripts at all: the units half measured nothing
+  putRows('spawns.jsonl', [...spread(70, T - 7 * DAY, T, (at) => ({ at })), ...spread(30, T, T + 3 * HOUR, (at) => ({ at }))]);
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(m.estUnitsPerHour.base, 0); assert.equal(m.usage.base.empty, true); assert.deepEqual(m.usage.base.why, ['no worker transcripts']);
+  const f = W.evaluate(m).find((x) => x.name === 'usage-source-empty');
+  assert.ok(f, 'flagged'); assert.match(f.detail, /usage source empty \(baseline: no worker transcripts\)/);
+  const r = checkRun(join(tmp, 'scratch-state'), T);
+  assert.match(JSON.parse(r.stdout).verdict, /^FLAG usage-source-empty/);
+  // no spawn rows at all: names the telemetry
+  rmSync(join(claude, 'agent-companion', 'telemetry'), { recursive: true, force: true });
+  putWorkers(T - 7 * DAY, T + 3 * HOUR, HOUR);
+  const m2 = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.deepEqual(m2.usage.base.why, ['no spawn rows in telemetry']);
+  assert.ok(W.evaluate(m2).map((x) => x.name).includes('usage-source-empty'));
+  // a quiet window with a healthy baseline is not an error
+  assert.ok(!names(metrics({ spawns: { since: 2, base: 700, perHour: { since: 0.2, base: 10 } } })).includes('usage-source-empty'));
+  assert.ok(names(metrics({ spawns: { since: 100, base: 0, perHour: { since: 10, base: 0 } } })).includes('usage-source-empty'));
+});
+
+test('usage: units per hour convert to percent of the weekly limit (28.6 units = 1%)', () => {
+  const m = metrics({ spawns: { since: 100, base: 1680, perHour: { since: 10, base: 10 } } });
+  m.workers.since = { ...m.workers.since, unitsPerWorker: { mean: 1.43, p50: 1, p90: 2 } }; m.workers.base = { ...m.workers.base, unitsPerWorker: { mean: 2.86, p50: 1, p90: 2 } };
+  const u = W.usageOf(m, 28.6);
+  assert.deepEqual([u.since.unitsPerHour, u.since.pctPerHour, u.base.unitsPerHour, u.base.pctPerHour], [14.3, 0.5, 28.6, 1]);
+  assert.equal(u.unitsPerPercent, 28.6); assert.equal(u.since.empty, false);
+  assert.equal(W.usageOf(m, 57.2).since.pctPerHour, 0.25, 'a bigger 1% means a smaller percent');
+  // analyze carries the same figure: units per hour over the current units-per-percent
+  putRows('spawns.jsonl', spread(60, T, T + 3 * HOUR, (at) => ({ at })).concat(spread(10, T - 7 * DAY, T, (at) => ({ at }))));
+  putWorkers(T - 7 * DAY, T + 3 * HOUR, HOUR);
+  const a = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(a.usage.since.pctPerHour, +(a.estUnitsPerHour.since / a.usage.unitsPerPercent).toFixed(3));
+  assert.ok(a.usage.since.pctPerHour > 0);
 });
 
 test('cleanup', () => { rmSync(tmp, { recursive: true, force: true }); });
