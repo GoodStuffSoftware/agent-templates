@@ -1247,6 +1247,18 @@ The ledger holds only booked figures, and booked spend can be wrong. So `api-cre
 
 Not covered by the API credits: Claude Code and extra usage in the Claude apps (same page), so a `claude -p` run never appears here.
 
+### Credits: used and remaining
+
+`node scripts/api-credits.mjs credits` (add `--json` for the same data as JSON) prints, read-only:
+
+- **Used this cycle**: billed spend from the Admin API cost report (by workspace and model, list price), the booked spend that is not billed yet (ledger entries after the last complete billed day), and the two combined. "Data runs to" is the end of the last complete UTC day; cost data lags up to a day.
+- **Remaining**: your Console balance (the anchor) minus billed spend since the anchor's day, and the same figure after the booked-not-yet-billed spend.
+- **Caps**: the monthly budget, each category's spend against today's pace cap (the cap `decide` applies) and the workspace limits.
+
+The prepaid balance is shown in the Console only: no API reports it, so `remaining` needs an anchor. Read the balance in the Console, then run `node scripts/api-credits.mjs credits anchor <usd> [--date <ISO date or time>]` (the date defaults to now; a new anchor replaces the old one; it is stored in the agent-companion state, never in the repo). The anchor's UTC day counts in full, so a mid-day reading errs on the low side. The view warns when the anchor is older than one cycle, when spend since it exceeds it (a top-up probably happened: re-anchor), and when it predates the billing window fetched.
+
+With no admin key, or when the Admin API call fails, `credits` still exits 0 and shows the ledger-only view (booked spend, not verified against billing) with the reason in one line.
+
 ## API workers (writers on the plan's API credits)
 
 A lead can run a writer brief on the plan's Claude Platform API credits instead of the subscription: `scripts/api-worker.mjs` runs it on the Agent SDK with the Console API key. The credits cover the Claude API and the Agent SDK but **not** Claude Code, so a hand-rolled `claude -p` worker is billed to the subscription whatever key is in its environment; this runner never calls `claude -p`.
