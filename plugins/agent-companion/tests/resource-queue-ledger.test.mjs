@@ -11,7 +11,7 @@ import './isolate.mjs';
 import { existsSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { resourceStatus, formatResourceStatus, isPidAlive, sweepLedger } from '../scripts/ci-budget.mjs';
+import { resourceStatus, formatResourceStatus, isPidAlive, sweepLedger, budgetDir } from '../scripts/ci-budget.mjs';
 import { makeWorld, settle, GB, T0 } from './resource-queue-world.mjs';
 
 const heldOf = (w, name) => resourceStatus({ ...w.opts }).resources.find((r) => r.name === name)?.held ?? 0;
@@ -739,16 +739,92 @@ test('RAM reserve: the shipped default is max(2 GB, 12.5% of total RAM) and a us
 
 // ---------------------------------------------------------------- bounded wait, fail open
 
-test('the wait is bounded: past maxWait the request runs over budget with exactly one line', async () => {
+test('the wait is bounded: past maxWait a shared (capacity > 1) resource goes over capacity, logged as an over-capacity grant', async () => {
   const w = makeWorld();
   try {
-    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'A' });
-    const b = await w.acq({ resources: { 'app-e2e': 1 }, label: 'B', maxWaitMs: 5000 });
-    assert.equal(heldOf(w, 'app-e2e'), 2, 'over capacity, by design');
-    assert.equal(w.lines.filter((l) => /running over budget/.test(l)).length, 1);
+    const a = await w.acq({ resources: { pool: 2 }, label: 'A' });
+    const b = await w.acq({ resources: { pool: 1 }, label: 'B', maxWaitMs: 5000 });
+    assert.equal(heldOf(w, 'pool'), 3, 'over capacity, logged');
+    assert.equal(w.lines.filter((l) => /OVER-CAPACITY grant.*pool 2\+1\/2/.test(l)).length, 1);
     assert.equal(w.tickets().length, 0);
     a.release();
     b.release();
+  } finally { w.done(); }
+});
+
+test('an exclusive lane (app-e2e, capacity 1) is never granted over capacity, not even after the wait bound', async () => {
+  const w = makeWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'A', pid: 9001 });
+    let b = null;
+    const pb = w.acq({ box: 2, resources: { 'app-e2e': 1 }, label: 'B', pid: 9002, maxWaitMs: 5000 }).then((l) => { b = l; });
+    await settle(40);
+    w.t += 60_000;
+    await settle(40);
+    assert.equal(b, null, 'still queued past the bound');
+    assert.equal(heldOf(w, 'app-e2e'), 1);
+    assert.equal(w.lines.filter((l) => /waiting past the 5 s bound for exclusive app-e2e/.test(l)).length >= 1, true, 'said');
+    assert.ok(!w.lines.some((l) => /OVER-CAPACITY/.test(l)));
+    a.release();
+    await settle(40);
+    await pb;
+    assert.ok(b && !b.off);
+    assert.equal(heldOf(w, 'app-e2e'), 1);
+    b.release();
+  } finally { w.done(); }
+});
+
+// ---------------------------------------------------------------- two ledgers (MSIX split)
+
+test('a live lease in an older ledger (foreignDirs) counts toward capacity; a dead one does not; it is never written', async () => {
+  const w = makeWorld();
+  const old = makeWorld();
+  try {
+    const legacyLease = await old.acq({ resources: { 'app-e2e': 1 }, box: 4, label: 'legacy holder', pid: 7001 });
+    const before = old.files(/./).sort().map((n) => [n, readFileSync(join(old.dir, n), 'utf8')]);
+    let got = null;
+    const p = w.acq({ resources: { 'app-e2e': 1 }, label: 'new', pid: 7002, foreignDirs: [old.dir] }).then((l) => { got = l; });
+    await settle(40);
+    assert.equal(got, null, 'blocked by the lease only the old ledger knows');
+    assert.ok(w.lines.some((l) => /app-e2e 1\/1 held by pid 7001/.test(l)));
+    assert.equal(resourceStatus({ ...w.opts, foreignDirs: [old.dir] }).resources.find((r) => r.name === 'app-e2e').held, 1);
+    w.dead.add(7001);
+    await settle(40);
+    await p;
+    assert.ok(got && !got.off, 'a dead pid in the old ledger stops counting');
+    assert.deepEqual(old.files(/./).sort().map((n) => [n, readFileSync(join(old.dir, n), 'utf8')]), before, 'the old ledger is untouched');
+    got.release();
+    legacyLease.release();
+  } finally { w.done(); old.done(); }
+});
+
+test('the default ledger is outside AppData on Windows, CI_BUDGET_DIR still wins', () => {
+  assert.equal(budgetDir({ CI_BUDGET_DIR: 'X:/o' }), 'X:/o');
+  if (process.platform === 'win32') {
+    const d = budgetDir({ LOCALAPPDATA: 'C:/u/AppData/Local', CLAUDE_CONFIG_DIR: 'C:/u/.claude' });
+    assert.doesNotMatch(d, /AppData/i);
+    assert.match(d.replace(/\\/g, '/'), /^C:\/u\/\.claude\/agent-companion\/ci-budget$/);
+  }
+});
+
+// ---------------------------------------------------------------- admit lock
+
+test('the admit lock of a live holder is not stolen after 15 s; one of a dead process is taken over at once', async () => {
+  const w = makeWorld();
+  try {
+    const lock = join(w.dir, 'admit.lock');
+    writeFileSync(lock, JSON.stringify({ pid: 4242, at: w.t - 15_000, token: 'held' }));
+    const start = w.t;
+    const l = await w.acq({
+      resources: { pool: 1 }, label: 'blocked', pid: 7100,
+      sleep: (ms) => { w.t += ms; if (w.t - start > 30_000) throw new Error('gave up waiting on a live lock'); },
+    });
+    assert.equal(l.off, true, 'failed open (stopped by the test) instead of stealing the live lock');
+    assert.equal(JSON.parse(readFileSync(lock, 'utf8')).token, 'held', "the live holder's lock file is untouched");
+    w.dead.add(4242);
+    const ok = await w.acq({ resources: { pool: 1 }, label: 'after death', pid: 7101 });
+    assert.ok(!ok.off);
+    ok.release();
   } finally { w.done(); }
 });
 

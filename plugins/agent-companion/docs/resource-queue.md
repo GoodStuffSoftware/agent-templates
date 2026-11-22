@@ -38,7 +38,7 @@ Contents: Part 1 is the lease protocol the pre-push gate (`scripts/ci-local.mjs`
 | `CI_LOCAL_SLICE` | `6` (`0` = off) | test files per granted worker in one slice of a long ci-local pass; each slice re-samples the load (ci-local only; not part of the lease protocol) |
 | `CI_BUDGET_REPO` | basename of the git top-level directory above the worktree (walk up for `.git`, no process spawned), else the worktree basename | `repo` label written into leases |
 
-**Ledger directory.** Machine-wide and named after no repo: `CI_BUDGET_DIR` if set, else `%LOCALAPPDATA%\ci-budget` on Windows (fallback `os.tmpdir()/ci-budget`), else `$XDG_RUNTIME_DIR/ci-budget` (fallback `os.tmpdir()/ci-budget`).
+**Ledger directory.** Machine-wide and named after no repo: `CI_BUDGET_DIR` if set, else `<claude home>/agent-companion/ci-budget` on Windows (outside AppData on purpose: the MSIX-packaged desktop app and unpackaged daemons see different `%LOCALAPPDATA%` folders; the older `%LOCALAPPDATA%\ci-budget` and the package private copies are still counted, read-only, while older versions run), else `$XDG_RUNTIME_DIR/ci-budget` (fallback `os.tmpdir()/ci-budget`).
 
 **Files** (ids are 12 hex chars):
 

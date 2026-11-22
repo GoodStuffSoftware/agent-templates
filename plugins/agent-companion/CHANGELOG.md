@@ -2,6 +2,12 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## Unreleased (0.31.62, leg 1: queue over-grant)
+
+- **One ledger on Windows.** The default ledger moved from `%LOCALAPPDATA%\ci-budget` to `<claude home>/agent-companion/ci-budget` (outside AppData; `CI_BUDGET_DIR` still wins). The desktop app is MSIX-packaged: its sessions' AppData writes land in the package's private copy while Task Scheduler daemons see only the real folder, so two ledgers each admitted into an empty box (seen live: box 24/16, app-e2e 2/1, a new holder ahead of 7 queued tickets). While older versions still write the old ledgers, live leases in the real `%LOCALAPPDATA%\ci-budget` and in every `%LOCALAPPDATA%\Packages\*\LocalCache\Local\ci-budget` count toward capacity, read-only (dead pids and leases past the live-holder ceiling are ignored; never written, cleared or released). Status marks them `foreign`.
+- **An exclusive lane is never granted over capacity.** The bounded wait (30 min) still lets box and shared resources go over, now logged as `OVER-CAPACITY grant`, but a resource of capacity 1 (app-e2e, gradle-...) keeps waiting past the bound and says so.
+- **The admit lock of a live holder cannot be stolen.** Staleness 10 s -> 60 s, and the holder refreshes the lock before each process-table call (up to 20 s each); a lock of a dead process is still taken over at once.
+
 ## 0.31.61 — 2026-11-21
 
 - **Spawns one effort step above the routing table are rewritten.** New option `effort_fit_policy` (`rewrite` default, `warn`, `off`): a ladder-rung spawn whose effort is one step above the table's rung is silently rewritten to the table's rung (`silent_fixes: effort_fit_rewrite:<from>-><to>`). `warn` gives a note only; `off` restores the old two-step threshold. Brief label `Rung: <reason>` keeps the named rung and counts as the opt-out. Basis: usage audit 2026-11-21, 149 spawns one step above the table, about 58-75 extra units.

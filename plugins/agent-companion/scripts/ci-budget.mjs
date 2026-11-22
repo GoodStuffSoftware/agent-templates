@@ -71,7 +71,7 @@ import {
   mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, unlinkSync, statSync, existsSync,
 } from 'node:fs';
 import {
-  BOX, loadRules, capacityOf, ramReserveMb, liveVerdict, liveCeilingMs, appendClear, recentClears, scanStrays, NAME_RE, processTable,
+  BOX, loadRules, capacityOf, claudeHome, ramReserveMb, liveVerdict, liveCeilingMs, appendClear, recentClears, scanStrays, NAME_RE, processTable,
 } from './lib/resource-rules.mjs';
 import { join, basename, dirname, resolve } from 'node:path';
 import {
@@ -95,7 +95,11 @@ export const DEFAULT_SLICE_FILES = 6; // test files per worker in one slice of a
 export const DEFAULT_QUEUE_MAX_WAIT_MS = 30 * 60_000; // a full run's queue wait
 export const DEFAULT_EXPRESS_MAX_WAIT_MS = 5 * 60_000; // a targeted run's wait
 const LEGACY_MAX_AGE_MS = 45 * 60 * 1000; // the old mutex's own age cap
-const ADMIT_STALE_MS = 10_000;
+// A live holder's lock is never stolen inside this window. The slowest thing done under the lock is the
+// hidden PowerShell process-table call (20 s timeout, resource-rules.mjs), once per unverified lease, so the
+// holder also refreshes the lock's `at` before each such call (touchAdmit); the window only has to cover one call.
+// A lock whose pid is dead is recovered at once whatever its age.
+const ADMIT_STALE_MS = 60_000;
 const DEBRIS_MAX_AGE_MS = 600_000; // *.tmp-* / *.stale-* left by a crash between write and rename
 const ADMIT_RETRY_CODES = ['EPERM', 'EBUSY', 'EACCES'];
 export const MAX_RESERVATION_MS = 4 * 3600_000; // a reservation never lasts longer than this
@@ -143,14 +147,32 @@ export function projectLabel(start) {
 }
 
 // Repo-neutral and machine-wide, so other repos can take leases from the same
-// budget. CI_BUDGET_DIR wins; else %LOCALAPPDATA%/ci-budget on Windows,
+// budget. CI_BUDGET_DIR wins; else <claude home>/agent-companion/ci-budget on Windows,
 // $XDG_RUNTIME_DIR/ci-budget elsewhere, else os.tmpdir()/ci-budget.
+// Windows: NOT under %LOCALAPPDATA%. The Claude desktop app is MSIX-packaged, so its sessions' writes to
+// %LOCALAPPDATA% land in the package's private copy (%LOCALAPPDATA%\Packages\<pkg>\LocalCache\Local) while
+// Task Scheduler daemons see only the real folder: two ledgers, so nothing was counted across the split
+// (confirmed live 2026-11-22). The claude home is outside AppData and seen identically by both. It is the
+// durable config root (a sibling of config/, which holds the resource rules), not state/, which is derived
+// and deletable: a ledger deleted under live holders would let everyone over-admit.
 export function budgetDir(env = process.env) {
   if (env.CI_BUDGET_DIR) return env.CI_BUDGET_DIR;
-  if (process.platform === 'win32') {
-    return env.LOCALAPPDATA ? join(env.LOCALAPPDATA, 'ci-budget') : join(tmpdir(), 'ci-budget');
-  }
+  if (process.platform === 'win32') return join(claudeHome(env), 'agent-companion', 'ci-budget');
   return env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, 'ci-budget') : join(tmpdir(), 'ci-budget');
+}
+
+// Ledgers older versions wrote on Windows (read-only here, counted toward capacity while those versions still
+// run): the real %LOCALAPPDATA%\ci-budget and each MSIX package's private copy of it. A packaged process
+// reading the real folder already sees the merged view; an unpackaged one sees only the real folder, so the
+// private copies are listed too. Empty off Windows.
+export function legacyLedgerDirs(env = process.env) {
+  if (process.platform !== 'win32' || !env.LOCALAPPDATA) return [];
+  const out = [join(env.LOCALAPPDATA, 'ci-budget')];
+  const pk = join(env.LOCALAPPDATA, 'Packages');
+  try {
+    for (const name of readdirSync(pk)) out.push(join(pk, name, 'LocalCache', 'Local', 'ci-budget'));
+  } catch { /* no packages */ }
+  return out;
 }
 
 export function defaultBudget(cores) {
@@ -268,7 +290,7 @@ export function resolveBudgetConfig(env = process.env, { cores = availableParall
 
 const CTX_KEYS = [
   'dir', 'budget', 'heavyCost', 'heavyMax', 'express', 'maxFull', 'pollMs', 'staleMs',
-  'heartbeatMs', 'announceMs', 'sampleMs', 'off', 'legacyDir', 'legacyUnits', 'heavyMaxWaitMs',
+  'heartbeatMs', 'announceMs', 'sampleMs', 'off', 'legacyDir', 'foreignDirs', 'legacyUnits', 'heavyMaxWaitMs',
   'queueMaxWaitMs', 'expressMaxWaitMs', 'reserve', 'loadPct', 'sliceFactor', 'rules', 'session', 'project', 'freemem', 'totalmem', 'delay',
 ];
 
@@ -279,6 +301,10 @@ function makeCtx(o = {}) {
   for (const k of CTX_KEYS) if (o[k] !== undefined) ctx[k] = o[k];
   ctx.heavyCost = Math.min(ctx.heavyCost, ctx.budget);
   ctx.legacyDir ??= legacyLockDir(o.env ?? process.env);
+  // Only the default ledger counts the pre-0.31.62 AppData ledgers; an explicit dir or CI_BUDGET_DIR is a chosen,
+  // self-contained ledger (tests, other tools) and never reads the machine's real folders.
+  const eenv = o.env ?? process.env;
+  ctx.foreignDirs ??= (o.dir || eenv.CI_BUDGET_DIR) ? [] : legacyLedgerDirs(eenv);
   ctx.legacyUnits = Math.min(ctx.legacyUnits ?? legacyRunUnits(ctx.cores), ctx.budget);
   ctx.now = o.now ?? Date.now;
   ctx.sleep = o.sleep ?? sleepMs;
@@ -429,7 +455,9 @@ function verifiedLive(ctx, e, ask) {
   if (d && d.pid === e.pid && fits(num(d.startedAt))) return { pid: e.pid, startedAt: num(d.startedAt) };
   if (!ask) return null;
   let s = null;
+  touchAdmit(ctx); // the call may take 20 s: keep a lock held around it from looking stale
   try { s = ctx.procStart(e.pid); } catch { /* unknown */ }
+  touchAdmit(ctx);
   s = s === null || s === undefined ? NaN : Number(s);
   if (!fits(s)) return null;
   try { writeFileSync(file, JSON.stringify({ pid: e.pid, startedAt: s, verifiedAt: ctx.now() })); } catch { /* best effort */ }
@@ -743,7 +771,45 @@ export function readState(ctx, { reclaim = true } = {}) {
   leases.sort((a, b) => num(a.startedAt) - num(b.startedAt) || num(a.pid) - num(b.pid));
   tickets.sort((a, b) => num(a.createdAt) - num(b.createdAt) || num(a.pid) - num(b.pid) || (a.id < b.id ? -1 : 1));
   reservations.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
+  for (const f of readForeignLeases(ctx, leaseIds)) leases.push(f);
   return { leases, tickets, stale: staleEntries, reclaimed, legacy, reservations };
+}
+
+// Leases in the older ledgers (ctx.foreignDirs: the real %LOCALAPPDATA%\ci-budget and the MSIX private copies)
+// that older versions still write while they run. They count toward capacity so a split ledger cannot over-grant.
+// READ-ONLY: never dropped, cleared, resized or released from here (entries carry foreign: true), and never
+// admitted into. Dead pids and leases past the live-holder ceiling since their last sign of life are ignored.
+function readForeignLeases(ctx, seen) {
+  const out = [];
+  const ceiling = liveCeilingMs(ctx.rules) || 4 * 3600_000;
+  for (const dir of ctx.foreignDirs ?? []) {
+    if (resolve(dir) === resolve(ctx.dir)) continue;
+    let names = [];
+    try { names = readdirSync(dir); } catch { continue; }
+    for (const name of names) {
+      const m = /^lease-([0-9a-f]+)\.json$/.exec(name);
+      if (!m || seen.has(m[1])) continue;
+      const d = readJson(join(dir, name));
+      if (!d || typeof d !== 'object') continue;
+      const pid = num(d.pid); const boundPid = Math.max(0, Math.trunc(num(d.boundPid)));
+      if (!(boundPid > 0 ? ctx.isAlive(boundPid) : ctx.isAlive(pid))) continue;
+      const hb = Math.max(num(d.heartbeatAt), num(readHb(join(dir, `lease-${m[1]}.hb`))), num(d.startedAt), num(d.createdAt));
+      if (boundPid <= 0 && ctx.now() - hb > ceiling) continue;
+      seen.add(m[1]);
+      const hc = Math.trunc(num(d.heavyCost));
+      out.push({
+        ...d, id: m[1], file: join(dir, name), foreign: true, foreignDir: dir, pid,
+        kind: d.kind === 'targeted' ? 'targeted' : d.kind === 'run' ? 'run' : 'full',
+        repo: typeof d.repo === 'string' ? d.repo : '', worktree: typeof d.worktree === 'string' ? d.worktree : '',
+        label: typeof d.label === 'string' ? d.label : '', project: typeof d.project === 'string' ? d.project : '',
+        session: typeof d.session === 'string' ? d.session : '', group: typeof d.group === 'string' ? d.group : '', boundPid,
+        resources: normResources(d.resources), ramMb: Math.max(0, Math.trunc(num(d.ramMb))),
+        units: Math.max(0, Math.trunc(num(d.units))), heavy: Math.max(0, Math.trunc(num(d.heavy))),
+        heavyCost: hc >= 1 ? hc : ctx.heavyCost,
+      });
+    }
+  }
+  return out;
 }
 
 // Live holders of the pre-budget run mutex (scripts/ci-lock.mjs, removed in
@@ -788,6 +854,17 @@ export function totals(ctx, state) {
 
 // ---------------------------------------------------------------- admission mutex
 
+// The lock this process holds, so a slow step inside it (the process-table call) can refresh its `at`.
+let heldAdmit = null;
+function touchAdmit(ctx) {
+  const h = heldAdmit;
+  if (!h || h.ctx !== ctx) return;
+  try {
+    const cur = readJson(h.file);
+    if (cur && cur.token === h.token) writeFileSync(h.file, JSON.stringify({ pid: ctx.pid, at: ctx.now(), token: h.token }));
+  } catch { /* best effort */ }
+}
+
 function withAdmit(ctx, fn) {
   const file = join(ctx.dir, 'admit.lock');
   const token = newId();
@@ -808,9 +885,12 @@ function withAdmit(ctx, fn) {
     if (dead) { dropFile(file); continue; }
     ctx.sleep(5 + (tries % 5) * 5);
   }
+  const outer = heldAdmit;
+  heldAdmit = { ctx, file, token };
   try {
     return fn();
   } finally {
+    heldAdmit = outer;
     const h = readJson(file);
     if (h && h.token === token) tryUnlink(file);
   }
@@ -1574,6 +1654,7 @@ export async function acquireResources(opts = {}) {
   }
   const unregister = register(ctx, dropTicket);
   let lastAnnounce = -Infinity; let lastPos = -1; let announced = false;
+  let exclusiveLogged = false;
   let excluded = 0; let lastTick = begin; let lastPolicy = false; // time held or passed over does not count toward the bounded wait
   try {
     for (;;) {
@@ -1615,17 +1696,39 @@ export async function acquireResources(opts = {}) {
       const waited = tickAt - begin - excluded;
       // Held or passed over by a reservation: the wait is the policy's, not the queue's, so it neither
       // goes over budget nor times out here; a hold and a reservation both end by their own clock (4 h at most).
-      if (!policy && waited >= maxWait) { // no unbounded wait: go on over budget
-        const lease = withAdmit(ctx, () => { const l = grant(req.box); dropTicket(); return l; });
-        unregister();
-        ctx.log(`resource-queue: waited ${Math.round(waited / 1000)} s (${reasons.map((r) => r.text).join('; ')}); `
-          + `running over budget (CI_LOCAL_QUEUE_MAX_WAIT_MS=${ctx.queueMaxWaitMs}).`);
-        return lease;
+      let exclusiveWait = '';
+      if (!policy && waited >= maxWait) { // no unbounded wait: go on over budget, but never over an exclusive lane
+        const over = withAdmit(ctx, () => {
+          const s = readState(ctx, { reclaim: true });
+          const held = namedHeld(s);
+          const blocked = []; const overCap = [];
+          for (const [name, u] of Object.entries(req.named)) {
+            const cap = capacityOf(ctx.rules, ctx.env, name);
+            if (u > cap - (held[name] ?? 0)) {
+              if (cap <= 1) {
+                const h = holdersOf(s, name)[0];
+                blocked.push(`${name} (held by ${h ? who(h, ctx.now()) : 'another holder'})`);
+              } else overCap.push(`${name} ${held[name] ?? 0}+${u}/${cap}`);
+            }
+          }
+          if (blocked.length) return { blocked };
+          const l = grant(req.box); dropTicket();
+          return { lease: l, overCap };
+        });
+        if (over.lease) {
+          unregister();
+          ctx.log(`resource-queue: waited ${Math.round(waited / 1000)} s (${reasons.map((r) => r.text).join('; ')}); `
+            + `OVER-CAPACITY grant: running over budget${over.overCap.length ? ` and over the capacity of ${over.overCap.join(', ')}` : ''} `
+            + `(CI_LOCAL_QUEUE_MAX_WAIT_MS=${ctx.queueMaxWaitMs}).`);
+          return over.lease;
+        }
+        exclusiveWait = `waiting past the ${Math.round(maxWait / 1000)} s bound for exclusive ${over.blocked.join(', ')}; an exclusive lane is never granted over capacity; `;
       }
       if (!policy && waited >= ctx.timeoutMs) throw timeoutError();
-      if (pos !== lastPos || ctx.now() - lastAnnounce >= ctx.announceMs) {
+      if (pos !== lastPos || ctx.now() - lastAnnounce >= ctx.announceMs || (exclusiveWait && !exclusiveLogged)) {
+        if (exclusiveWait) exclusiveLogged = true;
         lastPos = pos; lastAnnounce = ctx.now(); announced = true;
-        ctx.log(`resource-queue: waiting, position ${pos + 1} of ${state.tickets.length || 1} (needs ${wantsText(req)}): ${reasons.map((r) => r.text).join('; ')}`);
+        ctx.log(`resource-queue: waiting, position ${pos + 1} of ${state.tickets.length || 1} (needs ${wantsText(req)}): ${exclusiveWait}${reasons.map((r) => r.text).join('; ')}`);
       }
       await ctx.delay(ctx.pollMs);
     }
@@ -1667,7 +1770,7 @@ function holderOut(ctx, l, units, stale, now) {
     idleFlag: l.idleFlag ? { idleMs: l.idleFlag.idleMs, idleLimitMs: l.idleFlag.idleLimitMs, sampleAgeMs: l.idleFlag.sampleAgeMs ?? null, sample: l.idleFlag.sample ?? null } : null,
     hbStale: l.hbStale ? { heartbeatAgeMs: l.hbStale.heartbeatAgeMs, staleMs: l.hbStale.staleMs } : null,
     ceilingMs: liveCeilingMs(ctx.rules) || null,
-    releaseCommand: `node "${RELEASE_SCRIPT}" release ${l.id}`,
+    foreign: !!l.foreign, releaseCommand: l.foreign ? null : `node "${RELEASE_SCRIPT}" release ${l.id}`,
   };
 }
 
@@ -1874,7 +1977,7 @@ export function releaseLease(opts = {}) {
   if (!/^[0-9a-f]{4,12}$/.test(id)) return { ok: false, error: `bad lease id "${opts.id ?? ''}" (the hex id from status, at least 4 characters)` };
   let st;
   try { st = readState(ctx, { reclaim: false }); } catch (e) { return { ok: false, error: `ledger unreadable (${e.message})` }; }
-  const hits = [...st.leases, ...st.stale.filter((s) => s.type === 'lease')].filter((l) => l.id.startsWith(id));
+  const hits = [...st.leases.filter((l) => !l.foreign), ...st.stale.filter((s) => s.type === 'lease')].filter((l) => l.id.startsWith(id));
   const uniq = [...new Map(hits.map((l) => [l.id, l])).values()];
   if (!uniq.length) return { ok: false, error: `no lease with id ${id} (see status)` };
   if (uniq.length > 1) return { ok: false, error: `id ${id} matches ${uniq.length} leases (${uniq.map((l) => l.id).join(', ')}); give more characters` };

@@ -19,6 +19,7 @@ import { cli, parseUntil } from '../scripts/resource-queue.mjs';
 
 const H = 3600_000;
 const NO_RULES = { version: 1, resources: {}, classes: [], rules: [] };
+const POOL2 = { CI_BUDGET_RESOURCES: 'pool=2' };
 
 function world(extra = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'rq-reserve-'));
@@ -316,9 +317,9 @@ test('a paused entry ahead does not block those behind it, and a hold dies with 
 test('a held or passed-over entry waits past the bounded wait; an ordinary one goes over budget', async () => {
   const w = world();
   try {
-    const holder = await acquireResources(w.opts({ resources: { r: 1 }, pid: 899 }));
+    const holder = await acquireResources(w.opts({ resources: { pool: 2 }, pid: 899, env: POOL2 }));
     const logs = [];
-    const plain = w.start({ resources: { r: 1 }, maxWaitMs: 120_000, log: (l) => logs.push(l) });
+    const plain = w.start({ resources: { pool: 1 }, env: POOL2, maxWaitMs: 120_000, log: (l) => logs.push(l) });
     reserveResource(w.opts({ resource: 'q', forGroup: 'train', until: w.t + H, ownerPid: 5000 }));
     const passed = w.start({ resources: { q: 1 }, maxWaitMs: 120_000 });
     w.t += 10 * 60_000;
