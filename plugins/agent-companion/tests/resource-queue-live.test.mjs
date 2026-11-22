@@ -112,7 +112,8 @@ test('makeUseTracker: the hold starts at declared and falls at most one unit per
   assert.ok(holds[3] >= 4.9, `100 s of quiet only drops it by about 4 units (${holds[3]})`);
   for (let i = 1; i < holds.length; i += 1) assert.ok(holds[i - 1] - holds[i] <= 1.001, 'at most one unit per tick');
   assert.equal(measureOf(feed(0.1), 8, t).charge, 4, 'charged by the hold, not the quiet window');
-  assert.equal(feed(9).hold, 9, 'a burst raises it at once');
+  assert.equal(feed(7).hold, 7, 'a burst raises it at once');
+  assert.equal(feed(9).hold, 8, 'but never above declared');
 });
 
 test('effectiveBox: expected cpu rounded up inside [floor, declared]; declared when unknown', () => {
@@ -313,7 +314,7 @@ test('charge: warm and fresh measure charges ceil(peak of the window); declared 
     pump(w, rt, a, 40, 4); // far over declared
     assert.equal(boxHolder(w, 'busy holder').charged, 6, 'never above declared');
     pump(w, rt, a, 0.1, 4);
-    assert.equal(boxHolder(w, 'busy holder').charged, 2, 'the charge ramps down, it does not fall to the floor at once');
+    assert.equal(boxHolder(w, 'busy holder').charged, 5, 'the charge ramps down (the window still held the burst for 3 ticks), it does not fall to the floor at once');
     pump(w, rt, a, 0.1, 6);
     assert.equal(boxHolder(w, 'busy holder').charged, 1);
     w.t += LIVE_DEFAULTS.staleMs + 1_000; // the wrapper stopped ticking

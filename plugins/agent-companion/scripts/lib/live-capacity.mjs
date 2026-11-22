@@ -145,6 +145,7 @@ export function makeUseTracker(cfg = LIVE_DEFAULTS) {
         if (win.length > cfg.winN) win.shift();
         if (hold === null) { hold = Number.isFinite(declared) && declared > 0 ? declared : s.cores; holdAt = now; }
         hold = Math.max(s.cores, Math.max(...win), hold - Math.max(0, now - holdAt) / 1000 * cfg.rampDownPerS);
+        if (Number.isFinite(declared) && declared > 0) hold = Math.min(hold, declared); // a burst past the declared size does not lengthen the ramp
         holdAt = now;
         if (cpus.length > 2000) cpus.shift();
       }
