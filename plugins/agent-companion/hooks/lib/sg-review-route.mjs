@@ -41,7 +41,7 @@ export function apiMarker(brief) {
 
 export function diffRangeOf(brief) {
   const m = RANGE.exec(String(brief || ''));
-  return m ? m[1] : null;
+  return m ? m[1].replace(/\.+$/, '') : null; // a sentence-ending period is not part of the ref
 }
 
 function worktreeOf(brief, fallback) {

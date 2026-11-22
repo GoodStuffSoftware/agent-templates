@@ -399,6 +399,25 @@ function rig() {
   return { fx, go };
 }
 
+test('api-review: a stubbed run writes exactly one review-verdicts row, route "api" with a route_reason (0.31.63)', async () => {
+  const t = rig();
+  try {
+    const sdk = fakeSdk([init(), assistant('m1', txt(`VERDICT: PASS${NL}ok`), { input_tokens: 10, output_tokens: 5 }, { stop: 'end_turn' }), result()]);
+    const r = await t.go(['--runner', 'sdk'], { sdk, fetchImpl: async () => { throw new Error('fetch must not run'); } });
+    assert.equal(r.code, 0, r.out);
+    const f = join(t.fx.stateDir, 'telemetry', 'review-verdicts.jsonl');
+    assert.ok(existsSync(f), 'the exit row file exists');
+    const rows = readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.equal(rows.length, 1, 'exactly one row for the run');
+    assert.equal(rows[0].route, 'api');
+    assert.equal(rows[0].route_reason, 'api');
+    assert.equal(rows[0].source, 'api-review');
+    assert.equal(rows[0].ok, true);
+    assert.equal(rows[0].exit, 0);
+    assert.equal(rows[0].diff_ref, 'HEAD~1..HEAD');
+  } finally { t.fx.cleanup(); }
+});
+
 test('api-review: --runner sdk runs the SDK engine, inlines the brief and the diff, and labels the path sdk', async () => {
   const t = rig();
   try {
