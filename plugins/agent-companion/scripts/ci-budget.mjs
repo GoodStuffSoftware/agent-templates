@@ -2167,6 +2167,10 @@ function holderOut(ctx, l, units, stale, now) {
     overTime: l.overTime ? { heldMs: l.overTime.heldMs, maxHoldMs: l.overTime.maxHoldMs, activity: l.overTime.activity, ...(l.overTime.sample ? { sampleAgeMs: l.overTime.sampleAgeMs, sample: l.overTime.sample } : {}) } : null,
     idleFlag: l.idleFlag ? { idleMs: l.idleFlag.idleMs, idleLimitMs: l.idleFlag.idleLimitMs, sampleAgeMs: l.idleFlag.sampleAgeMs ?? null, sample: l.idleFlag.sample ?? null } : null,
     hbStale: l.hbStale ? { heartbeatAgeMs: l.hbStale.heartbeatAgeMs, staleMs: l.hbStale.staleMs } : null,
+    // Progress (cpu, io, spawn, probe): quietMs is the time since the last sign of work; stuck is set only when every signal is silent
+    // for the rule's window AND the hold is past the expected one (never cpu alone). policy flag keeps the lease, release frees it.
+    progress: l.progress ? { quietMs: l.progress.quietMs, quietLimitMs: l.progress.quietLimitMs, by: l.progress.by, signals: l.progress.signals, fresh: true, stuck: !!l.progress.stuck } : null,
+    stuck: l.stuck ? { quietMs: l.stuck.quietMs, quietLimitMs: l.stuck.quietLimitMs, heldMs: l.stuck.heldMs, expectedHoldMs: l.stuck.expectedHoldMs, signals: l.stuck.signals, by: l.stuck.by, policy: stuckPolicy(ctx) } : null,
     ceilingMs: liveCeilingMs(ctx.rules) || null,
     foreign: !!l.foreign, releaseCommand: l.foreign ? null : `node "${RELEASE_SCRIPT}" release ${l.id}`,
   };
@@ -2327,10 +2331,13 @@ export function formatResourceStatus(st) {
     if (!r.holders.length) lines.push('  free');
     for (const h of r.holders) {
       const flags = [h.bound ? 'BOUND to this pid' : '', h.group ? `group ${h.group}` : '', h.stale ? `STALE (${h.stale})` : '', h.kind !== 'legacy' && !h.alive ? 'PID DEAD' : '',
-        h.overTime ? `OVER TIME (${dur(h.overTime.heldMs)} > ${dur(h.overTime.maxHoldMs)} limit, ${h.overTime.activity}: kept, not released)` : '',
-        h.idleFlag ? `IDLE? (quiet ${dur(h.idleFlag.idleMs)} > ${dur(h.idleFlag.idleLimitMs)}, holder alive: kept, not released)` : '',
+        h.stuck ? `STUCK (no progress ${dur(h.stuck.quietMs)} on ${(h.stuck.signals || []).filter((x) => x !== 'spawn').join(', ')}: held ${dur(h.stuck.heldMs)} > expected ${dur(h.stuck.expectedHoldMs)}; policy ${h.stuck.policy}: ${h.stuck.policy === 'release' ? 'released at the next sweep' : 'kept'})` : '',
+        h.overTime && !h.stuck ? `OVER TIME (${dur(h.overTime.heldMs)} > ${dur(h.overTime.maxHoldMs)} limit, ${h.overTime.activity}: kept, not released)` : '',
+        h.idleFlag && !h.stuck ? (h.progress && h.progress.quietMs < h.idleFlag.idleLimitMs
+          ? `quiet cpu but io active (last progress ${dur(h.progress.quietMs)} ago on ${h.progress.by || 'a signal'}; holder alive: kept)`
+          : `IDLE? (quiet ${dur(h.idleFlag.idleMs)} > ${dur(h.idleFlag.idleLimitMs)}, holder alive: kept, not released)`) : '',
         h.hbStale ? `HEARTBEAT STALE (no beat for ${dur(h.hbStale.heartbeatAgeMs)} > ${dur(h.hbStale.staleMs)}, pid verified alive: kept, not released)` : '',
-        h.overTime || h.idleFlag || h.hbStale
+        h.stuck || h.overTime || h.idleFlag || h.hbStale
           ? `[flagged live holder: released by the sweep at ${h.ceilingMs ? `${dur(h.ceilingMs)} held` : 'no ceiling (never)'}, or when it exits; release by hand: ${h.releaseCommand}]` : ''].filter(Boolean).join(' ');
       const liveTxt = h.measured || (h.charged != null && h.charged !== h.declared)
         ? `  declared ${h.declared} / charged ${h.charged}${h.measured ? ` / measured ${h.measured.cpu} cpu ${h.measured.ramMb} MB${h.measured.warm && h.measured.fresh ? '' : ' (warming up or stale: charged as declared)'}` : ' (expected from history)'}` : '';

@@ -12,7 +12,8 @@ import { existsSync, writeFileSync, readFileSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { resourceStatus, formatResourceStatus, isPidAlive, sweepLedger, budgetDir } from '../scripts/ci-budget.mjs';
-import { makeWorld, settle, GB, T0 } from './resource-queue-world.mjs';
+import { writeProg } from '../scripts/lib/live-capacity.mjs';
+import { makeWorld, baseRules, settle, GB, T0 } from './resource-queue-world.mjs';
 
 const heldOf = (w, name) => resourceStatus({ ...w.opts }).resources.find((r) => r.name === name)?.held ?? 0;
 
@@ -967,5 +968,142 @@ test('two concurrent sweeps of one dead lease write exactly one clears row, and 
     assert.equal(w.clears()[0].rule, 'pid-dead');
     assert.equal(reclaimedB.length, 0, 'the loser reports nothing');
     assert.equal(w.leases().length, 0);
+  } finally { w.done(); }
+});
+
+// ---------------------------------------------------------------- stuck holders (leg 4b): policy flag vs release, release sticks
+
+const STUCK_RULE = { id: 'stuck', enabled: true, appliesTo: ['run'], quietMs: 120_000, defaultHoldMs: 240_000 };
+const stuckWorld = (over = {}) => makeWorld({ rules: { ...baseRules(), rules: [...baseRules().rules, STUCK_RULE] }, ...over });
+/** The wrapper's progress sidecar as the sampler writes it: read at "now", last sign of work at `lastAt`. */
+const putProg = (w, lease, over = {}) => writeProg(w.dir, lease.id, {
+  v: 1, at: w.t, n: 6, lastAt: T0, sig: { cpu: 0, io: 0, spawn: 0, out: 0 }, cpuMs: 1000, ioBytes: 5000, outBytes: 0, ...over,
+});
+const stuckHolder = (w) => resourceStatus({ ...w.opts }).resources.find((r) => r.name === 'app-e2e').holders[0];
+
+test('stuck: needs every signal silent AND a hold past the expected one, and a witness beyond tree cpu', async () => {
+  const w = stuckWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'quiet job' });
+    w.t += 300_000; // quiet 5 min (limit 2), held 5 min (expected 4)
+    putProg(w, a);
+    const h = stuckHolder(w);
+    assert.equal(h.stuck.quietMs, 300_000);
+    assert.equal(h.stuck.quietLimitMs, 120_000);
+    assert.equal(h.stuck.heldMs, 300_000);
+    assert.equal(h.stuck.expectedHoldMs, 240_000);
+    assert.equal(h.stuck.policy, 'flag');
+    assert.equal(h.progress.stuck, true);
+    // tree cpu alone is never a verdict: with no io counters and no output the same silence is not stuck
+    putProg(w, a, { ioBytes: null });
+    assert.equal(stuckHolder(w).stuck, null, 'cpu alone');
+    assert.equal(stuckHolder(w).progress.stuck, false);
+    // a recent io tick is progress
+    putProg(w, a, { lastAt: w.t - 20_000, sig: { cpu: 0, io: w.t - 20_000, spawn: 0, out: 0 } });
+    assert.equal(stuckHolder(w).stuck, null, 'io moved 20 s ago');
+    assert.equal(stuckHolder(w).progress.quietMs, 20_000);
+    // a stale record (the wrapper stopped ticking) is not trusted
+    putProg(w, a, { at: w.t - 200_000 });
+    assert.equal(stuckHolder(w).stuck, null);
+    assert.equal(stuckHolder(w).progress, null);
+    a.release();
+  } finally { w.done(); }
+});
+
+test('stuck: quiet but not past the expected hold is not stuck', async () => {
+  const w = stuckWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'young job' });
+    w.t += 200_000; // quiet 200 s (over the 120 s limit), held 200 s (under the 240 s expected hold)
+    putProg(w, a);
+    assert.equal(stuckHolder(w).stuck, null);
+    w.t += 60_000;
+    putProg(w, a);
+    assert.ok(stuckHolder(w).stuck, 'past the expected hold now');
+    a.release();
+  } finally { w.done(); }
+});
+
+test('stuck policy flag: the sweep keeps the lease and nothing is cleared; unknown policy text means flag', async () => {
+  for (const policy of [undefined, 'flag', 'nonsense']) {
+    const w = stuckWorld({ ...(policy === undefined ? {} : { stuck: { policy } }) });
+    try {
+      const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'stuck job' });
+      w.t += 300_000;
+      putProg(w, a);
+      assert.equal(sweepLedger({ ...w.opts }).length, 0, String(policy));
+      assert.equal(w.leases().length, 1);
+      assert.equal(w.clears().length, 0);
+      assert.ok(stuckHolder(w).stuck, 'still shown as STUCK');
+      a.release();
+    } finally { w.done(); }
+  }
+});
+
+test('stuck policy release: the lease is freed with a tombstone and a clears row, the process is never signalled', async () => {
+  const w = stuckWorld({ stuck: { policy: 'release' } });
+  const realKill = process.kill;
+  const signals = [];
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'stuck job', pid: 4711 });
+    w.t += 300_000;
+    putProg(w, a);
+    process.kill = (pid, sig) => { signals.push(sig); return realKill.call(process, pid, sig); };
+    assert.equal(sweepLedger({ ...w.opts }).length, 1);
+    process.kill = realKill;
+    const c = w.clears()[0];
+    assert.equal(c.rule, 'stuck-holder');
+    assert.equal(c.pid, 4711);
+    assert.equal(c.evidence.policy, 'release');
+    assert.equal(c.evidence.quietMs, 300_000);
+    assert.equal(w.leases().length, 0, 'capacity freed');
+    assert.equal(existsSync(join(w.dir, `lease-${a.id}.cleared`)), true, 'tombstone');
+    assert.equal(existsSync(join(w.dir, `lease-${a.id}.prog`)), false, 'sidecar removed with the lease');
+    assert.ok(w.lines.some((l) => /RELEASED the lease of pid 4711/.test(l) && /STUCK/.test(l) && /NOT touched/.test(l)), 'one loud line');
+    assert.deepEqual(signals.filter((s) => s !== 0 && s !== undefined), [], 'never a real signal');
+    // a progressing holder is not released even with the policy on
+    const b = await w.acq({ resources: { 'app-e2e': 1 }, label: 'busy job', pid: 4712 });
+    w.t += 300_000;
+    putProg(w, b, { lastAt: w.t - 10_000, sig: { cpu: 0, io: w.t - 10_000, spawn: 0, out: 0 } });
+    assert.equal(sweepLedger({ ...w.opts }).length, 0);
+    assert.equal(w.leases().length, 1);
+    b.release();
+  } finally { process.kill = realKill; w.done(); }
+});
+
+test('release sticks: a released holder\'s next heartbeat does not re-take the lease and logs one line', async () => {
+  const w = stuckWorld({ stuck: { policy: 'release' } });
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'stuck job', pid: 4713 });
+    w.t += 300_000;
+    putProg(w, a);
+    assert.equal(sweepLedger({ ...w.opts }).length, 1);
+    assert.equal(a.disowned, false, 'not yet noticed');
+    a.beat();
+    assert.equal(w.leases().length, 0, 'the lease file is not written back');
+    assert.equal(a.disowned, true);
+    assert.equal(a.trackable, false);
+    const said = () => w.lines.filter((l) => /was released \(by hand or by a rule/.test(l) && /keeps running without it/.test(l));
+    assert.equal(said().length, 1);
+    w.t += 60_000;
+    a.beat(); a.beat();
+    assert.equal(w.leases().length, 0);
+    assert.equal(said().length, 1, 'said once');
+    a.release(); // only tidies
+    assert.equal(w.leases().length, 0);
+  } finally { w.done(); }
+});
+
+test('release sticks for a hand release too: the wrapper timer notices through checkCleared', async () => {
+  const { releaseLease } = await import('../scripts/ci-budget.mjs');
+  const w = stuckWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'by hand job', pid: 4714 });
+    assert.equal(a.checkCleared(), false, 'nothing released yet');
+    assert.equal(releaseLease({ ...w.opts, id: a.id }).ok, true);
+    assert.equal(a.checkCleared(), true);
+    a.beat();
+    assert.equal(w.leases().length, 0);
+    a.release();
   } finally { w.done(); }
 });

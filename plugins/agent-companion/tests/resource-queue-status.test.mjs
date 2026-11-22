@@ -17,8 +17,8 @@ const TOP = ['dir', 'foreign', 'generatedAt', 'legacyLocks', 'machine', 'ok', 'q
 const MACHINE = ['busyCores', 'cores', 'externalCores', 'freeRamMb', 'liveCapacity', 'loaded', 'ramReserveMb', 'totalRamMb'];
 const RESOURCE = ['capacity', 'free', 'held', 'holders', 'name'];
 const HOLDER = [
-  'ageMs', 'alive', 'bound', 'boundPid', 'ceilingMs', 'charged', 'declared', 'expected', 'foreign', 'group', 'hbStale', 'heartbeatAgeMs', 'heartbeatAt', 'id', 'idleFlag', 'idleMs', 'kind', 'label', 'lastActivityAt', 'measured', 'overTime', 'pid', 'project', 'ramMb',
-  'releaseCommand', 'repo', 'session', 'stale', 'startedAt', 'units', 'worktree',
+  'ageMs', 'alive', 'bound', 'boundPid', 'ceilingMs', 'charged', 'declared', 'expected', 'foreign', 'group', 'hbStale', 'heartbeatAgeMs', 'heartbeatAt', 'id', 'idleFlag', 'idleMs', 'kind', 'label', 'lastActivityAt', 'measured', 'overTime', 'pid', 'progress', 'project', 'ramMb',
+  'releaseCommand', 'repo', 'session', 'stale', 'startedAt', 'stuck', 'units', 'worktree',
 ];
 const QUEUE = [
   'alive', 'blockedBy', 'blockedReason', 'createdAt', 'group', 'heartbeatAt', 'id', 'kind', 'label', 'passedOver', 'paused', 'pausedBy', 'pausedUntil', 'pid', 'position', 'project', 'ramMb', 'repo', 'session',

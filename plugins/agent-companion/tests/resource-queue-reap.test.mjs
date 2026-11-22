@@ -262,3 +262,30 @@ test('runUnderQueue runs the tracking timer for a run lease, not when the class 
   const off = await run(false);
   assert.equal(off.calls.track, 0);
 });
+
+// ---------------------------------------------------------------- leg 4b: the I/O column of the process snapshot
+
+test('parseWinJson carries read+write+other transfer bytes as ioBytes, and leaves it off when the row has none', () => {
+  const rows = parseWinJson(JSON.stringify([
+    { p: 5, pp: 1, n: 'worker.exe', e: 'C:\\fake\\worker.exe', c: 'worker.exe', s: '20261121100000.000000+000', w: 2097152, k: 25_000_000, io: 123456 },
+    { p: 6, pp: 1, n: 'other.exe', c: 'other.exe', w: 1048576, k: 10_000 },
+    { p: 7, pp: 1, n: 'zero.exe', c: 'zero.exe', io: 0 },
+  ]));
+  assert.equal(rows[0].ioBytes, 123456);
+  assert.equal(rows[0].cpuMs, 2500);
+  assert.equal('ioBytes' in rows[1], false, 'no counter: not a zero');
+  assert.equal(rows[2].ioBytes, 0);
+});
+
+test('the Windows snapshot asks for the three transfer counters; the rows come back with ioBytes', () => {
+  let script = '';
+  const spawn = (cmd, args) => {
+    script = args[args.length - 1];
+    return { status: 0, stdout: JSON.stringify([{ p: 9, pp: 1, n: 'a.exe', c: 'a.exe', io: 777 }]) };
+  };
+  const rows = processSnapshot({ platform: 'win32', spawn });
+  assert.match(script, /ReadTransferCount/);
+  assert.match(script, /WriteTransferCount/);
+  assert.match(script, /OtherTransferCount/);
+  assert.equal(rows[0].ioBytes, 777);
+});

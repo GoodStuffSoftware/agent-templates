@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { resourceStatus, formatResourceStatus } from '../scripts/ci-budget.mjs';
 import {
   LIVE_DEFAULTS, normalizeLive, percentile, usageKeys, measureOf, sampleUse, makeUseTracker, expectedFor, effectiveBox,
-  appendUsage, usageFile, useFile, readUse,
+  appendUsage, usageFile, useFile, readUse, PROG_DEFAULTS, procIo, sampleProgress, makeProgressTracker, stuckOf,
 } from '../scripts/lib/live-capacity.mjs';
 import { parsePsTime, parsePsOutput, parseWinJson } from '../scripts/lib/reaper.mjs';
 import { makeWorld, baseRules, settle, GB } from './resource-queue-world.mjs';
@@ -456,4 +456,137 @@ test('live off: no sidecar, no history row, no expected values, declared charge,
     if (prev === undefined) delete process.env.CLAUDE_PLUGIN_OPTION_LIVE_CAPACITY; else process.env.CLAUDE_PLUGIN_OPTION_LIVE_CAPACITY = prev;
     e.done();
   }
+});
+
+// ---------------------------------------------------------------- stuck holders (leg 4b): progress sampler and verdict
+
+const pt = (pid, ppid, ct, extra = {}) => ({ pid, ppid, name: 'worker.exe', exe: 'C:\\fake\\worker.exe', cmd: 'worker.exe', creationTime: ct, memMb: 50, ...extra });
+const progTree = (...pids) => ({ procs: pids.map((p) => ({ pid: p, creationTime: p * 10 })) });
+
+test('procIo: Linux rchar + wchar; null elsewhere, on a read failure, or with no counters', () => {
+  const read = () => 'rchar: 100\nwchar: 50\nsyscr: 3\n';
+  assert.equal(procIo(7, { platform: 'linux', read }), 150);
+  assert.equal(procIo(7, { platform: 'darwin', read }), null);
+  assert.equal(procIo(7, { platform: 'win32', read }), null);
+  assert.equal(procIo(7, { platform: 'linux', read: () => { throw new Error('gone'); } }), null);
+  assert.equal(procIo(7, { platform: 'linux', read: () => 'syscr: 3\n' }), null);
+});
+
+test('sampleProgress: the first reading is a baseline; cpu, io and spawn deltas count; the snapshot probe child does not', () => {
+  const tree = progTree(1, 2);
+  const t0 = [pt(1, 9, 10, { cpuMs: 1000, ioBytes: 5000 }), pt(2, 1, 20, { cpuMs: 500, ioBytes: 100 })];
+  const first = sampleProgress(null, tree, t0, 100_000);
+  assert.deepEqual([first.cpu, first.io, first.spawn], [false, false, false]);
+  assert.equal(first.haveCpu, true); assert.equal(first.haveIo, true);
+  // a snapshot child (powershell Get-CimInstance Win32_Process) in the tree this tick: not a spawn, not cpu
+  const probe = { ...pt(3, 1, 100_500), name: 'powershell.exe', cmd: 'powershell -Command Get-CimInstance Win32_Process | ConvertTo-Json', cpuMs: 400, ioBytes: 9000 };
+  const treeP = progTree(1, 2, 3);
+  const quiet = sampleProgress(first, treeP, [pt(1, 9, 10, { cpuMs: 1000, ioBytes: 5000 }), pt(2, 1, 20, { cpuMs: 500, ioBytes: 100 }), probe], 125_000);
+  assert.deepEqual([quiet.cpu, quiet.io, quiet.spawn], [false, false, false], 'nothing moved but the probe');
+  assert.deepEqual(quiet.pids, [1, 2]);
+  // cpu: 1.25 s over 25 s = 5% of a core
+  const busy = sampleProgress(quiet, tree, [pt(1, 9, 10, { cpuMs: 2250, ioBytes: 5000 }), pt(2, 1, 20, { cpuMs: 500, ioBytes: 100 })], 150_000);
+  assert.equal(busy.cpu, true); assert.equal(busy.io, false);
+  // io: 2 KB moved
+  const ioMoved = sampleProgress(busy, tree, [pt(1, 9, 10, { cpuMs: 2250, ioBytes: 7048 }), pt(2, 1, 20, { cpuMs: 500, ioBytes: 100 })], 175_000);
+  assert.equal(ioMoved.io, true); assert.equal(ioMoved.cpu, false);
+  // a pid that appears is a spawn
+  const spawned = sampleProgress(ioMoved, progTree(1, 2, 4), [pt(1, 9, 10, { cpuMs: 2250, ioBytes: 7048 }), pt(2, 1, 20, { cpuMs: 500, ioBytes: 100 }), pt(4, 1, 190_000)], 200_000);
+  assert.equal(spawned.spawn, true);
+});
+
+test('sampleProgress: no cpu column and no io counter reads null; the io reader fills the counters a table lacks', () => {
+  const tree = progTree(1);
+  assert.equal(sampleProgress(null, tree, [pt(1, 9, 10)], 100_000), null);
+  assert.equal(sampleProgress(null, tree, 'nope', 100_000), null);
+  const first = sampleProgress(null, tree, [pt(1, 9, 10, { cpuMs: 10 })], 100_000, { ioOf: () => 1000 });
+  assert.equal(first.haveIo, true);
+  const next = sampleProgress(first, tree, [pt(1, 9, 10, { cpuMs: 10 })], 125_000, { ioOf: () => 9000 });
+  assert.equal(next.io, true);
+});
+
+test('makeProgressTracker: the baseline starts the clock; only cpu, io, spawn or output move it', () => {
+  const tree = progTree(1);
+  const tr = makeProgressTracker(PROG_DEFAULTS);
+  const row = (cpu, io) => [pt(1, 9, 10, { cpuMs: cpu, ioBytes: io })];
+  const a = tr.add(tree, row(0, 0), 100_000);
+  assert.equal(a.lastAt, 100_000); assert.equal(a.n, 1);
+  const b = tr.add(tree, row(0, 0), 125_000);
+  assert.equal(b.lastAt, 100_000, 'a quiet tick does not move it'); assert.equal(b.n, 2);
+  const c = tr.add(tree, row(0, 4096), 150_000);
+  assert.equal(c.lastAt, 150_000); assert.equal(c.sig.io, 150_000); assert.equal(c.sig.cpu, 0);
+  tr.noteOutput(10, 160_000);
+  const d = tr.add(tree, row(0, 4096), 175_000);
+  assert.equal(d.lastAt, 160_000); assert.equal(d.outBytes, 10); assert.equal(d.sig.out, 160_000);
+  assert.equal(tr.add(null, [], 200_000), null);
+});
+
+test('stuckOf: stuck needs all signals silent past the window, a hold past the expected one, and an io or output witness', () => {
+  const rule = { quietMs: 120_000, defaultHoldMs: 240_000 };
+  const now = 1_000_000;
+  const prog = (o = {}) => ({ at: now - 10_000, n: 9, lastAt: now - 300_000, sig: { cpu: 0, io: 0, spawn: 0, out: 0 }, cpuMs: 5000, ioBytes: 70_000, outBytes: 0, ...o });
+  const args = (o = {}) => ({ prog: prog(), startedAt: now - 600_000, maxHoldMs: null, rule, now, ...o });
+  const v = stuckOf(args());
+  assert.equal(v.stuck, true);
+  assert.equal(v.quietMs, 300_000); assert.equal(v.quietLimitMs, 120_000);
+  assert.equal(v.heldMs, 600_000); assert.equal(v.expectedHoldMs, 240_000);
+  assert.deepEqual(v.signals, ['cpu', 'io', 'spawn']);
+  // tree cpu alone: no io counters, no output: never a verdict, however quiet
+  assert.equal(stuckOf(args({ prog: prog({ ioBytes: null }) })).stuck, false);
+  // output is a witness in place of io counters
+  assert.equal(stuckOf(args({ prog: prog({ ioBytes: null, outBytes: 5 }) })).stuck, true);
+  // not past the expected hold (the lease's own limit wins over the default)
+  assert.equal(stuckOf(args({ startedAt: now - 200_000 })).stuck, false);
+  assert.equal(stuckOf(args({ maxHoldMs: 900_000 })).stuck, false);
+  assert.equal(stuckOf(args({ maxHoldMs: 500_000 })).stuck, true);
+  // any signal inside the window clears it: the lease's own latest io, the idle probe seeing activity
+  assert.equal(stuckOf(args({ prog: prog({ lastAt: now - 60_000, sig: { cpu: 0, io: now - 60_000, spawn: 0, out: 0 } }) })).stuck, false);
+  const probed = stuckOf(args({ act: { sampledAt: now - 5_000, activeAt: now - 30_000 } }));
+  assert.equal(probed.stuck, false); assert.equal(probed.by, 'probe');
+  assert.equal(stuckOf(args({ act: { sampledAt: now - 400_000, activeAt: now - 30_000 } })).stuck, true, 'a stale probe sample is ignored');
+  // too few readings, or a record the wrapper stopped refreshing: no verdict at all
+  assert.equal(stuckOf(args({ prog: prog({ n: 1 }) })), null);
+  assert.equal(stuckOf(args({ prog: prog({ at: now - 200_000 }) })), null);
+  assert.equal(stuckOf(args({ prog: null })), null);
+});
+
+test('stuck, end to end through the wrapper tick: a silent worker with io counters reads STUCK in status; any cpu or io tick clears it', async () => {
+  const w = makeWorld({ live: true, rules: { ...baseRules(), rules: [{ id: 'stuck', enabled: true, appliesTo: ['run'], quietMs: 120_000, defaultHoldMs: 240_000 }] } });
+  try {
+    const rt = { cpuMs: 1000, io: 50_000 };
+    rt.reapSeams = {
+      table: () => [proc(WRAPPER, 1, 'node.exe', 1000), proc(CHILD, WRAPPER, 'worker.exe', 2000, { cpuMs: rt.cpuMs, ioBytes: rt.io })],
+      kill: () => ({ ok: true }),
+    };
+    const a = await w.acq({ box: 2, label: 'hung job', pid: WRAPPER, reap: { policy: 'on' }, reapSeams: rt.reapSeams });
+    a.track();
+    for (let i = 0; i < 6; i += 1) { w.t += 25_000; a.track(); }
+    assert.equal(boxHolder(w, 'hung job').stuck, null, '150 s quiet but held under the 240 s expected hold');
+    for (let i = 0; i < 8; i += 1) { w.t += 25_000; a.track(); }
+    const h = boxHolder(w, 'hung job');
+    assert.ok(h.stuck, 'quiet 350 s, held 350 s');
+    assert.ok(h.stuck.quietMs >= 300_000);
+    assert.equal(h.stuck.expectedHoldMs, 240_000);
+    assert.ok(h.stuck.signals.includes('io'));
+    assert.match(formatResourceStatus(resourceStatus({ ...w.opts })), /STUCK \(no progress \d+m on cpu, io: held \d+m > expected 4m; policy flag: kept\)/);
+    w.t += 25_000; rt.io += 8192; a.track(); // the worker reads a file: progress
+    assert.equal(boxHolder(w, 'hung job').stuck, null);
+    for (let i = 0; i < 14; i += 1) { w.t += 25_000; rt.cpuMs += 5000; a.track(); } // busy on cpu, no io
+    assert.equal(boxHolder(w, 'hung job').stuck, null, 'cpu moving is progress');
+    a.release();
+  } finally { w.done(); }
+});
+
+test('stuck: with no io counters (a snapshot without them) tree cpu alone never gives a verdict', async () => {
+  const w = makeWorld({ live: true, rules: { ...baseRules(), rules: [{ id: 'stuck', enabled: true, appliesTo: ['run'], quietMs: 120_000, defaultHoldMs: 240_000 }] } });
+  try {
+    const rt = fakeProcs();
+    const a = await w.acq({ box: 2, label: 'cpu only job', pid: WRAPPER, reap: { policy: 'on' }, reapSeams: rt.reapSeams });
+    a.track();
+    for (let i = 0; i < 20; i += 1) { w.t += 25_000; a.track(); }
+    const h = boxHolder(w, 'cpu only job');
+    assert.equal(h.stuck, null);
+    assert.equal(h.progress.stuck, false);
+    a.release();
+  } finally { w.done(); }
 });
