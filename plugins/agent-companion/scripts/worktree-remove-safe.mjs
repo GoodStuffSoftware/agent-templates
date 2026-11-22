@@ -15,7 +15,7 @@
 // then `git [-C <repo>] worktree remove [--force] <path>` runs with git's own output and exit code.
 // Also correct on macOS and Linux, where a symlinked directory is unlinked the same way.
 
-import { lstatSync, readdirSync, unlinkSync, rmdirSync } from 'node:fs';
+import { lstatSync, readdirSync, unlinkSync, rmdirSync, realpathSync } from 'node:fs';
 import { join, resolve, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -84,12 +84,15 @@ export function findWorktree(arg, { cwd, dir = null, git = 'git' } = {}) {
     if (!wt) continue;
     list.push({ path: wt.slice(9), main: list.length === 0, bare: lines.includes('bare'), locked: lines.some((l) => l === 'locked' || l.startsWith('locked ')) });
   }
-  const want = String(arg).replace(/\\/g, '/').replace(/\/+$/, '');
-  const bySuffix = list.filter((w) => { const p = w.path.replace(/\\/g, '/'); return p === want || p.endsWith(`/${want}`); });
+  const ci = (s) => (process.platform === 'win32' ? s.toLowerCase() : s); // git matches case-insensitively on Windows
+  const want = ci(String(arg).replace(/\\/g, '/').replace(/\/+$/, ''));
+  const bySuffix = list.filter((w) => { const p = ci(w.path.replace(/\\/g, '/')); return p === want || p.endsWith(`/${want}`); });
   if (bySuffix.length === 1) return bySuffix[0];
   if (bySuffix.length > 1) return null;
-  const abs = norm(resolve(dir ? resolve(cwd, dir) : cwd, arg));
-  const byPath = list.filter((w) => norm(w.path) === abs);
+  // git resolves the argument by real path, so a link that points at a worktree finds it too.
+  const real = (p) => { try { return realpathSync(p); } catch { return p; } };
+  const abs = norm(real(resolve(dir ? resolve(cwd, dir) : cwd, arg)));
+  const byPath = list.filter((w) => norm(real(w.path)) === abs);
   return byPath.length === 1 ? byPath[0] : null;
 }
 

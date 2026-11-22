@@ -16,8 +16,8 @@
 //      line (after a leading `cd <dir> &&`) with `node <launcher> run --class <id>
 //      --shell bash -- '<line>'`, which runs the line unchanged in bash.
 //   2. output tail (below): a known long-runner's output goes to a file and only
-//      its tail comes back. It analyzes the ORIGINAL command (what the agent
-//      wrote) and wraps the command step 1 produced, so both survive together.
+//      its tail comes back. It analyzes the command as steps 0 and 1 left it
+//      (the worktree-remove rewrite included) and wraps that, so all survive together.
 //
 // The output tail: send a known long-runner's output to a file and return
 // only its tail (plus the file's path). Rules and the generated shell:

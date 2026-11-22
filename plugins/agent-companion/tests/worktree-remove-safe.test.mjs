@@ -312,6 +312,16 @@ test('decision: a bare worktree name (git resolves it by unique suffix) is rewri
   } finally { s.done(); }
 });
 
+test('script: a worktree named in another letter case is found on Windows (git matches case-insensitively)', { skip: process.platform !== 'win32' }, () => {
+  const s = scene();
+  try {
+    const r = runScript(['-f', 'TREE'], s.repo);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(existsSync(s.tree), false);
+    assert.equal(targetIntact(s), true, 'the link was unlinked before git saw the differently cased name');
+  } finally { s.done(); }
+});
+
 test('script: no link is unlinked when git would refuse (dirty tree, main checkout, not a worktree)', () => {
   const s = scene();
   const plain = join(s.root, 'plain');

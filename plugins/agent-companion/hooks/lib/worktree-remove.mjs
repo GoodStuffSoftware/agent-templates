@@ -185,7 +185,8 @@ function verdict(call, base, seam) {
   const tree = resolve(root, nativePath(call.words.path));
   try {
     const st = lstatSync(tree);
-    if (!st.isDirectory() || st.isSymbolicLink()) return 'none';
+    if (st.isSymbolicLink()) return 'unknown'; // git resolves it by real path: it may point at a worktree
+    if (!st.isDirectory()) return 'none';
   } catch { return 'unknown'; } // not there as typed: git may still resolve it (a unique last path component), so the script decides
   const r = seam(tree);
   return r.links.length || r.truncated ? 'links' : 'none';
