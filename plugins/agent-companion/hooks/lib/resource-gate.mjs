@@ -61,24 +61,96 @@ export function gateDisabledByEnv(env = process.env) {
 
 // ---------------------------------------------------------------- banned commands
 
-// Empty infinite loops (the busy-loop load generators) and kill-by-image-name. Matched on the raw text, so a
-// heredoc that writes a script is caught too.
-const BUSY_LOOP = /for\s*\(\s*;\s*;\s*\)\s*(?:\{\s*\}|;)|while\s*\(\s*(?:true|1)\s*\)\s*(?:\{\s*\}|;)/;
-const KILL_BY_IMAGE = /\btaskkill(?:\.exe)?\b[^\n]*?(?:^|\s)[/-]{1,2}im\b/i;
+// Empty infinite loops (the busy-loop load generators) and kill-by-process-name. The loops are matched on the
+// raw text, so a heredoc that writes a script is caught too; the kills are matched on the scanned command words
+// (first word taskkill, an argument /IM), so a grep, an echo or a commit message that only mentions them is not.
+const SPIN_FOR = /for\s*\(\s*;\s*;\s*\)\s*(?:\{\s*\}|;)/;
+const SPIN_WHILE = /while\s*\(\s*(?:true|1|\$true)\s*\)\s*(\{\s*\}|;)/g;
+const ESCAPE_LEAD = /^\s*(?:[A-Za-z_]\w*=\S*\s+)*AC_ALLOW_BANNED=1(?=\s)|^\s*\$env:AC_ALLOW_BANNED\s*=\s*['"]?1\b/;
+const BANNED_ESCAPE = 'If this is a false positive, put AC_ALLOW_BANNED=1 at the start of the command (PowerShell: $env:AC_ALLOW_BANNED=1; ...).';
 
-/** { rule, text } when the command is banned outright (every gate mode but off, every shell), else null. */
-export function bannedCommand(command) {
+function spinsLoop(c) {
+  if (SPIN_FOR.test(c)) return true;
+  for (const m of c.matchAll(SPIN_WHILE)) {
+    if (m[1] !== ';') return true; // `while (true) {}` can never end a do-while
+    if (!/(?:\}|\bdo)\s*$/.test(c.slice(0, m.index))) return true; // `} while (true);` closes an ordinary do-while
+  }
+  return false;
+}
+
+const PS_NAME_FLAG = /^-n(?:a(?:m(?:e)?)?)?$/i;
+const PS_ID_FLAG = /^-(?:id|inputobject)$/i;
+
+/** True when one segment's words kill by process name (taskkill /IM or /FI IMAGENAME, Stop-Process -Name, pkill, killall, wmic). */
+function killsByName(words, prev) {
+  let w = stripPrefix(words).words;
+  while (w.length && baseName(w[0]) === 'sudo') w = stripPrefix(w.slice(1)).words;
+  if (!w.length) return false;
+  const cmd = baseName(w[0]);
+  const args = w.slice(1);
+  if (cmd === 'taskkill') {
+    if (args.some((a) => /^[/-]{1,2}im$/i.test(a))) return true;
+    const i = args.findIndex((a) => /^[/-]{1,2}fi$/i.test(a));
+    return i >= 0 && /imagename/i.test(args[i + 1] ?? '');
+  }
+  if (cmd === 'stop-process' || cmd === 'spps') {
+    if (args.some((a) => PS_NAME_FLAG.test(a))) return true;
+    // `Get-Process chrome | Stop-Process`: the pipe carries a name, not an id
+    return args.every((a) => isFlag(a) && !PS_ID_FLAG.test(a)) && !!prev && /^(?:get-process|gps)$/.test(baseName(prev[0] ?? '')) && !prev.slice(1).some((a) => PS_ID_FLAG.test(a) || /^\d+$/.test(a));
+  }
+  if (cmd === 'pkill' || cmd === 'killall') return !args.some((a) => /^(?:--help|-h|-V|--version)$/.test(a));
+  if (cmd === 'wmic') {
+    const rest = args.join(' ');
+    return /^process\b/i.test(rest) && /\bname\s*(?:=|like)/i.test(rest) && /\b(?:delete|terminate)\b/i.test(rest);
+  }
+  return false;
+}
+
+function killsByNameIn(text, depth = 0) {
+  let segs;
+  try { segs = scanCommand(text).segments; } catch { return false; }
+  let prev = null;
+  for (const seg of segs) {
+    const words = wordsOf(seg.text);
+    if (killsByName(words, prev)) return true;
+    prev = stripPrefix(words).words;
+    if (depth < MAX_DEPTH && prev.length) { // a shell given a script: look inside, as the classifier does
+      const cmd = baseName(prev[0]);
+      const args = prev.slice(1);
+      let inner = null;
+      if (['bash', 'sh', 'zsh', 'dash', 'ksh'].includes(cmd)) {
+        const i = args.findIndex((a) => /^-[a-z]*c[a-z]*$/i.test(a));
+        if (i >= 0 && args[i + 1] !== undefined) inner = args[i + 1];
+      } else if (cmd === 'cmd') {
+        const i = args.findIndex((a) => /^\/{1,2}[ck]$/i.test(a));
+        if (i >= 0) inner = args.slice(i + 1).join(' ');
+      } else if (cmd === 'powershell' || cmd === 'pwsh') {
+        const i = args.findIndex((a) => /^-(?:c|command)$/i.test(a));
+        if (i >= 0) inner = args.slice(i + 1).join(' ');
+      }
+      if (inner !== null && killsByNameIn(inner, depth + 1)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * { rule, text } when the command is banned outright (every gate mode but off, every shell), else null.
+ * The one way around it is explicit: AC_ALLOW_BANNED=1 in the hook's environment or leading the command.
+ */
+export function bannedCommand(command, env = process.env) {
   const c = String(command ?? '');
-  if (BUSY_LOOP.test(c)) {
+  if (String(env?.AC_ALLOW_BANNED ?? '') === '1' || ESCAPE_LEAD.test(c)) return null;
+  if (spinsLoop(c)) {
     return {
       rule: 'synthetic-load',
-      text: 'Synthetic load is banned on the shared box: an empty infinite loop (for(;;){} or while(true){}) starves every other session. To test load sensitivity, pin your own process to fewer cores instead (ProcessorAffinity), and run it through the machine-wide resource queue.',
+      text: `Synthetic load is banned on the shared box: an empty infinite loop (for(;;){} or while(true){}) starves every other session. To test load sensitivity, pin your own process to fewer cores instead (ProcessorAffinity), and run it through the machine-wide resource queue. ${BANNED_ESCAPE}`,
     };
   }
-  if (KILL_BY_IMAGE.test(c)) {
+  if (killsByNameIn(c)) {
     return {
       rule: 'kill-by-image-name',
-      text: 'taskkill /IM kills every process with that image name on the shared box, including other sessions\' work. Kill by process id instead (taskkill /PID <pid>, or Stop-Process -Id <pid>) after checking the pid is yours.',
+      text: `Killing by process name (taskkill /IM or /FI IMAGENAME, Stop-Process -Name, pkill, killall, wmic ... where name=) kills every process with that name on the shared box, including other sessions' work. Kill by process id instead (taskkill /PID <pid>, or Stop-Process -Id <pid>) after checking the pid is yours. ${BANNED_ESCAPE}`,
     };
   }
   return null;
@@ -441,17 +513,20 @@ function dockerClass(tool, args) {
     if (verbs.length === 2) break;
   }
   const [v0, v1] = verbs;
-  if (tool === 'docker-compose') return v0 === 'up' || v0 === 'build' ? 'build' : null;
+  // `up` stays attached until stopped (a service, not a build) unless it is detached or told to exit.
+  const upBounded = hasAny(a, ['-d', '--detach', '--wait', '--abort-on-container-exit', '--abort-on-container-failure', '--exit-code-from']);
+  if (tool === 'docker-compose') return (v0 === 'up' && upBounded) || v0 === 'build' ? 'build' : null;
   if (v0 === 'build') return 'build';
   if (v0 === 'buildx') return v1 === 'build' || v1 === 'bake' ? 'build' : null;
-  if (v0 === 'compose') return v1 === 'up' || v1 === 'build' ? 'build' : null;
+  if (v0 === 'compose') return (v1 === 'up' && upBounded) || v1 === 'build' ? 'build' : null;
   return null;
 }
 
 function bundlerClass(tool, args) {
   if (hasAny(args, HELP_FLAGS)) return null;
+  if (hasAny(args, ['--watch', '-w'])) return null; // a watcher runs until stopped
   const verb = args.find((a) => !isFlag(a));
-  if (tool === 'webpack') return verb === undefined || verb === 'build' ? (args.includes('serve') || args.includes('--watch') ? null : 'build') : null;
+  if (tool === 'webpack') return verb === undefined || verb === 'build' ? (args.includes('serve') ? null : 'build') : null;
   if (verb === 'build') return 'build';
   if ((tool === 'nuxt' || tool === 'nuxi') && (verb === 'generate' || verb === 'prepare')) return verb === 'generate' ? 'build' : null;
   return null;
@@ -650,7 +725,11 @@ function classifyPackageManager(pm, args, ctx, depth) {
   }
   if (/^(?:build:apk\S*|android\S*|cap:(?:sync|build)\S*)$/.test(script)) return { class: 'gradle' };
   if (/^(?:lint|typecheck|type-check|check)$/.test(script)) return { class: 'lint' };
-  if (/^build(?::(?!watch$|dev$|stub$)[\w-]+)*$/.test(script)) return { class: 'build' };
+  if (/^build(?::(?!watch$|dev$|stub$)[\w-]+)*$/.test(script)) {
+    // `npm run build -- --watch` (or -w after the --) is a watcher; before the -- npm reads -w as a workspace
+    const dd = after.indexOf('--');
+    return hasAny(after, ['--watch']) || (dd >= 0 && hasAny(after.slice(dd + 1), ['-w'])) ? null : { class: 'build' };
+  }
   if (/^test(?::unit|:ci|:coverage)?$/.test(script)) return resolveTestScript(script, after, ctx, depth);
   return null;
 }
@@ -821,7 +900,7 @@ export async function gateDecision(command, { cwd, mode = DEFAULT_GATE_MODE, env
   try {
     if (mode === 'off' || typeof command !== 'string' || !command.trim()) return none;
     // Banned outright, whatever the opt-outs (RESOURCE_QUEUE=0, an inherited lease): they are not about queueing.
-    const banned = bannedCommand(command);
+    const banned = bannedCommand(command, env);
     if (banned) return { action: 'deny', classes: [banned.rule], command: null, text: banned.text, banned: banned.rule };
     if (gateDisabledByEnv(env)) return none;
     if (shell === 'powershell' && /\$env:RESOURCE_QUEUE\s*=\s*['"]?0['"]?/i.test(command)) return none;
