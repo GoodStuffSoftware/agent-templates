@@ -28,7 +28,7 @@ import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from
 import { constants as osConstants } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  acquireResources, inspectLease, resourceStatus, formatResourceStatus, grantsSummary, formatGrantsSummary, sweepLedger, lowerOwnPriority, releaseAll, REENTRY_ENV,
+  acquireResources, inspectLease, resourceStatus, formatResourceStatus, grantsSummary, formatGrantsSummary, sweepLedger, lowerOwnPriority, releaseAll, REENTRY_ENV, reapSettings, reapPlan,
   reserveResource, unreserveResource, holdMine, resumeMine, releaseLease,
 } from './ci-budget.mjs';
 import {
@@ -49,6 +49,7 @@ const USAGE = [
   '       resource-queue.mjs grants [--hours N] [--json]    summary of the grants log: median and p90 wait, share of wait time per limiting resource',
   '       resource-queue.mjs release <lease-id>       release one lease by hand (a hung live holder); the process is not touched',
   '       resource-queue.mjs sweep',
+  '       resource-queue.mjs reap --dry-run [--json]    show which leftover processes of finished leases would be stopped (stops nothing, writes nothing)',
   '       resource-queue.mjs install-launcher',
 ].join('\n');
 
@@ -109,7 +110,8 @@ export function buildRequest({ resources = [], ram = null, cls = null }, rules, 
   const idle = ruleOf(rules, 'idle');
   const lim = limitsFor(rules, { kind: 'run', units: box, resources: named, limits });
   const monitored = Boolean(idle && idle.enabled !== false && (idle.appliesTo ?? ['run']).includes('run') && lim.idleMs);
-  return { box, resources: named, ramMb, limits, class: cls, monitored, probe };
+  const reapTree = klass ? klass.reapTree !== false : true; // per class: reapTree: false opts out of tree tracking
+  return { box, resources: named, ramMb, limits, class: cls, monitored, probe, reapTree };
 }
 
 /** Subtract what an ancestor lease already holds (re-entrancy). Returns the remainder or null when all is covered. */
@@ -316,6 +318,21 @@ export async function runUnderQueue({
     probeTimer.unref?.();
   }
 
+  // Tree tracking (reaper.mjs): a timer of this wrapper, not the heartbeat thread. Each tick takes ONE process
+  // snapshot (slow on Windows), outside any ledger lock, records the lease's tree, then runs the orphan pass.
+  let reapTimer = null;
+  if (lease && !lease.off && !lease.bound && request.reapTree !== false && lease.trackable) {
+    const rc = reapSettings(io.ledger ?? {});
+    const tick = () => {
+      if (lease.released) return;
+      try { lease.track(); } catch { /* best effort */ }
+      reapTimer = setTimeout(tick, rc.trackMs);
+      reapTimer.unref?.();
+    };
+    reapTimer = setTimeout(tick, rc.firstTickMs);
+    reapTimer.unref?.();
+  }
+
   const fwd = (sig) => () => {
     try { child.kill(sig); } catch { /* gone */ }
     if (!abort.timer) {
@@ -334,10 +351,28 @@ export async function runUnderQueue({
     child.on('exit', (c, sig) => done(c ?? (sig ? 128 + signalNumber(sig) : 1)));
   });
   clearInterval(probeTimer);
+  clearTimeout(reapTimer);
   clearTimeout(abort.timer);
   for (const [s, h] of handlers) process.off(s, h);
   if (!lease?.bound) lease?.release();
   return code;
+}
+
+/** Text form of reapPlan(): one line per process that would be stopped, then the spared ones. */
+export function formatReapPlan(plan) {
+  if (!plan.tableOk) return 'reap: the process table could not be read; nothing to show.';
+  const lines = [`reap policy: ${plan.policy}${plan.policy === 'off' ? ' (nothing is stopped while it is off; this is only the plan)' : ''}`];
+  if (!plan.entries.length) { lines.push('nothing to reap: no finished lease has recorded processes left.'); return lines.join('\n'); }
+  for (const e of plan.entries) {
+    if (e.skipped) { lines.push(`lease ${e.id}: its wrapper (pid ${e.rootPid}) is still running; not an orphan, left alone`); continue; }
+    const { targets, spared, stale } = e.plan;
+    if (!targets.length) lines.push(`lease ${e.id}: nothing left to stop (${stale.length} recorded process${stale.length === 1 ? '' : 'es'} already gone)`);
+    for (const t of targets) {
+      lines.push(`would stop pid ${t.pid} ${t.image}${t.memMb != null ? ` (${t.memMb} MB)` : ''}: lease ${e.id}, ${t.how} of the wrapper pid ${e.rootPid}, wrapper not running, creation time matches`);
+    }
+    for (const s of spared) lines.push(`  spared pid ${s.pid} ${s.image}: ${s.why}`);
+  }
+  return lines.join('\n');
 }
 
 function wantsLine(r) {
@@ -525,7 +560,7 @@ export async function cli(argv, io = {}) {
         else if (rest[i] === '--resource') { only = flagValue(rest, i, '--resource'); i += 1; }
         else throw new Error(`unknown option "${rest[i]}"`);
       }
-      let st = resourceStatus({ env, sample, strays: false, ...(io.ledger ?? {}) });
+      let st = resourceStatus({ env, sample, strays: false, reap: true, ...(io.ledger ?? {}) });
       // The text form takes one CPU sample when something is queued, so it can say why the head is blocked
       // (slots wanted vs available, outside load). `--json` stays unsampled unless asked, as before. The
       // stray scan (a process-table read) runs once, in the last call only.
@@ -563,6 +598,18 @@ export async function cli(argv, io = {}) {
     if (cmd === 'sweep') {
       const cleared = sweepLedger({ env, log: err, ...(io.ledger ?? {}) });
       out(cleared.length ? cleared.map((c) => `cleared ${c.type} pid ${c.pid} (${c.why})`).join('\n') : 'nothing to clear');
+      return 0;
+    }
+    if (cmd === 'reap') {
+      let dry = false; let json = false;
+      for (const a of rest) {
+        if (a === '--dry-run') dry = true;
+        else if (a === '--json') json = true;
+        else throw new Error(`unknown option "${a}"`);
+      }
+      if (!dry) throw new Error('reap needs --dry-run: it only shows what would be stopped. To stop leftovers now, run: sweep');
+      const plan = reapPlan({ env, ...(io.ledger ?? {}) });
+      out(json ? JSON.stringify(plan, null, 2) : formatReapPlan(plan));
       return 0;
     }
     if (cmd === 'install-launcher') {

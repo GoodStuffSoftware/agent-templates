@@ -73,6 +73,11 @@ import {
 import {
   BOX, loadRules, capacityOf, claudeHome, ramReserveMb, liveVerdict, liveCeilingMs, appendClear, recentClears, appendGrant, readGrants, summarizeGrants, scanStrays, NAME_RE, processTable,
 } from './lib/resource-rules.mjs';
+import {
+  reapTree, reapOrphans, readTree, writeTree, removeTree, listTrees, recordTree, normalizePolicy, parseNever,
+  processSnapshot, realKill, treeFile, planReap,
+} from './lib/reaper.mjs';
+import { opt } from '../hooks/lib/context.mjs';
 import { join, basename, dirname, resolve } from 'node:path';
 import {
   tmpdir, availableParallelism, cpus, constants as osConstants, getPriority, setPriority, freemem, totalmem,
@@ -299,7 +304,92 @@ const CTX_KEYS = [
   'dir', 'budget', 'heavyCost', 'heavyMax', 'express', 'maxFull', 'pollMs', 'staleMs',
   'heartbeatMs', 'announceMs', 'sampleMs', 'off', 'legacyDir', 'foreignDirs', 'legacyUnits', 'heavyMaxWaitMs',
   'queueMaxWaitMs', 'expressMaxWaitMs', 'reserve', 'loadPct', 'sliceFactor', 'rules', 'session', 'project', 'freemem', 'totalmem', 'delay',
+  'reap', 'reapSeams',
 ];
+
+// ---------------------------------------------------------------- reaping a lease's children (scripts/lib/reaper.mjs)
+//
+// Settings: `ctx.reap` {policy, never, trackMs} when given, else the plugin options reap_policy / reap_never.
+// Seams: `ctx.reapSeams` {table, kill}: table is a function returning process rows (or an array), kill the reaper's
+// kill seam; defaults are the real process snapshot and realKill. Resolved lazily, once per ctx, so a ledger call
+// that never reaps never reads an option. The process snapshot is slow (about 1.2 s on Windows) and is NEVER taken
+// while the admit lock is held: every call below runs after the ledger call that needed the lock has returned.
+const REAP_FIRST_TICK_MS = 3_000;
+const REAP_TICK_MS = 25_000;
+
+/**
+ * Read-only plan for `resource-queue.mjs reap --dry-run`: one snapshot, then for every recorded tree whose lease is
+ * gone what the orphan pass would do. Writes nothing and kills nothing (planReap, never reapTree). Takes no lock.
+ * Returns {policy, dir, tableOk, entries: [{id, rootPid, skipped?: 'wrapper-running', plan?}]}.
+ */
+export function reapPlan(opts = {}) {
+  const ctx = makeCtx({ ...opts, log: () => {}, registerExit: false });
+  const cfg = reapCfg(ctx);
+  const out = { policy: cfg.policy, dir: ctx.dir, tableOk: true, entries: [] };
+  const orphans = listTrees(ctx.dir).filter((t) => t.tree && !existsSync(join(ctx.dir, `lease-${t.id}.json`)));
+  if (!orphans.length) return out;
+  const table = cfg.table();
+  if (!Array.isArray(table)) { out.tableOk = false; return out; }
+  for (const { id, tree } of orphans) {
+    const live = table.find((r) => r.pid === tree.root.pid);
+    if (live && tree.root.creationTime != null && live.creationTime === tree.root.creationTime) {
+      out.entries.push({ id, rootPid: tree.root.pid, skipped: 'wrapper-running' });
+      continue;
+    }
+    out.entries.push({ id, rootPid: tree.root.pid, plan: planReap({ table, tree, selfPid: process.pid, never: cfg.never }) });
+  }
+  return out;
+}
+
+export function reapSettings(o = {}) {
+  let r = o.reap ?? null;
+  if (!r) {
+    r = {};
+    try { r.policy = opt('reap_policy', 'on'); r.never = opt('reap_never', ''); } catch { /* defaults: on, nothing extra */ }
+  }
+  const seam = o.reapSeams?.table;
+  const tableFn = typeof seam === 'function' ? seam : Array.isArray(seam) ? () => seam : () => processSnapshot();
+  return {
+    policy: normalizePolicy(r.policy),
+    never: parseNever(r.never ?? ''),
+    firstTickMs: r.firstTickMs ?? REAP_FIRST_TICK_MS,
+    trackMs: r.trackMs ?? REAP_TICK_MS,
+    table: tableFn,
+    kill: o.reapSeams?.kill ?? realKill,
+  };
+}
+
+function reapCfg(ctx) {
+  if (!ctx._reapCfg) ctx._reapCfg = reapSettings(ctx);
+  return ctx._reapCfg;
+}
+
+function reapLog(ctx, results) {
+  for (const { result } of results) {
+    if (!result) continue;
+    const killed = result.targets.filter((t) => t.ok);
+    if (result.policy === 'on' && killed.length) {
+      ctx.log(`resource-queue: stopped ${killed.length} leftover process${killed.length === 1 ? '' : 'es'} of lease ${result.lease} (${[...new Set(killed.map((t) => t.image))].join(', ')}); logged in reaps.jsonl`);
+    }
+  }
+}
+
+/** The orphan pass: recorded trees whose lease is gone and whose wrapper is not running. `table` reuses a snapshot already taken. */
+function reapOrphanPass(ctx, why, table = null) {
+  try {
+    const cfg = reapCfg(ctx);
+    if (cfg.policy === 'off') return [];
+    const leaseExists = (id) => existsSync(join(ctx.dir, `lease-${id}.json`));
+    if (!listTrees(ctx.dir).some((t) => !leaseExists(t.id))) return []; // nothing orphaned: no process-table read
+    const rows = table ?? cfg.table();
+    if (!Array.isArray(rows)) return [];
+    const out = reapOrphans({
+      dir: ctx.dir, table: rows, leaseExists, selfPid: process.pid, policy: cfg.policy, never: cfg.never, kill: cfg.kill, now: ctx.now(), why,
+    });
+    reapLog(ctx, out);
+    return out;
+  } catch { return []; /* best effort: reaping never fails a ledger call */ }
+}
 
 // Environment config, then explicit options on top, plus the injectable seams.
 function makeCtx(o = {}) {
@@ -1116,7 +1206,9 @@ function createLease(ctx, {
     try { writeFileSync(hbFile, String(ctx.now())); } catch { /* best effort */ }
     if (ctx.now() - lastSweepAt >= 15_000 || ctx.now() < lastSweepAt) { // a heartbeat sweeps too, at most every 15 s
       lastSweepAt = ctx.now();
-      try { readState(ctx, { reclaim: true, cheap: true }); } catch { /* best effort */ }
+      let st = null;
+      try { st = readState(ctx, { reclaim: true, cheap: true }); } catch { /* best effort */ }
+      if (st?.reclaimed.some((r) => r.type === 'lease')) reapOrphanPass(ctx, 'sweep'); // after the sweep, outside any lock
     }
     if (!existsSync(file) && !existsSync(clearedFile)) { // reclaimed while we were frozen (a laptop sleep): put it back
       try { writeFileSync(file, JSON.stringify({ ...rec, heartbeatAt: ctx.now() }), { flag: 'wx' }); } catch { /* raced */ }
@@ -1160,6 +1252,24 @@ function createLease(ctx, {
       // A group's job ending restarts the idle clock of its reservations (survives this process).
       try { touchReservations(ctx, group, Object.keys(resources).concat(units > 0 ? [BOX] : [])); } catch { /* best effort */ }
       heartbeat.stop();
+      reapAtRelease();
+    },
+    /** True when this lease records its process tree and reaps it (a run lease with a wrapper, policy not off). */
+    get trackable() { return !released && bindPid === 0 && kind === 'run' && reapCfg(ctx).policy !== 'off'; },
+    /** Reap tick (called by the wrapper's timer, never by the heartbeat thread): one snapshot, record the tree, then the orphan pass. */
+    track() {
+      if (!lease.trackable) return null;
+      try {
+        const cfg = reapCfg(ctx);
+        const t0 = Date.now();
+        const table = cfg.table();
+        if (!Array.isArray(table)) return null;
+        const costMs = Date.now() - t0;
+        const tree = recordTree(table, ctx.pid, { prev: readTree(ctx.dir, id), now: ctx.now(), costMs });
+        if (tree) writeTree(ctx.dir, id, tree);
+        reapOrphanPass(ctx, 'orphan', table);
+        return tree;
+      } catch { return null; }
     },
     /**
      * Change this lease's size. `spec` is a number (plain units) or
@@ -1291,6 +1401,27 @@ function createLease(ctx, {
       ctx.sleep(ctx.pollMs);
     }
   }
+  // At release (after the files are gone, so no admit lock is held): a fresh snapshot, then the recorded tree's
+  // leftovers are stopped. Only a lease with a tree file does anything, so bound leases and ci-local pay nothing.
+  function reapAtRelease() {
+    try {
+      if (bindPid > 0 || !existsSync(treeFile(ctx.dir, id))) return;
+      const cfg = reapCfg(ctx);
+      if (cfg.policy === 'off') return;
+      const tree = readTree(ctx.dir, id);
+      if (!tree) { removeTree(ctx.dir, id); return; }
+      const table = cfg.table();
+      if (!Array.isArray(table)) return; // unreadable: the tree stays for the orphan pass
+      const result = reapTree({
+        table, tree, selfPid: process.pid, policy: cfg.policy, never: cfg.never, kill: cfg.kill, why: 'release', lease: id, logDir: ctx.dir, now: ctx.now(),
+      });
+      reapLog(ctx, [{ result }]);
+      if (cfg.policy === 'on' ? result.done : !result.targets.length) removeTree(ctx.dir, id);
+      else if (cfg.policy === 'dry-run') writeTree(ctx.dir, id, { ...tree, dryLogged: true }); // logged once; the orphan pass stays quiet
+      reapOrphanPass(ctx, 'orphan', table);
+    } catch { /* best effort */ }
+  }
+
   // A pid-bound lease belongs to the bound pid: this process ending must not release it.
   const unregister = bindPid > 0 ? () => {} : register(ctx, () => lease.release());
   return lease;
@@ -1899,6 +2030,8 @@ export function resourceStatus(opts = {}) {
   try {
     const ctx = makeCtx({ ...opts, log: () => {}, registerExit: false });
     const state = readState(ctx, { reclaim: opts.sweep !== false, cheap: true }); // sweeps expired, dead and over-ceiling entries; no process-table call, no admit lock
+    // The orphan pass takes a process snapshot (slow), so only a caller that asks (the status CLI) pays for it; hooks never do.
+    if (opts.reap === true && opts.sweep !== false) reapOrphanPass(ctx, 'sweep');
     const now = ctx.now();
     const t = totals(ctx, state);
     const held = namedHeld(state);
@@ -2197,7 +2330,9 @@ export function resumeMine(opts = {}) {
 /** Apply the sweep rules to the ledger now (what every acquire does). Returns the cleared entries. */
 export function sweepLedger(opts = {}) {
   const ctx = makeCtx({ ...opts, registerExit: false });
-  return readState(ctx, { reclaim: true }).reclaimed;
+  const reclaimed = readState(ctx, { reclaim: true }).reclaimed;
+  reapOrphanPass(ctx, 'sweep');
+  return reclaimed;
 }
 
 // ---------------------------------------------------------------- CLI

@@ -384,6 +384,18 @@
       "description": "What the spawn guard does with a ladder-rung spawn whose model is right but whose effort is one step above the routing table's rung for its TYPE. \"rewrite\" (default): rewrite it silently to the table's rung (silent_fixes: effort_fit_rewrite). \"warn\": a note only. \"off\": the old two-step threshold. A `Rung: <reason>` line in the brief opts out and keeps the named rung. Default and why (usage audit 2026-11-21): 149 spawns ran one step above the table, about 58-75 extra units.",
       "default": "rewrite"
     },
+    "reap_policy": {
+      "type": "string",
+      "title": "Stop leftover processes of a finished lease",
+      "description": "What the resource queue does with processes a run lease started and left behind when it ended (a test server, a browser, a watcher). \"on\" (default): stop the recorded ones when the lease is released, or when its holder died (found by the sweep), one process at a time, children first, only if pid and creation time still match what was recorded. \"dry-run\": log what would be stopped in reaps.jsonl and stop nothing. \"off\": record and stop nothing. Any other value counts as \"dry-run\". Never stopped, whatever the value: claude, Stream Deck, this process and its ancestors, and anything matched by reap_never. See `resource-queue.mjs reap --dry-run`.",
+      "default": "on"
+    },
+    "reap_never": {
+      "type": "string",
+      "title": "Processes the reaper never stops",
+      "description": "Comma-separated names the reaper must never stop, on top of its built-in list (claude, Stream Deck). Each entry is a case-insensitive substring of the process name, executable path or command line, or a /regex/flags. Empty by default.",
+      "default": ""
+    },
     "lookup_role_policy": {
       "type": "string",
       "title": "Lookup role declared under another TYPE",
