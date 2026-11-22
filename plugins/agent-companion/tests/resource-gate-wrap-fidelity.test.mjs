@@ -133,7 +133,7 @@ test('run --shell bash: only bash, exactly one argument', async () => {
   const io = { err: (l) => errs.push(l), env: { ...process.env, RESOURCE_QUEUE: '0' } };
   assert.equal(await cli(['run', '--resource', 'box:1', '--shell', 'zsh', '--', 'echo x'], io), 2);
   assert.equal(await cli(['run', '--resource', 'box:1', '--shell', 'bash', '--', 'echo', 'x'], io), 2);
-  assert.ok(errs.some((l) => /exactly one argument/.test(l)));
+  assert.ok(errs.some((l) => /exactly one (argument|command line)/.test(l)));
 });
 
 test('run --shell bash: no bash found means the command does not run (no other shell)', async () => {
@@ -170,4 +170,62 @@ test('bashFor: never the System32 or WindowsApps bash (WSL); prefers the usr\\bi
   const have = new Set(['C:\\Tools\\Git\\bin\\bash.exe', 'C:\\Tools\\Git\\usr\\bin\\bash.exe']);
   assert.equal(bashFor(gitEnv, (p) => have.has(p)), 'C:\\Tools\\Git\\usr\\bin\\bash.exe');
   assert.equal(bashFor(gitEnv, (p) => p === 'C:\\Tools\\Git\\bin\\bash.exe'), 'C:\\Tools\\Git\\bin\\bash.exe');
+});
+
+// --- run --shell powershell ------------------------------------------------------------
+
+test('run --shell powershell: a bad shell is still 2; two arguments are refused; an empty line is refused', async () => {
+  const { cli, SHELL_COMMAND_ENV } = await import('../scripts/resource-queue.mjs');
+  const errs = [];
+  const io = { err: (l) => errs.push(l), env: { ...process.env, RESOURCE_QUEUE: '0' } };
+  assert.equal(await cli(['run', '--resource', 'box:1', '--shell', 'pwsh', '--', 'echo x'], io), 2, 'only bash and powershell');
+  assert.equal(await cli(['run', '--resource', 'box:1', '--shell', 'powershell', '--', 'echo', 'x'], io), 2);
+  assert.ok(errs.some((l) => /exactly one command line/.test(l)));
+  assert.equal(await cli(['run', '--resource', 'box:1', '--shell', 'powershell'], { ...io, env: { ...io.env, [SHELL_COMMAND_ENV]: '' } }), 2);
+});
+
+test('run --shell powershell: no PowerShell found means the command does not run', async () => {
+  const { cli } = await import('../scripts/resource-queue.mjs');
+  const errs = []; let spawned = 0;
+  const io = { err: (l) => errs.push(l), env: { ...process.env, RESOURCE_QUEUE: '0', AC_RQ_COMMAND: 'Write-Output hi' }, powershellFor: () => null, spawn: () => { spawned += 1; throw new Error('must not spawn'); } };
+  assert.equal(await cli(['run', '--resource', 'box:1', '--shell', 'powershell'], io), 127);
+  assert.equal(spawned, 0);
+  assert.ok(errs.some((l) => /no PowerShell found/.test(l)));
+});
+
+test('run --shell powershell: the line travels in the environment and runs through the exit-code wrapper', async () => {
+  const { cli, SHELL_COMMAND_ENV, POWERSHELL_WRAPPER } = await import('../scripts/resource-queue.mjs');
+  let seen = null;
+  const line = "Write-Output 'it''s' \"q\"; cd C:\\work";
+  const io = {
+    err: () => {}, env: { ...process.env, RESOURCE_QUEUE: '0', [SHELL_COMMAND_ENV]: line }, powershellFor: () => 'pwsh-fake',
+    spawn: (file, args, opts) => {
+      seen = { file, args, cmd: opts.env[SHELL_COMMAND_ENV] };
+      return spawn(process.execPath, ['-e', 'process.exit(0)'], { windowsHide: true });
+    },
+  };
+  assert.equal(await cli(['run', '--resource', 'box:1', '--shell', 'powershell'], io), 0);
+  assert.equal(seen.file, 'pwsh-fake');
+  assert.deepEqual(seen.args, ['-NoProfile', '-NonInteractive', '-Command', POWERSHELL_WRAPPER]);
+  assert.equal(seen.cmd, line, 'byte for byte');
+  seen = null;
+  assert.equal(await cli(['run', '--resource', 'box:1', '--shell', 'powershell', '--', 'Get-Date'], { ...io, env: { ...io.env, [SHELL_COMMAND_ENV]: 'ignored' } }), 0);
+  assert.equal(seen.cmd, 'Get-Date', 'after -- the argument wins');
+});
+
+const PS_REAL = process.platform === 'win32' && spawnSync('powershell.exe', ['-NoProfile', '-Command', 'exit 0'], { windowsHide: true }).status === 0;
+
+test('run --shell powershell: a real PowerShell keeps the exit code of a native program and of a failing cmdlet', { skip: !PS_REAL && 'powershell.exe unavailable' }, () => {
+  const sb = sandbox();
+  try {
+    const run = (line) => spawnSync(process.execPath, [CLI, 'run', '--resource', 'box:1', '--shell', 'powershell'], {
+      encoding: 'utf8', windowsHide: true, timeout: 90000, env: { ...sb.env, RESOURCE_QUEUE: '0', AC_RQ_COMMAND: line },
+    });
+    const ok = run("Write-Output 'it''s ok'");
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.match(ok.stdout, /it's ok/);
+    const native = run(`& '${process.execPath.replace(/'/g, "''")}' -e "process.exit(7)"`);
+    assert.equal(native.status, 7, native.stderr);
+    assert.equal(run('Get-Item C:\\no-such-dir-zzz -ErrorAction Stop').status, 1);
+  } finally { sb.cleanup(); }
 });

@@ -106,7 +106,8 @@ function finish(command, extra = {}) {
 
 try {
   const p = readStdin();
-  if (p.tool_name !== 'Bash') passthrough();
+  const isPs = p.tool_name === 'PowerShell';
+  if (p.tool_name !== 'Bash' && !isPs) passthrough();
   input = p.tool_input;
   if (!input || typeof input.command !== 'string') passthrough();
   if (isServedCall(p)) passthrough();
@@ -116,10 +117,14 @@ try {
     const mode = gateMode(opt('resource_gate', DEFAULT_GATE_MODE));
     if (mode !== 'off') {
       const permOk = mode === 'rewrite'
-        && modeAllowed(p.permission_mode, opt('resource_gate_permission_modes', 'bypassPermissions'));
+        && modeAllowed(p.permission_mode, opt('resource_gate_permission_modes', 'bypassPermissions'))
+        // Fail closed: nothing documents that the PowerShell tool applies updatedInput, and this hook cannot
+        // tell. Unless the option is on, a PowerShell rewrite becomes a deny that carries the queued command.
+        && (!isPs || opt('resource_gate_powershell_rewrite', false) === true);
       const d = await gateDecision(input.command, {
         cwd: typeof p.cwd === 'string' && p.cwd ? p.cwd : process.cwd(),
         mode,
+        shell: isPs ? 'powershell' : 'bash',
         // Deny and ask rules apply in every mode and are checked against the text
         // that RUNS, so a rewrite is allowed only when no rule could match the
         // original (a rewrite must not step around `Bash(git push:*)`) or the
@@ -127,7 +132,7 @@ try {
         rewriteAllowed: (wrapped) => permOk && !permissionHit(p, input.command) && !permissionHit(p, wrapped),
       });
       if (d.action === 'deny') {
-        gateRow(p, { event: 'denied', mode, classes: d.classes, command_chars: input.command.length });
+        gateRow(p, { event: 'denied', mode, classes: d.classes, tool: p.tool_name, command_chars: input.command.length });
         // The reason carries the wrapped command (tests/resource-gate.test.mjs), so it can be as large as the command.
         writeAndExit(JSON.stringify({
           hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: d.text },
@@ -138,12 +143,15 @@ try {
         gateText = d.text;
       }
       if (d.action === 'rewrite') {
-        gateRow(p, { event: 'rewritten', mode, classes: d.classes, command_chars: input.command.length, run_in_background: Boolean(input.run_in_background) });
+        gateRow(p, { event: 'rewritten', mode, classes: d.classes, tool: p.tool_name, command_chars: input.command.length, run_in_background: Boolean(input.run_in_background) });
         gateCommand = d.command;
         gateText = d.text;
       }
     }
   } catch { /* the gate fails open: the command runs as written */ }
+
+  // The PowerShell tool gets the gate only: the output tail is bash-specific.
+  if (isPs) finish();
 
   // ---- step 2: the output tail -------------------------------------------------
   if (!opt('bash_tail', true)) finish();

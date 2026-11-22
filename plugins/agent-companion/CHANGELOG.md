@@ -2,7 +2,11 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
-## Unreleased (0.31.62, leg 1: queue over-grant; leg 2: backfill, sweep, tombstone; leg 4a: live capacity)
+## Unreleased (0.31.62, leg 1: queue over-grant; leg 2: backfill, sweep, tombstone; leg 3c: gate widened; leg 4a: live capacity)
+
+- **Resource gate widened (leg 3c).** The classifier now also queues `xcodebuild`, `cargo build/test/check/clippy`, `dotnet build/test/publish`, `msbuild`, `go build/test`, `pytest`, `jest`, `mvn`/`mvnw`/`mvnd`, `docker build`/`buildx`/`compose build|up`, `vite`/`quasar`/`nuxt`/`next`/`webpack` build, and npm `build` and e2e scripts. Two new classes: `build` (box 6) and `test-suite` (box 8); a user override file merges classes by id.
+- **PowerShell tool gated.** `bash-tail.mjs` handles both tools (`hooks.json` matcher `^(Bash|PowerShell)$`); `resource-queue.mjs run --shell powershell` runs the wrapped command in PowerShell with the command passed via the environment. Opt out with `$env:RESOURCE_QUEUE = 0`. Rewriting a PowerShell command is off by default (`resource_gate_powershell_rewrite`, boolean, default `false`): the hooks docs do not say PowerShell honours `updatedInput`, so the gate fails closed and denies with the queued command in the reason.
+- **Banned commands.** Empty infinite loops (`while(1){}`, `for(;;){}`) and `taskkill /IM` are refused whatever the resource-gate mode; `RESOURCE_QUEUE=0` does not lift them. For CPU limits on a process use ProcessorAffinity, not a busy loop or a name-wide kill.
 
 - **Backfill behind a blocked head.** A later box ticket may start first when it shares only the box with the head, the head is not blocked on a lane the later ticket also names, and after the grant `budget - held - request >= the head's box need` (and the same for RAM) still holds. Exclusive and named lanes stay strict FIFO. A head passed over 6 times (`ticket-<id>.passed` sidecar; about one box turnover at budget 16) blocks backfill again. Applies to `run` leases; status shows the same verdict.
 - **Sweep on every status and heartbeat call.** `status()` / `resourceStatus()` (and `lease.beat()`, at most every 15 s) now run the sweep in a cheap mode (no process-table call, no admit lock): dead-pid, expired and over-ceiling entries go even when nobody waits (one lease sat 40 h past the 4 h ceiling). A stale-heartbeat lease with a live pid is left to a full sweep. `sweep: false` reads only.
