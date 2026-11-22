@@ -191,6 +191,20 @@ test('flag line: open unanswered flag and hold, silent when answered', () => {
   assert.match(S.flagLine(), /RELEASE HOLD/);
 });
 
+test('flag line during a hold names flags raised later, and is unchanged without any', () => {
+  S.openFlag({ version: '1', flags: [{ name: 'z', value: 1 }], at: T });
+  S.maybeHold({ holdMinutes: 1, at: T + HOUR });
+  const before = S.flagLine();
+  assert.match(before, /RELEASE HOLD/); assert.doesNotMatch(before, /Later checks/);
+  S.openFlag({ version: '1', flags: [{ name: 'z', value: 1 }], at: T + 2 * HOUR });
+  assert.equal(S.flagLine(), before, 'same flags: line unchanged');
+  S.openFlag({ version: '1', flags: [{ name: 'worker-bash-fail', value: 10.7, detail: '10.7 vs limit 7' }], at: T + 3 * HOUR });
+  const after = S.flagLine();
+  assert.match(after, /RELEASE HOLD/);
+  assert.match(after, /Later checks also flagged: worker-bash-fail \(10\.7 vs limit 7\)\./);
+  assert.doesNotMatch(after, /also flagged: z/);
+});
+
 // ---- hooks ----
 function hook(name, payload) {
   return spawnSync(process.execPath, [join(ROOT, 'hooks', name)], { input: JSON.stringify(payload), env: { ...env(), AC_ATTENDED: '1' }, encoding: 'utf8', windowsHide: true, cwd: tmp });

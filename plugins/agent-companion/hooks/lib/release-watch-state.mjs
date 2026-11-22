@@ -213,7 +213,11 @@ export function flagLine() {
   try {
     if (isHoldActive()) {
       const h = readHold();
-      return `[agent-companion] RELEASE HOLD since ${h.since}: ${h.reason}. New agents and heavy jobs are blocked and running workers hand off. Tell the operator now. Only the operator lifts it, by saying "clear hold"; run \`node <plugin>/scripts/release-watch.mjs clear --by operator\` only after they have said so.`;
+      const held = new Set((Array.isArray(h.flags) ? h.flags : []).map((x) => x && x.name));
+      const ff = readFlag();
+      const later = flagIsOpen(ff) ? ff.flags.filter((x) => x && x.name && !held.has(x.name)) : [];
+      const laterTxt = later.length ? ` Later checks also flagged: ${later.map((x) => x.name + (x.detail ? ` (${x.detail})` : '')).join('; ')}.` : '';
+      return `[agent-companion] RELEASE HOLD since ${h.since}: ${h.reason}. New agents and heavy jobs are blocked and running workers hand off. Tell the operator now.${laterTxt} Only the operator lifts it, by saying "clear hold"; run \`node <plugin>/scripts/release-watch.mjs clear --by operator\` only after they have said so.`;
     }
     const f = readFlag();
     if (!flagIsOpen(f) || f.ackedAt) return null;
