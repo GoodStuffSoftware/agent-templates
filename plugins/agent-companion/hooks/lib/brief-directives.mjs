@@ -219,11 +219,12 @@ export function ownBriefText(src) {
 // Did the lead state why it chose this rung (0.31.62)? A `Rung: <why>` or `Rung reason: <why>` line (plain, listed or bold; text
 // required after the colon). The spawn guard's fit rewrites (effort fit, lookup re-route, over-provision) skip such a brief, as the
 // over-provision rewrite already skips a `PREMIUM: <why>` line. The No-Opus-writers rewrite does not (operator policy 2026-11-14).
-const RUNG_REASON_LINE = /^[ \t]*(?:[-*][ \t]+)?(?:\*\*|__)?Rung[ \t]+reason(?:\*\*|__)?[ \t]*:(?:\*\*|__)?[ \t]*[^\s*_`]/im;
+const RUNG_REASON_LINE = /^[ \t]*(?:[-*][ \t]+)?(?:\*\*|__)?Rung[ \t]+reason(?:\*\*|__)?[ \t]*:(?:\*\*|__)?[ \t]*(?:`[^\s`]|[^\s*_`])/im;
 export function rungStated(text, decls = briefDeclarations(text)) {
   try {
     if (decls?.RUNG && String(decls.RUNG.rest || '').replace(/[\s*_`]/g, '')) return true;
-    return RUNG_REASON_LINE.test(ownBriefText(text));
+    // Only lines that can declare: not inside a fence, an indented code block, an HTML comment or a quote.
+    return declarationLines(ownBriefText(text)).some((l) => RUNG_REASON_LINE.test(l));
   } catch { return false; }
 }
 

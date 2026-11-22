@@ -583,7 +583,9 @@ const WIDE_MATCH = [
   ['docker buildx build .', 'build'],
   ['docker compose up -d', 'build'],
   ['docker compose build', 'build'],
-  ['docker-compose up', 'build'],
+  ['docker-compose up -d', 'build'],
+  ['docker compose up --build --detach', 'build'],
+  ['docker compose up --wait', 'build'],
   ['vite build', 'build'],
   ['npx quasar build', 'build'],
   ['nuxt build', 'build'],
@@ -595,6 +597,7 @@ const WIDE_MATCH = [
   ['pnpm build', 'build'],
   ['yarn build:prod', 'build'],
   ['npm run build:web', 'build'],
+  ['npm run build -w web', 'build'], // before any --, npm reads -w as a workspace, not a watcher
   ['npm run e2e', 'e2e'],
   ['npm run e2e:ci', 'e2e'],
   ['pnpm test:e2e:smoke', 'e2e'],
@@ -612,6 +615,9 @@ const WIDE_NEAR_MISS = [
   'docker ps', 'docker images', 'docker run --rm demo', 'docker compose ps', 'docker compose down', 'docker buildx ls', 'docker build --help',
   'vite --help', 'vite', 'vite dev', 'next dev', 'next --version', 'nuxt dev', 'nuxi prepare', 'webpack serve', 'webpack --watch', 'webpack --version',
   'npm run build:watch', 'npm run dev', 'npm run build:stub', 'npm run buildinfo', 'npm run rebuild-docs',
+  // run until stopped: a foreground compose up, a watch flag on any bundler or build script
+  'docker-compose up', 'docker compose up', 'docker compose up --build', 'vite build --watch', 'vite build -w', 'next build --watch', 'nuxt build --watch',
+  'npm run build -- --watch', 'pnpm build --watch', 'yarn build -- -w',
   'npm run e2e:install', 'npm run e2e:report', 'npm run test:e2e:codegen', 'npm run e2e:ui',
   'echo "cargo test"', 'cat Cargo.toml', 'grep -rn "docker build" docs',
 ];
@@ -895,4 +901,52 @@ test('banned: the hook denies for Bash and for PowerShell, even with RESOURCE_QU
     const off = runHook('hooks/bash-tail.mjs', pl('for(;;){}'), { env: env(fx, { CLAUDE_PLUGIN_OPTION_RESOURCE_GATE: 'off' }) });
     assert.equal(off.stdout.trim(), '');
   } finally { fx.cleanup(); }
+});
+
+// --- banned commands: scanned words, wider name forms, explicit escape (0.31.62 fix round) -----------------
+
+test('banned: text that only mentions a ban is not a ban (grep, echo, a commit message, a heredoc body, do-while)', () => {
+  for (const c of [
+    'grep -rn "taskkill /IM" docs', 'echo "run taskkill /IM node.exe later"', 'git commit -m "docs: explain taskkill /IM and pkill"',
+    "cat > notes.txt <<'EOF'\ntaskkill /IM node.exe\npkill -f demo\nEOF",
+    "cat > loop.c <<'EOF'\nint main(void) { do { step(); } while (true);\n}\nEOF",
+    'node -e "do { step() } while (true);"',
+    'pkill --help', 'taskkill /PID 99', 'Stop-Process -Id 99', 'Get-Process -Id 99 | Stop-Process', 'wmic process where processid=99 delete', 'wmic cpu get name',
+  ]) assert.equal(bannedCommand(c), null, c);
+});
+
+test('banned: kill-by-name forms beyond taskkill /IM are refused (Stop-Process -Name, pkill, killall, /FI IMAGENAME, wmic, inside a shell -c)', () => {
+  for (const c of [
+    'Stop-Process -Name demoapp -Force', 'stop-process -n demoapp', 'spps -Name demoapp', 'Get-Process demoapp | Stop-Process', 'gps -Name demoapp | Stop-Process -Force',
+    'pkill -f demoapp', 'pkill demoapp', 'killall demoapp', 'sudo killall -9 demoapp', 'x=1 pkill demoapp',
+    'taskkill /F /FI "IMAGENAME eq demoapp.exe"', 'taskkill /fi "imagename eq demoapp.exe" /f',
+    'wmic process where name="demoapp.exe" delete', 'wmic process where "name like \'demo%\'" call terminate',
+    'powershell -Command "Stop-Process -Name demoapp"', 'bash -c "pkill demoapp"', 'cmd /c taskkill /IM demoapp.exe', 'ls && (cd x; pkill demoapp)',
+  ]) {
+    const b = bannedCommand(c);
+    assert.ok(b, c);
+    assert.equal(b.rule, 'kill-by-image-name', c);
+  }
+});
+
+test('banned: a do-while that ends in while(true); is fine, a spin loop after a block still is not', () => {
+  assert.equal(bannedCommand('do { x() } while (true);'), null);
+  assert.equal(bannedCommand('do { x() }\nwhile (1);'), null);
+  assert.ok(bannedCommand('} while (true) {}'), 'a while with an empty body is never the end of a do-while');
+  assert.ok(bannedCommand('if (a) { b() }\nwhile (true) {}'));
+  assert.ok(bannedCommand('node -e "while(true);"'));
+});
+
+test('banned: AC_ALLOW_BANNED=1 is the explicit way around, from the environment or leading the command, and only that', async () => {
+  assert.equal(bannedCommand('taskkill /IM demoapp.exe', { AC_ALLOW_BANNED: '1' }), null);
+  assert.equal(bannedCommand('for(;;){}', { AC_ALLOW_BANNED: '1' }), null);
+  assert.equal(bannedCommand('AC_ALLOW_BANNED=1 taskkill /IM demoapp.exe /F', {}), null);
+  assert.equal(bannedCommand('FOO=1 AC_ALLOW_BANNED=1 pkill demoapp', {}), null);
+  assert.equal(bannedCommand("$env:AC_ALLOW_BANNED = '1'; Stop-Process -Name demoapp", {}), null);
+  assert.ok(bannedCommand('echo AC_ALLOW_BANNED=1; taskkill /IM demoapp.exe', {}), 'only a leading assignment counts');
+  assert.ok(bannedCommand('taskkill /IM demoapp.exe', { AC_ALLOW_BANNED: '0' }));
+  assert.ok(bannedCommand('taskkill /IM demoapp.exe', {}).text.includes('AC_ALLOW_BANNED=1'), 'the denial names the escape');
+  assert.equal((await dec('AC_ALLOW_BANNED=1 pkill demoapp', { mode: 'deny' })).action, 'none');
+  assert.equal((await dec('pkill demoapp', { mode: 'deny', env: { AC_ALLOW_BANNED: '1' } })).action, 'none');
+  assert.equal((await dec('pkill demoapp', { mode: 'deny' })).banned, 'kill-by-image-name');
 });

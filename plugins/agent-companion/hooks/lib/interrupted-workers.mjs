@@ -21,6 +21,8 @@ export const INTERRUPT_MARKER = '[Request interrupted by user]';
 const MAX_LINES = 8;
 const TAIL_BYTES = 8 * 1024;
 const HANDOFF_TAIL_BYTES = 4 * 1024 * 1024;
+const LEAD_TAIL_BYTES = 4 * 1024 * 1024;
+const MAX_AGE_MS = 24 * 60 * 60 * 1000; // older interrupts are not news
 
 function tail(file, bytes) {
   let fd;
@@ -65,6 +67,22 @@ export function lastHandoffFile(file) {
   return found;
 }
 
+// Ids the lead stopped on purpose: TaskStop tool_use records in the tail of the lead's own transcript. TaskStop leaves the worker's
+// transcript ending in the same interrupt marker, so without this a worker the lead just killed is reported as a surprise.
+export function stoppedTaskIds(leadTranscript) {
+  const ids = new Set();
+  for (const l of tail(leadTranscript, LEAD_TAIL_BYTES).split('\n')) {
+    if (!l.includes('"TaskStop"')) continue;
+    let o;
+    try { o = JSON.parse(l); } catch { continue; }
+    const content = o && o.message && Array.isArray(o.message.content) ? o.message.content : [];
+    for (const c of content) {
+      if (c && c.type === 'tool_use' && c.name === 'TaskStop' && c.input && typeof c.input.task_id === 'string') ids.add(c.input.task_id);
+    }
+  }
+  return ids;
+}
+
 const clean = (s, n) => String(s || '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim().slice(0, n);
 
 function metaOf(file) {
@@ -92,17 +110,23 @@ export function interruptedNotices(p) {
     if (!sid || !tp) return [];
     const dir = join(dirname(tp), basename(tp, '.jsonl'), 'subagents');
     const out = [];
+    const now = Date.now();
+    const stopped = stoppedTaskIds(tp);
     for (const name of readdirSync(dir)) {
       const m = /^agent-([A-Za-z0-9_-]+)\.jsonl$/.exec(name);
       if (!m) continue;
       const file = join(dir, name);
       const meta = metaOf(file);
       if (typeof meta.requestShape === 'string' && meta.requestShape !== 'background') continue;
+      if (stopped.has(m[1])) continue; // the lead stopped it on purpose (TaskStop): not a surprise
       const it = interruptedAt(file);
       if (!it) continue;
-      if (!claimOnce('interrupted-told', sid, m[1])) continue;
       let mtimeMs = 0;
       try { mtimeMs = statSync(file).mtimeMs; } catch { /* ignore */ }
+      const ts = it.at ? Date.parse(it.at) : NaN;
+      const when = Number.isFinite(ts) ? ts : mtimeMs;
+      if (when && now - when > MAX_AGE_MS) continue; // an old interrupt the lead has long since handled
+      if (!claimOnce('interrupted-told', sid, `${m[1]}@${it.at || 'x'}`)) continue; // a resumed worker interrupted again is reported again
       out.push(noticeLine(m[1], meta, it, lastHandoffFile(file), mtimeMs));
     }
     if (out.length > MAX_LINES) return [...out.slice(0, MAX_LINES), `(+${out.length - MAX_LINES} more interrupted workers: ${dir})`];

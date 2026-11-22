@@ -33,7 +33,8 @@ function countLines(file) {
       const n = readSync(fd, buf, 0, buf.length, null);
       if (n <= 0) break;
       if (first) { first = false; if (buf.subarray(0, Math.min(n, 8192)).includes(0)) return null; }
-      for (let i = 0; i < n; i += 1) if (buf[i] === 10) lines += 1;
+      const chunk = buf.subarray(0, n);
+      for (let j = chunk.indexOf(10); j >= 0; j = chunk.indexOf(10, j + 1)) lines += 1; // native scan, not a JS byte loop
       lastByte = buf[n - 1];
     }
     return lastByte === 10 ? lines : lines + 1;
@@ -46,6 +47,7 @@ function capRead(p, cap) {
   const input = p.tool_input;
   if (!input || typeof input !== 'object' || typeof input.file_path !== 'string' || !input.file_path) return null;
   if (input.limit !== undefined && input.limit !== null) return null;
+  if (input.allow_large === true) return null; // the worker asked for the whole file on purpose
   if (input.pages !== undefined && input.pages !== null && input.pages !== '') return null;
   if (SKIP_EXT.has(extname(input.file_path).toLowerCase())) return null;
   const offset = Number.isInteger(input.offset) && input.offset >= 1 ? input.offset : 1;

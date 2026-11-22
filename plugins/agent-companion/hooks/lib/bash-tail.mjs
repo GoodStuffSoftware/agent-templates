@@ -511,7 +511,8 @@ export function readPermissionRules({ cwd, claudeDirPath, projectDir, managedPat
       const list = obj?.permissions?.[kind];
       if (!Array.isArray(list)) continue;
       for (const s of list) {
-        const m = typeof s === 'string' ? /^Bash(?:\(([\s\S]*)\))?$/.exec(s.trim()) : null;
+        // PowerShell(...) rules count too (conservative: a rewrite of a Bash or PowerShell command steps around neither)
+        const m = typeof s === 'string' ? /^(?:Bash|PowerShell)(?:\(([\s\S]*)\))?$/.exec(s.trim()) : null;
         if (m) rules.push({ kind, pattern: (m[1] ?? '').trim(), rule: s, file });
       }
     }
