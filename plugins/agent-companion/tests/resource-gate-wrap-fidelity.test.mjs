@@ -133,7 +133,7 @@ test('run --shell bash: only bash, exactly one argument', async () => {
   const io = { err: (l) => errs.push(l), env: { ...process.env, RESOURCE_QUEUE: '0' } };
   assert.equal(await cli(['run', '--resource', 'box:1', '--shell', 'zsh', '--', 'echo x'], io), 2);
   assert.equal(await cli(['run', '--resource', 'box:1', '--shell', 'bash', '--', 'echo', 'x'], io), 2);
-  assert.ok(errs.some((l) => /exactly one argument/.test(l)));
+  assert.ok(errs.some((l) => /exactly one (argument|command line)/.test(l)));
 });
 
 test('run --shell bash: no bash found means the command does not run (no other shell)', async () => {

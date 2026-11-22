@@ -402,7 +402,7 @@ test('hook: a fixture session does not write result rows into the production str
 
 test('hook: hooks.json registers it on exactly ^Bash$ and plugin.json declares both options', () => {
   const hooks = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks.PreToolUse;
-  const entry = hooks.find((h) => h.matcher === '^Bash$');
+  const entry = hooks.find((h) => h.matcher === '^(Bash|PowerShell)$');
   assert.ok(entry);
   assert.ok(entry.hooks[0].args[0].endsWith('hooks/bash-tail.mjs'));
   const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).userConfig;
