@@ -243,9 +243,13 @@ test('runUnderQueue runs the tracking timer for a run lease, not when the class 
   };
   const run = async (reapTree) => {
     const { calls, lease } = mk();
+    let child = null;
+    const track = lease.track;
+    // The child ends once the timer has ticked twice (or after 5 s): no dependence on how loaded the machine is.
+    lease.track = () => { track(); if (calls.track >= 2) setImmediate(() => child.emit('exit', 0, null)); };
     const io = {
       env: { RESOURCE_QUEUE: '', CI_LOCAL_LOCK: '' }, err: () => {}, acquire: async () => lease,
-      spawn: () => { const c = new EventEmitter(); c.pid = 5; c.kill = () => {}; setTimeout(() => c.emit('exit', 0, null), 120); return c; },
+      spawn: () => { const c = new EventEmitter(); c.pid = 5; c.kill = () => {}; child = c; setTimeout(() => c.emit('exit', 0, null), reapTree ? 5000 : 300); return c; },
       ledger: { reap: { policy: 'on', firstTickMs: 10, trackMs: 20 } },
     };
     const code = await runUnderQueue({ request: { box: 1, resources: {}, ramMb: 0, limits: {}, monitored: false, reapTree }, label: 't', cmd: ['node', '-e', '0'] }, io);
