@@ -64,7 +64,7 @@ try {
     if (fromDef) ttl = fromDef;
   }
   const idleMs = Date.now() - last.ts;
-  // Post-release hold: a message that restarts an idle worker is a new spawn; a running worker can still be told to hand off.
+  // Post-release hold: a message that restarts an idle worker is a new spawn; the 2-min cut-off is a heuristic: a worker silent for longer inside one long Bash call is treated as idle (refused here, and denied at its next tool call anyway), and one idle for less can be resumed but has every tool call denied, so it can only hand off. a running worker can still be told to hand off.
   if (held && idleMs > 120000) { try { recordDenial('resume-guard', p, 'release hold'); } catch { /* telemetry */ } deny(held); }
   if (!(idleMs > TTL_MS[ttl])) passthrough(); // still warm (or clock skew): nothing to say
 

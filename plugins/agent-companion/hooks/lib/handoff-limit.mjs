@@ -85,7 +85,8 @@ export function denyText(ctx, hard, variant = 'writer', why = null, held = false
     : `[agent-companion] Context at ${kTokens(ctx)} is past the hard limit of ${kTokens(hard)}: this call is blocked, and so is every call except the handoff. `
     + (why ? `Bash and PowerShell allow only plain git add/commit/push/status/diff/log (no pipe, redirect, backtick, $(...) or other command, and only the listed options); this command was refused: ${why}. ` : '');
   if (variant === 'readonly') {
-    return `${head}Write what you have to a file with "handoff" in its name next to your detail file (<task>-handoff.md), or put it in your final reply, then end with "${HANDOFF_RETURN}". Allowed: Write, Edit or Read of a .md file whose name contains "handoff". Everything else, including starting agents, stays blocked.`;
+    return `${head}Write what you have to a file with "handoff" in its name next to your detail file (<task>-handoff.md), or put it in your final reply, then end with "${HANDOFF_RETURN}". Allowed: Write, Edit or Read of a .md file whose name contains "handoff". Everything else, including starting agents, stays blocked.`
+    + (held ? ' If a push is refused because a pre-push gate runs through the shared queue (it is held too), commit, write the handoff file and say the push is pending.' : '');
   }
   return `${head}Finish: commit and push any work in progress to your branch (git add, commit, push, status, diff and log are allowed), write a handoff file <task>-handoff.md next to your detail file (${HANDOFF_FIELDS}; Write, Edit and Read of a .md file whose name contains "handoff" are allowed), then end with "${HANDOFF_RETURN}". Everything else, including starting agents, stays blocked.`;
 }
@@ -372,5 +373,5 @@ export function hardCheck(p, sig, cfg) {
   const why = refusal(p);
   if (why === null) return null;
   const bash = p.tool_name === 'Bash' || p.tool_name === 'PowerShell';
-  return { row: handoffRow(p, sig || {}, held ? 'hold' : 'hard', 'deny', held ? 0 : cfg.hard), why: bash ? why : null, held };
+  return { row: handoffRow(p, sig || {}, held ? 'hold' : 'hard' /* N6: row limit 'hold' stands for the spec's reason release-hold; the hold is not tied to a version, only the operator's clear lifts it */, 'deny', held ? 0 : cfg.hard), why: bash ? why : null, held };
 }

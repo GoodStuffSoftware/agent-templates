@@ -216,5 +216,129 @@ test('hooks: SessionStart shows the line to a lead, not to a subagent', () => {
   assert.doesNotMatch(sub.stdout, /RELEASE WATCH/);
 });
 
+// ---- 0.31.63 fix round: one test per fix, invented data ----
+const rowj = (o) => JSON.stringify(o) + '\n';
+const DAY = 24 * HOUR;
+const putRows = (name, rows, dir = 'telemetry') => { const d = join(state, dir); mkdirSync(d, { recursive: true }); writeFileSync(join(d, name), rows.map(rowj).join('')); };
+const spread = (n, from, to, mk) => Array.from({ length: n }, (_, i) => mk(from + ((to - from) * (i + 0.5)) / n, i));
+
+test('B1: queue-clears counts failure clears only and judges them against the 7-day baseline', () => {
+  assert.equal(W.isFailureClear({ rule: 'pid-dead', type: 'lease', label: 'build' }), true);
+  assert.equal(W.isFailureClear({ rule: 'requester-gone', type: 'waiting' }), false, 'a waiting ticket whose requester left is routine');
+  assert.equal(W.isFailureClear({ rule: 'pid-dead', type: 'lease', label: 'node --test tests/demo.test.mjs' }), false, 'test-run labels are not failures');
+  assert.equal(W.isFailureClear({ rule: 'pid-dead', type: 'lease', label: 'x', worktree: 'D:\\scratch\\temp\\wt-1' }), false);
+  assert.equal(W.isFailureClear({ rule: 'idle', type: 'lease' }), false);
+  const clears = [...spread(14, T - 7 * DAY, T, (at) => ({ at, rule: 'pid-dead', type: 'lease', label: 'build' })),
+    ...spread(60, T, T + 4 * HOUR, (at) => ({ at, rule: 'requester-gone', type: 'waiting' })),
+    ...spread(20, T, T + 4 * HOUR, (at) => ({ at, rule: 'pid-dead', type: 'lease', label: 'node --test a.test.mjs' }))];
+  putRows('clears.jsonl', clears, 'ci-budget');
+  const m = W.analyze({ T, nowMs: T + 4 * HOUR });
+  assert.equal(m.queueClears.since, 0); assert.equal(m.queueClears.base, 14);
+  assert.ok(!names(m).includes('queue-clears'));
+  // A few failure clears at about the baseline pace do not flag; a burst well over twice the pooled rate does.
+  const mk = (n, h) => metrics({ span: { since: h, base: 168 }, queueClears: { since: n, base: 14, perHour: { since: n / h, base: 0.083 } } });
+  assert.ok(!names(mk(3, 40)).includes('queue-clears'));
+  assert.ok(!names(mk(6, 24)).includes('queue-clears'), 'a handful of interrupted runs in a day is routine development');
+  assert.ok(names(mk(12, 1)).includes('queue-clears'));
+  // the context ceiling is judged against how often the baseline workers already went over it
+  const mc = (since, base) => { const m = metrics(); m.workers.since.over150kPct = since; m.workers.base.over150kPct = base; return names(m); };
+  assert.ok(!mc(6.5, 22.4).includes('context-over-150k')); assert.ok(mc(40, 22.4).includes('context-over-150k')); assert.ok(mc(8, 0).includes('context-over-150k'));
+});
+
+test('B2: the hold\'s own denials and rows logged during a hold never count', () => {
+  S.appendRow({ at: new Date(T + 2.5 * HOUR).toISOString(), event: 'hold', flags: ['x'] });
+  S.appendRow({ at: new Date(T + 3 * HOUR).toISOString(), event: 'clear' });
+  putRows('spawns.jsonl', [{ at: T + 1 * HOUR }, { at: T + 2.7 * HOUR }, { at: T + 3 * HOUR + 2 * 60e3 }, { at: T + 3.5 * HOUR }]);
+  putRows('denials.jsonl', [...spread(40, T + 2.5 * HOUR, T + 3 * HOUR, (at) => ({ at, guard: 'spawn-guard', outcome: 'deny' })), { at: T + 3.2 * HOUR, guard: 'spawn-guard', outcome: 'deny' }]);
+  const m = W.analyze({ T, nowMs: T + 4 * HOUR });
+  assert.equal(m.spawns.since, 2, 'spawns inside the hold and its 5 min grace are dropped');
+  assert.equal(m.telemetry['denial:spawn-guard/deny'].since, 1);
+  assert.equal(S.holdIntervals(T + 4 * HOUR).length, 1);
+});
+
+test('B3: per-window rates; answered flag quiet unless its rate more than doubles; repeat of an unanswered flag keeps the countdown', () => {
+  // tick hands each check its own window and a baseline that never moves
+  const seen = []; const run = (o) => { seen.push(o); return null; };
+  W.tick({ at: T + HOUR, installed: installed(), run, holdMinutes: 30 });
+  W.tick({ at: T + 2 * HOUR, installed: installed(), run, holdMinutes: 30 });
+  assert.equal(seen[0].winFrom, T); assert.equal(seen[1].winFrom, T + HOUR); assert.equal(seen[1].T, T);
+  putRows('spawns.jsonl', [{ at: T - 6 * DAY }, { at: T - 8 * DAY }, { at: T + 90 * 60e3 }]);
+  const m = W.analyze({ T, nowMs: T + 2 * HOUR, winFrom: T + HOUR });
+  assert.equal(m.spawns.base, 1, 'baseline is the 7 days before T'); assert.equal(m.spawns.since, 1);
+  // answered: same level stays quiet, up to 2x stays quiet, over 2x comes back
+  const fl = (level) => [{ name: 'queue-clears', value: level, level, detail: 'x' }];
+  const a = new Date(T).toISOString();
+  assert.ok(S.openFlag({ version: '1', T: a, check: '+1h', flags: fl(3), at: T }));
+  assert.ok(S.noteReply(T + 60e3));
+  assert.equal(S.openFlag({ version: '1', T: a, check: '+2h', flags: fl(3), at: T + HOUR }), null);
+  assert.equal(S.openFlag({ version: '1', T: a, check: '+4h', flags: fl(5.5), at: T + 4 * HOUR }), null);
+  assert.ok(S.openFlag({ version: '1', T: a, check: '+8h', flags: fl(7), at: T + 8 * HOUR }), 'more than doubled');
+  assert.equal(S.readFlag().ackedAt, null, 'worse than answered: unanswered again');
+  // unanswered repeat does not restart the countdown
+  rmSync(file('release-watch-flag.json'), { force: true });
+  S.openFlag({ version: '1', T: a, check: '+1h', flags: fl(3), at: T });
+  const n0 = S.readFlag().notifiedAt;
+  S.openFlag({ version: '1', T: a, check: '+2h', flags: fl(3.5), at: T + 20 * 60e3 });
+  assert.equal(S.readFlag().notifiedAt, n0);
+  assert.ok(S.maybeHold({ holdMinutes: 30, at: T + 31 * 60e3 }), 'countdown ran from the first notice');
+});
+
+test('refusal text carries no clear command; clear() leaves the hold off even when the delete fails', () => {
+  S.writeJson(S.paths().hold, { since: new Date(T).toISOString(), version: '1', reason: 'r', flags: [{ name: 'a' }], clearedAt: null });
+  const msg = S.holdDenyMessage('new work');
+  assert.match(msg, /clear hold/); assert.doesNotMatch(msg, /release-watch|--by|node /);
+  S.openFlag({ version: '1', T: new Date(T).toISOString(), check: '+1h', flags: flag, at: T });
+  const h = S.readHold();
+  const r = S.clear({ by: 'operator', at: T + HOUR });
+  assert.equal(r.holdCleared, true);
+  // Simulate a failed delete: the cleared file is still on disk.
+  S.writeJson(S.paths().hold, { ...h, clearedAt: new Date(T + HOUR).toISOString() });
+  assert.equal(S.isHoldActive(), false);
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 3 * HOUR }), null, 'a clear newer than the notice never re-holds');
+});
+
+test('new guard keys flag on rate, not presence', () => {
+  assert.deepEqual(names(metrics({ telemetry: { 'denial:fresh/deny': t(5, 0, 3, null) } })), []);
+  assert.deepEqual(names(metrics({ telemetry: { 'denial:fresh/deny': t(2, 0, 40, null) } })), []);
+  assert.ok(names(metrics({ telemetry: { 'denial:fresh/deny': t(5, 0, 12, null) } })).includes('guard:fresh/deny'));
+});
+
+// ---- replay: install, checks at +1,2,4,8,12,16,20,24 h ----
+function seedRoutine(upTo, extraDenials = []) {
+  putRows('spawns.jsonl', [...spread(1176, T - 7 * DAY, T, (at) => ({ at })), ...spread(Math.round(5 * upTo / HOUR), T, T + upTo, (at) => ({ at }))]);
+  putRows('denials.jsonl', [...spread(20, T - 7 * DAY, T, (at) => ({ at, guard: 'demo-guard', outcome: 'deny' })), ...spread(Math.round(upTo / HOUR / 2), T, T + upTo, (at) => ({ at, guard: 'demo-guard', outcome: 'deny' })), ...extraDenials]);
+  putRows('clears.jsonl', [...spread(14, T - 7 * DAY, T, (at) => ({ at, rule: 'pid-dead', type: 'lease', label: 'build' })),
+    ...spread(Math.round(upTo / HOUR), T, T + upTo, (at) => ({ at, rule: 'requester-gone', type: 'waiting' })),
+    ...spread(Math.round(upTo / HOUR / 2), T, T + upTo, (at) => ({ at, rule: 'pid-dead', type: 'lease', label: 'node --test x.test.mjs' }))], 'ci-budget');
+}
+const CHECKS = [1, 2, 4, 8, 12, 16, 20, 24];
+
+test('replay: routine queue activity and the hold\'s own denials over 24 h never start a hold', () => {
+  // A hold the operator lifted at +3h: its denials (40, over +2.5h..+3h) fall in the +4h window.
+  S.appendRow({ at: new Date(T + 2.5 * HOUR).toISOString(), event: 'hold', flags: ['x'] });
+  S.appendRow({ at: new Date(T + 3 * HOUR).toISOString(), event: 'clear' });
+  seedRoutine(24 * HOUR, spread(40, T + 2.5 * HOUR, T + 3 * HOUR, (at) => ({ at, guard: 'spawn-guard', outcome: 'deny' })));
+  for (const h of CHECKS) {
+    const r = W.tick({ at: T + h * HOUR, installed: installed(), holdMinutes: 30 });
+    assert.deepEqual(r.flagged, [], `+${h}h flags: ${r.flagged}`);
+    assert.equal(r.held, false);
+    assert.equal(W.tick({ at: T + h * HOUR + 31 * 60e3, installed: installed(), holdMinutes: 30 }).held, false);
+  }
+  assert.equal(S.isHoldActive(), false);
+  assert.equal(S.flagIsOpen(), false);
+});
+
+test('replay: a real spike in the same replay still flags and holds', () => {
+  seedRoutine(8 * HOUR, spread(40, T + 5 * HOUR, T + 7 * HOUR, (at) => ({ at, guard: 'demo-guard', outcome: 'deny' })));
+  const extra = spread(40, T + 5 * HOUR, T + 7 * HOUR, (at) => ({ at, rule: 'pid-dead', type: 'lease', label: 'build' }));
+  const cf = join(state, 'ci-budget', 'clears.jsonl'); writeFileSync(cf, readFileSync(cf, 'utf8') + extra.map(rowj).join(''));
+  for (const h of [1, 2, 4]) assert.deepEqual(W.tick({ at: T + h * HOUR, installed: installed(), holdMinutes: 30 }).flagged, []);
+  const r = W.tick({ at: T + 8 * HOUR, installed: installed(), holdMinutes: 30 });
+  assert.ok(r.flagged.includes('queue-clears'), String(r.flagged)); assert.ok(r.flagged.includes('guard:demo-guard/deny'), String(r.flagged));
+  assert.equal(r.held, false);
+  assert.equal(W.tick({ at: T + 8 * HOUR + 31 * 60e3, installed: installed(), holdMinutes: 30 }).held, true);
+  assert.equal(S.isHoldActive(), true);
+});
+
 test('cleanup', () => { rmSync(tmp, { recursive: true, force: true }); });
 void tel;

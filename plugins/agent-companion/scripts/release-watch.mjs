@@ -192,7 +192,7 @@ export const TH = {
   minSpawns: 10, minWorkers: 10, guardFactor: 2, guardMinN: 10, newGuardMin: 3,
   rewritePer100: 3, hookErrorPp: 15, newSigWorkers: 5, over150Pct: 5, handoffHardPer100: 2, handoffEndBlockPer100: 10,
   noStatusPct: 15, noStatusMinFinished: 30, noStatusPp: 10, partialPct: 35, blockedPct: 6, finMin: 10,
-  bashFailPct: 7, bashMinN: 20, gateDeniedPer100: 20, clearsFactor: 2, clearsMin: 3, apiWorkers: 3, newGuardPer100: 10,
+  bashFailPct: 7, bashMinN: 20, gateDeniedPer100: 20, clearsFactor: 2, clearsMin: 10, apiWorkers: 3, newGuardPer100: 10,
   struggle100: 2, unitsFactor: 1.5, unitsAbs: 1.9, pollDeny100: 18,
 };
 const REWRITE_GUARDS = new Set(['fit', 'inherit', 'type-required', 'routing-autofix']);
@@ -247,7 +247,7 @@ export function evaluate(m, opts = {}) {
   if (wEnough) {
     if (ws.hookErrorWorkersPct != null && wb.hookErrorWorkersPct != null && ws.hookErrorWorkersPct - wb.hookErrorWorkersPct >= TH.hookErrorPp) f('hook-error-share', ws.hookErrorWorkersPct, wb.hookErrorWorkersPct + TH.hookErrorPp, `vs ${wb.hookErrorWorkersPct}% before`);
     for (const [sg, n] of Object.entries(m.hookSignatures.since)) if (n >= TH.newSigWorkers && !m.hookSignatures.base[sg]) f(`hook-signature:${sg}`, n, TH.newSigWorkers, 'new hook-error signature', +(n / spanH).toFixed(3));
-    if (ws.over150kPct > TH.over150Pct) f('context-over-150k', ws.over150kPct, TH.over150Pct, `p90 ${ws.peakCtxP90}`);
+    { const lim150 = Math.max(TH.over150Pct, wb.n >= TH.minWorkers ? 1.5 * (wb.over150kPct || 0) : 0); if (ws.over150kPct > lim150) f('context-over-150k', ws.over150kPct, +lim150.toFixed(1), `p90 ${ws.peakCtxP90}, baseline ${wb.over150kPct}%`); }
     if (ws.finished >= TH.noStatusMinFinished && (ws.noStatusPct > TH.noStatusPct || (wb.noStatusPct != null && ws.noStatusPct - wb.noStatusPct > TH.noStatusPp))) f('no-final-status', ws.noStatusPct, TH.noStatusPct, `vs ${wb.noStatusPct}% before`);
     if (ws.finished >= TH.finMin && ws.partialPct > TH.partialPct) f('partial-share', ws.partialPct, TH.partialPct);
     if (ws.finished >= TH.finMin && ws.blockedPct > TH.blockedPct) f('blocked-share', ws.blockedPct, TH.blockedPct);
