@@ -23,6 +23,11 @@
 //     ci-local) passes through: it holds its own lease.
 // Rule of the rewrite: the whole command line goes into the queue unchanged (see
 // rewriteCommand), never one segment of it.
+// The PowerShell tool goes through the same classifier (shell 'powershell': backticks and backslashes
+// blanked for the scan, `$env:RESOURCE_QUEUE = 0` opts out) and is rewritten into
+// `$env:AC_RQ_COMMAND = '<line>'; node <launcher> run --class <id> --label <id> --shell powershell`
+// (the line travels in the environment: a Windows PowerShell 5.1 argument loses its double quotes).
+// bannedCommand() is separate from the heaviness classes: synthetic load and kill-by-image-name are denied outright.
 // Everything fails open: any error here means "not heavy".
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -52,6 +57,103 @@ export function gateDisabledByEnv(env = process.env) {
   if (String(env.RESOURCE_QUEUE ?? '') === '0') return true;
   if (env.AC_RESOURCE_LEASE) return true;
   return false;
+}
+
+// ---------------------------------------------------------------- banned commands
+
+// Empty infinite loops (the busy-loop load generators) and kill-by-process-name. The loops are matched on the
+// raw text, so a heredoc that writes a script is caught too; the kills are matched on the scanned command words
+// (first word taskkill, an argument /IM), so a grep, an echo or a commit message that only mentions them is not.
+const SPIN_FOR = /for\s*\(\s*;\s*;\s*\)\s*(?:\{\s*\}|;)/;
+const SPIN_WHILE = /while\s*\(\s*(?:true|1|\$true)\s*\)\s*(\{\s*\}|;)/g;
+const ESCAPE_LEAD = /^\s*(?:[A-Za-z_]\w*=\S*\s+)*AC_ALLOW_BANNED=1(?=\s)|^\s*\$env:AC_ALLOW_BANNED\s*=\s*['"]?1\b/;
+const BANNED_ESCAPE = 'If this is a false positive, put AC_ALLOW_BANNED=1 at the start of the command (PowerShell: $env:AC_ALLOW_BANNED=1; ...).';
+
+function spinsLoop(c) {
+  if (SPIN_FOR.test(c)) return true;
+  for (const m of c.matchAll(SPIN_WHILE)) {
+    if (m[1] !== ';') return true; // `while (true) {}` can never end a do-while
+    if (!/(?:\}|\bdo)\s*$/.test(c.slice(0, m.index))) return true; // `} while (true);` closes an ordinary do-while
+  }
+  return false;
+}
+
+const PS_NAME_FLAG = /^-n(?:a(?:m(?:e)?)?)?$/i;
+const PS_ID_FLAG = /^-(?:id|inputobject)$/i;
+
+/** True when one segment's words kill by process name (taskkill /IM or /FI IMAGENAME, Stop-Process -Name, pkill, killall, wmic). */
+function killsByName(words, prev) {
+  let w = stripPrefix(words).words;
+  while (w.length && baseName(w[0]) === 'sudo') w = stripPrefix(w.slice(1)).words;
+  if (!w.length) return false;
+  const cmd = baseName(w[0]);
+  const args = w.slice(1);
+  if (cmd === 'taskkill') {
+    if (args.some((a) => /^[/-]{1,2}im$/i.test(a))) return true;
+    const i = args.findIndex((a) => /^[/-]{1,2}fi$/i.test(a));
+    return i >= 0 && /imagename/i.test(args[i + 1] ?? '');
+  }
+  if (cmd === 'stop-process' || cmd === 'spps') {
+    if (args.some((a) => PS_NAME_FLAG.test(a))) return true;
+    // `Get-Process chrome | Stop-Process`: the pipe carries a name, not an id
+    return args.every((a) => isFlag(a) && !PS_ID_FLAG.test(a)) && !!prev && /^(?:get-process|gps)$/.test(baseName(prev[0] ?? '')) && !prev.slice(1).some((a) => PS_ID_FLAG.test(a) || /^\d+$/.test(a));
+  }
+  if (cmd === 'pkill' || cmd === 'killall') return !args.some((a) => /^(?:--help|-h|-V|--version)$/.test(a));
+  if (cmd === 'wmic') {
+    const rest = args.join(' ');
+    return /^process\b/i.test(rest) && /\bname\s*(?:=|like)/i.test(rest) && /\b(?:delete|terminate)\b/i.test(rest);
+  }
+  return false;
+}
+
+function killsByNameIn(text, depth = 0) {
+  let segs;
+  try { segs = scanCommand(text).segments; } catch { return false; }
+  let prev = null;
+  for (const seg of segs) {
+    const words = wordsOf(seg.text);
+    if (killsByName(words, prev)) return true;
+    prev = stripPrefix(words).words;
+    if (depth < MAX_DEPTH && prev.length) { // a shell given a script: look inside, as the classifier does
+      const cmd = baseName(prev[0]);
+      const args = prev.slice(1);
+      let inner = null;
+      if (['bash', 'sh', 'zsh', 'dash', 'ksh'].includes(cmd)) {
+        const i = args.findIndex((a) => /^-[a-z]*c[a-z]*$/i.test(a));
+        if (i >= 0 && args[i + 1] !== undefined) inner = args[i + 1];
+      } else if (cmd === 'cmd') {
+        const i = args.findIndex((a) => /^\/{1,2}[ck]$/i.test(a));
+        if (i >= 0) inner = args.slice(i + 1).join(' ');
+      } else if (cmd === 'powershell' || cmd === 'pwsh') {
+        const i = args.findIndex((a) => /^-(?:c|command)$/i.test(a));
+        if (i >= 0) inner = args.slice(i + 1).join(' ');
+      }
+      if (inner !== null && killsByNameIn(inner, depth + 1)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * { rule, text } when the command is banned outright (every gate mode but off, every shell), else null.
+ * The one way around it is explicit: AC_ALLOW_BANNED=1 in the hook's environment or leading the command.
+ */
+export function bannedCommand(command, env = process.env) {
+  const c = String(command ?? '');
+  if (String(env?.AC_ALLOW_BANNED ?? '') === '1' || ESCAPE_LEAD.test(c)) return null;
+  if (spinsLoop(c)) {
+    return {
+      rule: 'synthetic-load',
+      text: `Synthetic load is banned on the shared box: an empty infinite loop (for(;;){} or while(true){}) starves every other session. To test load sensitivity, pin your own process to fewer cores instead (ProcessorAffinity), and run it through the machine-wide resource queue. ${BANNED_ESCAPE}`,
+    };
+  }
+  if (killsByNameIn(c)) {
+    return {
+      rule: 'kill-by-image-name',
+      text: `Killing by process name (taskkill /IM or /FI IMAGENAME, Stop-Process -Name, pkill, killall, wmic ... where name=) kills every process with that name on the shared box, including other sessions' work. Kill by process id instead (taskkill /PID <pid>, or Stop-Process -Id <pid>) after checking the pid is yours. ${BANNED_ESCAPE}`,
+    };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------- lexing
@@ -353,6 +455,83 @@ function gradleClass(args) {
   return 'gradle';
 }
 
+const HELP_FLAGS = ['--help', '-h', '--version', '-v', '-V', '-version', '-help', '-?'];
+
+/** mvn / mvnw / mvnd: any goal is a build; version and help are not. */
+function mavenClass(args) {
+  if (hasAny(args, HELP_FLAGS)) return null;
+  return args.some((a) => !isFlag(a)) ? 'gradle' : null;
+}
+
+function cargoClass(args) {
+  if (hasAny(args, HELP_FLAGS)) return null;
+  const verb = args.find((a) => !isFlag(a) && !a.startsWith('+'));
+  if (verb === 'test' || verb === 't' || verb === 'nextest') return 'test-suite';
+  if (['build', 'b', 'check', 'c', 'clippy', 'bench', 'doc', 'install', 'rustc', 'fix'].includes(verb)) return 'build';
+  return null;
+}
+
+function dotnetClass(args) {
+  if (hasAny(args, HELP_FLAGS) || args.includes('-?')) return null;
+  const verb = args.find((a) => !isFlag(a));
+  if (verb === 'test' || verb === 'vstest') return 'test-suite';
+  if (['build', 'publish', 'msbuild', 'pack', 'restore', 'clean'].includes(verb)) return verb === 'clean' ? null : 'build';
+  return null;
+}
+
+function goClass(args) {
+  if (hasAny(args, HELP_FLAGS)) return null;
+  const verb = args.find((a) => !isFlag(a));
+  if (verb === 'test') return 'test-suite';
+  if (verb === 'build' || verb === 'install' || verb === 'vet') return 'build';
+  return null;
+}
+
+const PYTEST_VALUE_FLAGS = new Set(['-k', '-m', '-n', '-p', '-c', '-o', '--maxfail', '--durations', '--junitxml', '--rootdir', '--tb', '--cov', '--cov-report', '--ignore', '--deselect', '--basetemp', '--log-level']);
+function pytestClass(args) {
+  if (hasAny(args, ['--help', '-h', '--version', '--collect-only', '--co', '--fixtures', '--markers'])) return null;
+  const pos = positionals(args, PYTEST_VALUE_FLAGS);
+  // A named test file or node id is a targeted run; no argument or a directory is the suite.
+  if (pos.length && pos.every((p) => /::/.test(p) || /\.py$/i.test(p))) return null;
+  return 'test-suite';
+}
+
+function jestClass(args) {
+  if (hasAny(args, ['--findRelatedTests', '--onlyChanged', '-o', '--listTests', '--showConfig', '--init', '--clearCache'])) return null;
+  const c = vitestClass(args.filter((a) => !/^--(?:testPathPattern|testNamePattern)=/.test(a)));
+  return c;
+}
+
+function dockerClass(tool, args) {
+  if (hasAny(args, ['--help', '-h', '--version', '-v'])) return null;
+  let a = args.slice();
+  const valued = new Set(['-f', '--file', '-p', '--project-name', '--profile', '--env-file', '--project-directory', '-H', '--host', '--context', '-c']);
+  const verbs = [];
+  for (let i = 0; i < a.length; i += 1) {
+    if (isFlag(a[i])) { if (valued.has(a[i])) i += 1; continue; }
+    verbs.push(a[i]);
+    if (verbs.length === 2) break;
+  }
+  const [v0, v1] = verbs;
+  // `up` stays attached until stopped (a service, not a build) unless it is detached or told to exit.
+  const upBounded = hasAny(a, ['-d', '--detach', '--wait', '--abort-on-container-exit', '--abort-on-container-failure', '--exit-code-from']);
+  if (tool === 'docker-compose') return (v0 === 'up' && upBounded) || v0 === 'build' ? 'build' : null;
+  if (v0 === 'build') return 'build';
+  if (v0 === 'buildx') return v1 === 'build' || v1 === 'bake' ? 'build' : null;
+  if (v0 === 'compose') return (v1 === 'up' && upBounded) || v1 === 'build' ? 'build' : null;
+  return null;
+}
+
+function bundlerClass(tool, args) {
+  if (hasAny(args, HELP_FLAGS)) return null;
+  if (hasAny(args, ['--watch', '-w'])) return null; // a watcher runs until stopped
+  const verb = args.find((a) => !isFlag(a));
+  if (tool === 'webpack') return verb === undefined || verb === 'build' ? (args.includes('serve') ? null : 'build') : null;
+  if (verb === 'build') return 'build';
+  if ((tool === 'nuxt' || tool === 'nuxi') && (verb === 'generate' || verb === 'prepare')) return verb === 'generate' ? 'build' : null;
+  return null;
+}
+
 function installClass(pm, args) {
   const flagsOnly = (a) => a.every((x) => isFlag(x));
   if (hasAny(args, ['-g', '--global', '--help', '-h', '--version'])) return null;
@@ -484,6 +663,23 @@ export function classifyWords(rawWords, ctx, depth = 0) {
     return targs.some((a) => a.startsWith('@')) || targs.includes('-avd') ? { class: 'emulator' } : null;
   }
   if (tool === 'gradlew' || tool === 'gradle') { const c = gradleClass(targs); return c ? { class: c } : null; }
+  if (tool === 'mvn' || tool === 'mvnw' || tool === 'mvnd') { const c = mavenClass(targs); return c ? { class: c } : null; }
+  if (tool === 'xcodebuild') return hasAny(targs, ['-version', '-help', '-usage', '-showsdks', '-list', '-showbuildsettings', '-showdestinations', '-checkfirstlaunchstatus', '-license']) ? null : { class: 'build' };
+  if (tool === 'cargo') { const c = cargoClass(targs); return c ? { class: c } : null; }
+  if (tool === 'dotnet') { const c = dotnetClass(targs); return c ? { class: c } : null; }
+  if (tool === 'msbuild') return hasAny(targs, ['-version', '/version', '-help', '/help', '-?', '/?']) ? null : { class: 'build' };
+  if (tool === 'go') { const c = goClass(targs); return c ? { class: c } : null; }
+  if (tool === 'pytest' || tool === 'py.test') { const c = pytestClass(targs); return c ? { class: c } : null; }
+  if (tool === 'python' || tool === 'python3' || tool === 'py') {
+    const m = targs.indexOf('-m');
+    if (m >= 0 && targs[m + 1] === 'pytest') { const c = pytestClass(targs.slice(m + 2)); return c ? { class: c } : null; }
+    return null;
+  }
+  if (tool === 'jest') { const c = jestClass(targs); return c ? { class: c } : null; }
+  if (tool === 'docker' || tool === 'docker-compose' || tool === 'podman') { const c = dockerClass(tool, targs); return c ? { class: c } : null; }
+  if (tool === 'vite' || tool === 'quasar' || tool === 'nuxt' || tool === 'nuxi' || tool === 'next' || tool === 'webpack') {
+    const c = bundlerClass(tool, targs); return c ? { class: c } : null;
+  }
   if (tool === 'firebase') {
     return /^emulators:(?:start|exec)$/.test(targs.find((a) => !isFlag(a)) ?? '') ? { class: 'fs-emulator' } : null;
   }
@@ -523,12 +719,17 @@ function classifyPackageManager(pm, args, ctx, depth) {
     return c ? { class: c } : null;
   }
   // e2e scripts
-  if (/^test:e2e(?::affected)?$/.test(script)) {
+  if (/^(?:test:)?e2e(?::(?!install$|report$|show-report$|codegen$|open$|ui$|debug$)[\w:.-]+)?$/.test(script)) {
     const c = e2eClass(after, new Set());
     return c ? { class: c } : null;
   }
   if (/^(?:build:apk\S*|android\S*|cap:(?:sync|build)\S*)$/.test(script)) return { class: 'gradle' };
   if (/^(?:lint|typecheck|type-check|check)$/.test(script)) return { class: 'lint' };
+  if (/^build(?::(?!watch$|dev$|stub$)[\w-]+)*$/.test(script)) {
+    // `npm run build -- --watch` (or -w after the --) is a watcher; before the -- npm reads -w as a workspace
+    const dd = after.indexOf('--');
+    return hasAny(after, ['--watch']) || (dd >= 0 && hasAny(after.slice(dd + 1), ['-w'])) ? null : { class: 'build' };
+  }
   if (/^test(?::unit|:ci|:coverage)?$/.test(script)) return resolveTestScript(script, after, ctx, depth);
   return null;
 }
@@ -569,11 +770,22 @@ export function classifyText(command, ctx, depth = 0) {
 }
 
 /** Classify with the real file system. */
-export function classifyCommand(command, { cwd, exists, read } = {}) {
+export function classifyCommand(command, { cwd, exists, read, shell = 'bash' } = {}) {
   const ctx = defaultCtx(cwd);
   if (exists) ctx.exists = exists;
   if (read) ctx.read = read;
-  return classifyText(command, ctx, 0);
+  return classifyText(shell === 'powershell' ? psScanText(command) : command, ctx, 0);
+}
+
+/**
+ * PowerShell text for the scanner (same length, so offsets still index the original): the backtick is
+ * PowerShell's escape and a backslash is a path separator, neither is bash's.
+ */
+export function psScanText(command) {
+  // A backtick before a line break continues the line: blank both, so the scanner sees one command.
+  return String(command ?? '')
+    .replace(/`\r?\n/g, (m) => ' '.repeat(m.length))
+    .replace(/[`\\]/g, (c) => (c === '\\' ? '/' : ' '));
 }
 
 // ---------------------------------------------------------------- rewriting
@@ -584,6 +796,13 @@ export function classifyCommand(command, { cwd, exists, read } = {}) {
  * (the text travels in that environment variable, so no second quoting layer and
  * no Windows command-line parsing touches it).
  */
+const psq = (s) => `'${String(s).replace(/(['\u2018\u2019\u201A\u201B])/g, '$1$1')}'`;
+
+/** The PowerShell text that runs `text` under the queue as class `cls` (see the header). */
+export function wrapSegmentPs(text, cls, launcher) {
+  return `$env:AC_RQ_COMMAND = ${psq(text)}; node ${psq(launcher)} run --class ${cls} --label ${cls} --shell powershell`;
+}
+
 export function wrapSegment(text, cls, launcher) {
   // Git Bash rewrites an argument it takes for a POSIX path before node sees it: one that
   // starts with / or -, or whose first word is NAME=/... (`/usr/bin/x` arrives as
@@ -602,25 +821,28 @@ export function wrapSegment(text, cls, launcher) {
  * lost, and the directory change still lasts past the call as it would unwrapped.
  * `heavyestOf(classes)` picks the class.
  */
-export function rewriteCommand(command, heavy, flags, launcher, heavyestOf = (cs) => cs[0]) {
+export function rewriteCommand(command, heavy, flags, launcher, heavyestOf = (cs) => cs[0], shell = 'bash') {
   if (!heavy.length) return command;
   const s = String(command);
   const cls = heavyestOf(heavy.map((h) => h.class));
-  const lead = leadingCd(s);
-  if (lead && heavy.every((h) => h.start >= lead.cdEnd)) return `${s.slice(0, lead.rest)}${wrapSegment(s.slice(lead.rest), cls, launcher)}`;
-  return wrapSegment(s, cls, launcher);
+  const wrap = shell === 'powershell' ? wrapSegmentPs : wrapSegment;
+  const lead = leadingCd(s, shell);
+  if (lead && heavy.every((h) => h.start >= lead.cdEnd)) return `${s.slice(0, lead.rest)}${wrap(s.slice(lead.rest), cls, launcher)}`;
+  return wrap(s, cls, launcher);
 }
 
 /** A leading `cd <dir> && ` (plain words, no heredoc): { rest } = where the rest starts; else null. */
-function leadingCd(s) {
+function leadingCd(s, shell = 'bash') {
+  const ps = shell === 'powershell';
   let scanned;
-  try { scanned = scanCommand(s); } catch { return null; }
+  try { scanned = scanCommand(ps ? psScanText(s) : s); } catch { return null; }
   const [first, second] = scanned.segments;
   if (!first || !second || s.slice(0, first.start).trim() !== '') return null;
-  if (!/^\s*&&\s*$/.test(s.slice(first.end, second.start))) return null;
+  if (!(ps ? /^\s*(?:&&|;)\s*$/ : /^\s*&&\s*$/).test(s.slice(first.end, second.start))) return null;
   if (/<<|[`$]/.test(first.text)) return null;
   const w = wordsOf(first.text);
-  if (w[0] !== 'cd' || w.length > 2) return null;
+  if (ps ? !['cd', 'chdir', 'sl', 'set-location'].includes(String(w[0]).toLowerCase()) : w[0] !== 'cd') return null;
+  if (w.length > 2) return null;
   return { rest: second.start + second.text.match(/^\s*/)[0].length, cdEnd: first.end };
 }
 
@@ -629,14 +851,16 @@ function leadingCd(s) {
  * changes the directory at the top level (cd, pushd, popd): wrapped, that change
  * would not last past the call. Rewrite mode denies such a command instead.
  */
-export function wrapLosesCwd(command) {
+export function wrapLosesCwd(command, shell = 'bash') {
+  const ps = shell === 'powershell';
   const s = String(command);
-  const lead = leadingCd(s);
+  const lead = leadingCd(s, shell);
   let scanned;
-  try { scanned = scanCommand(lead ? s.slice(lead.rest) : s); } catch { return false; }
+  try { scanned = scanCommand(ps ? psScanText(lead ? s.slice(lead.rest) : s) : (lead ? s.slice(lead.rest) : s)); } catch { return false; }
+  const names = ps ? ['cd', 'chdir', 'sl', 'set-location', 'pushd', 'popd', 'push-location', 'pop-location'] : ['cd', 'pushd', 'popd'];
   return scanned.segments.some((seg) => {
     const w = stripPrefix(wordsOf(seg.text)).words;
-    return ['cd', 'pushd', 'popd'].includes(w[0]);
+    return names.includes(ps ? String(w[0]).toLowerCase() : w[0]);
   });
 }
 
@@ -671,11 +895,16 @@ const isClass = (rules, id) => {
  * Returns { action: 'none' | 'deny' | 'hint' | 'rewrite', classes, command?, text? }.
  * Never throws; any error is { action: 'none' }.
  */
-export async function gateDecision(command, { cwd, mode = DEFAULT_GATE_MODE, env = process.env, rewriteAllowed = true, exists, read, rulesInline = null } = {}) {
+export async function gateDecision(command, { cwd, mode = DEFAULT_GATE_MODE, env = process.env, rewriteAllowed = true, exists, read, rulesInline = null, shell = 'bash' } = {}) {
   const none = { action: 'none', classes: [] };
   try {
-    if (mode === 'off' || typeof command !== 'string' || !command.trim() || gateDisabledByEnv(env)) return none;
-    const found = classifyCommand(command, { cwd, exists, read });
+    if (mode === 'off' || typeof command !== 'string' || !command.trim()) return none;
+    // Banned outright, whatever the opt-outs (RESOURCE_QUEUE=0, an inherited lease): they are not about queueing.
+    const banned = bannedCommand(command, env);
+    if (banned) return { action: 'deny', classes: [banned.rule], command: null, text: banned.text, banned: banned.rule };
+    if (gateDisabledByEnv(env)) return none;
+    if (shell === 'powershell' && /\$env:RESOURCE_QUEUE\s*=\s*['"]?0['"]?/i.test(command)) return none;
+    const found = classifyCommand(command, { cwd, exists, read, shell });
     if (!found.heavy.length) return none;
     const loaded = rulesInline ? { rules: rulesInline, claudeHome: rulesInline.claudeHome ?? '' } : await loadRulesSafe(env);
     if (!loaded) return none;
@@ -685,15 +914,15 @@ export async function gateDecision(command, { cwd, mode = DEFAULT_GATE_MODE, env
     const classes = [...new Set(heavy.map((h) => h.class))];
     const launcher = launcherFor(loaded.claudeHome, exists ?? existsSync);
     const heaviest = (cs) => cs.slice().sort((a, b) => boxOf(rules, b) - boxOf(rules, a))[0];
-    const wrapped = rewriteCommand(command, heavy, found.flags, launcher, heaviest);
+    const wrapped = rewriteCommand(command, heavy, found.flags, launcher, heaviest, shell);
     const weight = classes.map((c) => `${c} (box ${boxOf(rules, c)})`).join(', ');
     const canRewrite = typeof rewriteAllowed === 'function' ? Boolean(rewriteAllowed(wrapped)) : Boolean(rewriteAllowed);
-    const losesCwd = mode === 'rewrite' && canRewrite && wrapLosesCwd(command);
+    const losesCwd = mode === 'rewrite' && canRewrite && wrapLosesCwd(command, shell);
     const effective = mode === 'rewrite' && (!canRewrite || losesCwd) ? 'deny' : mode;
     if (effective === 'rewrite') {
       return { action: 'rewrite', classes, command: wrapped, text: `Heavy command (${weight}) runs through the machine-wide resource queue so agents do not overload the box; it waits for its turn if the box is busy.` };
     }
-    const big = classes.some((c) => ['e2e', 'e2e-spec', 'push-gate', 'vitest-full', 'node-test-full', 'emulator'].includes(c));
+    const big = classes.some((c) => ['e2e', 'e2e-spec', 'push-gate', 'vitest-full', 'node-test-full', 'emulator', 'test-suite'].includes(c));
     const how = `Run it through the machine-wide resource queue so agents do not overload the box. Exact command to run instead:\n${wrapped}\n`;
     const bg = big ? 'For a full suite also pass run_in_background: true, since time spent waiting in the queue counts against the 10-minute foreground limit. ' : '';
     if (effective === 'hint') {

@@ -38,7 +38,7 @@ Contents: Part 1 is the lease protocol the pre-push gate (`scripts/ci-local.mjs`
 | `CI_LOCAL_SLICE` | `6` (`0` = off) | test files per granted worker in one slice of a long ci-local pass; each slice re-samples the load (ci-local only; not part of the lease protocol) |
 | `CI_BUDGET_REPO` | basename of the git top-level directory above the worktree (walk up for `.git`, no process spawned), else the worktree basename | `repo` label written into leases |
 
-**Ledger directory.** Machine-wide and named after no repo: `CI_BUDGET_DIR` if set, else `%LOCALAPPDATA%\ci-budget` on Windows (fallback `os.tmpdir()/ci-budget`), else `$XDG_RUNTIME_DIR/ci-budget` (fallback `os.tmpdir()/ci-budget`).
+**Ledger directory.** Machine-wide and named after no repo: `CI_BUDGET_DIR` if set, else `<claude home>/agent-companion/ci-budget` on Windows (outside AppData on purpose: the MSIX-packaged desktop app and unpackaged daemons see different `%LOCALAPPDATA%` folders; the older `%LOCALAPPDATA%\ci-budget` and the package private copies are still counted, read-only, while older versions run), else `$XDG_RUNTIME_DIR/ci-budget` (fallback `os.tmpdir()/ci-budget`).
 
 **Files** (ids are 12 hex chars):
 
@@ -102,6 +102,7 @@ Sidecars next to a lease or ticket:
 
 A request is admitted when every part of it fits at once:
 
+1. **FIFO, per resource, with bounded backfill (0.31.62).** A later box-only ticket may go first when, after its grant, `budget - held - request` still covers the box (and RAM) need of every ticket it passes; it never passes a ticket on a shared named lane, and a head passed over 6 times blocks it again.
 1. **FIFO, per resource.** Tickets are ordered by `(createdAt, pid)`. A ticket waits behind an earlier ticket only when they share a resource: a later ticket that wants only `app-e2e` is not blocked by an earlier one that wants only `box`. Only box-using tickets order against each other for the box. A ticket that is held or passed over (below) blocks nobody.
 2. **Units and CPU.** For `box:N`: `N <= budget - held - counted`, where `counted` is the part of the sampled outside load of Part 1 (busy cores our held units do not explain) that exceeds `cores - budget`. A blocked request says why: `box:12 wanted, 11 available of 16 (1 held, outside load ~20 cores; 4 count against the budget after 16 cores of headroom)`. A request that finds nothing else held always progresses. The headroom rules of Part 1 ("Headroom for hooks") apply unchanged.
 3. **Named resources.** Each requested name has `held + N <= capacity`.
@@ -118,7 +119,7 @@ Shipped defaults: `plugins/agent-companion/config/resource-rules.json`. The user
 |---|---|
 | `ram` | `reserveMb` (null = auto), `reserveMinMb` 2048, `reserveFraction` 0.125, `rampMs` 60000 |
 | `resources.<name>` | `capacity`, and the limits `maxHoldMs`, `minHoldMs`, `idleMs` for leases that hold it |
-| `classes[]` | A named kind of heavy command: `id`, `box` units, `resources`, `ramMb`, `maxHoldMs`, `ports` (listening-socket bands that count as activity), `busyChildren` (process names that count as activity), `notes`. `run --class <id>` fills the request from it. The shipped classes are `e2e`, `e2e-spec`, `push-gate`, `vitest-full`, `vitest-dir`, `lint`, `emulator`, `gradle`, `fs-emulator`, `install` and `node-test-full`. Figures marked M in the file are measured, E are conservative estimates |
+| `classes[]` | A named kind of heavy command: `id`, `box` units, `resources`, `ramMb`, `maxHoldMs`, `ports` (listening-socket bands that count as activity), `busyChildren` (process names that count as activity), `notes`. `run --class <id>` fills the request from it. The shipped classes are `e2e`, `e2e-spec`, `push-gate`, `vitest-full`, `vitest-dir`, `lint`, `emulator`, `gradle`, `fs-emulator`, `install`, `node-test-full`, `build` and `test-suite`. Figures marked M in the file are measured, E are conservative estimates |
 | `rules[]` | The clear rules below. `enabled` and the numbers can be overridden by `id` |
 | `legacyLocks[]` | Held-lock directories of older tooling that the admitter reads (never writes) and waits for. Empty by default. There is no yield file: no file read by the queue can stop every waiter |
 | `strays[]` | Processes that should not run while nothing holds their resource, for `status --strays` |
@@ -143,7 +144,15 @@ The shipped rule defaults: `max-hold` and `idle` enabled (both flag a live holde
 
 ### The clears log
 
-Every clear is appended to `clears.jsonl` in the ledger directory, one JSON object per line, rotated to `clears.jsonl.1` over 512 KB. Fields: `at` (epoch ms), `rule`, `type` (`lease`, `ticket` or `reservation`), `id`, `pid`, `label`, `project`, `repo`, `worktree`, `session`, `resources` (`{name: units}`; `{<resource>: 0}` for a reservation) and `evidence` (what the rule saw: ages, cpu share, ports, the limit). Rules that clear a dead holder record the pid; a `live-holder-ceiling` clear and a `manual` clear are logged like any other; a flag (`IDLE?`, `OVER TIME`, `HEARTBEAT STALE`) is not a clear and is not logged: it lives in `status` while the lease runs, with the same evidence plus the last probe record (`sample`: tree size, cpu delta, ports, busy-child matches, sample count) and its age (`sampleAgeMs`). `status` shows the newest as `recentClears`, and the session line shows one that is under 15 minutes old.
+Every clear is appended once (only by the process that actually removed the entry; one that lost the cleanup race writes no row) to `clears.jsonl` in the ledger directory, one JSON object per line, rotated to `clears.jsonl.1` over 512 KB. Fields: `at` (epoch ms), `rule`, `type` (`lease`, `ticket` or `reservation`), `id`, `pid`, `label`, `project`, `repo`, `worktree`, `session`, `resources` (`{name: units}`; `{<resource>: 0}` for a reservation) and `evidence` (what the rule saw: ages, cpu share, ports, the limit). Rules that clear a dead holder record the pid; a `live-holder-ceiling` clear and a `manual` clear are logged like any other; a flag (`IDLE?`, `OVER TIME`, `HEARTBEAT STALE`) is not a clear and is not logged: it lives in `status` while the lease runs, with the same evidence plus the last probe record (`sample`: tree size, cpu delta, ports, busy-child matches, sample count) and its age (`sampleAgeMs`). `status` shows the newest as `recentClears`, and the session line shows one that is under 15 minutes old.
+
+### The grants log
+
+Every grant appends one JSON line to `grants.jsonl` in the ledger directory (rotated to `grants.jsonl.1` over 512 KB, like `clears.jsonl`); a write failure never blocks a grant. It answers whether RAM, the box or a named lane is the real limit. Fields: `ts` (epoch ms), `id` (lease id), `kind` (`run`, `full`, `targeted`), `label`, `project`, `requested` (`{box, <lane>: units}`), `ramMb`, `waitedMs`, `waitedBy` (`{resource: ms}`: each poll interval is split over the resources blocking the request at its start; `box`, `ram`, a lane name, `hold`, or a reserved resource), `limiting` (every resource that blocked it at any point), `backfilled` (it went ahead of a blocked head, see Admission), `overCapacity` (granted by the bounded wait over budget, with `overCap`: the lanes it went over, e.g. `["pool 2+1/2"]`), and `held` (`{box, ramMb}` held by other leases just before this grant). Grants of ci-local's own queue (`full`, `targeted`) are box waits: `waitedBy` is `{box: waitedMs}` when they waited.
+
+`resource-queue.mjs grants [--hours N] [--json]` (default 24 h; reads both log files, read only) prints the grant count, how many waited, median (mean of the middle two for an even count) and p90 (nearest rank) wait, backfilled and over-capacity counts, and for each limiting resource its wait time, its share of all attributed wait time and how many grants it limited. `--json` gives `{ok, dir, hours, count, waited, medianWaitMs, p90WaitMs, maxWaitMs, totalWaitMs, backfilled, overCapacity, limiting: [{resource, waitMs, share, grants}]}`.
+
+**Split self-check.** When live leases sit in another ledger (the old `%LOCALAPPDATA%\ci-budget` or an MSIX private copy, counted read-only, see Part 1), `status` prints one line `WARNING: split ledger: N live lease(s) in another ledger (<dir>: <n>; ...)` and `--json` carries `foreign: {count, dirs}`. No line when there are none.
 
 ### Reservations, hold and bound leases
 
@@ -190,6 +199,46 @@ For a daemon the wrapper does not outlive (an Android emulator holding `android-
 
 All fields above are additive. A reader ignores unknown fields and treats a missing `reservations` array in a status object as empty. `schemaVersion` of the status stays 1.
 
+### Live capacity and charge-follows-measure
+
+Option `live_capacity` (default `on`; `off`, `false`, `0`, `no`, or `CLAUDE_PLUGIN_OPTION_LIVE_CAPACITY`; each process reads it at start). Off restores the older behaviour: every holder costs its declared units.
+
+**Charge.** Declared is `units + heavy * heavyCost`. A run lease the wrapper tracks (not a bound daemon, not a ci-local lease) with a fresh `lease-<id>.use` sidecar (age under 150 s) and at least 3 valid samples (about 80 s) is charged `clamp(ceil(max(last 4 cpu samples)), 1, declared)`: it rises at the first busy sample and falls only after 4 quiet samples (about 100 s). Never above declared, never below 1. Anything else (no measure, stale measure, still warming, bound daemon, ci-local) is charged declared.
+
+**Expected use of a new job** comes from `usage.jsonl`: key `cls|repo|label` (digits and long ids in the label folded to `#`), falling back to `cls|repo`; the nearest-rank 90th percentile over the newest 20 rows, needing at least 3 rows. No history: declared.
+
+**Admission** of a box request: (1) the budget test against `min(budget, physical cores) - held (charged) - counted external`, using the expected charge when history exists; (2) a free-CPU test: the expected cores must fit in `cores - reserve - busy - promised`, where `promised` is what leases still warming are expected to use (skipped when the box is empty); (3) a hard cap: charged units plus the request never exceed the physical core count; (4) RAM uses the expected peak when history exists. FIFO, backfill, exclusive lanes, tombstones and the over-capacity grant after the bounded wait are unchanged.
+
+**Status.** Holder rows gain `declared`, `charged`, `measured` (`{cpu, ramMb, n, ageMs, warm, fresh}` or null) and `expected`; text form `declared 8 / charged 1 / measured 0.1 cpu 310 MB`; the machine block gains `liveCapacity`; every waiter shows a `why:` line. All keys are additive (schema version unchanged).
+
+**Files (ledger dir).** `usage.jsonl`: one row per released tracked lease with at least 3 valid samples (`key, key2, cls, repo, label, project, declared, durMs, ts, cpuP90, cpuMax, ramMaxMb, n`); delete rows to reset a poisoned history. `lease-<id>.use`: written by the wrapper tick (`{v, at, n, win, cpu, ramMb, ramPeakMb}`); a missing or torn file reads as no measure. The lease record gains `ukey, key2, cls, expCpu, expRamMb`, a ticket `expCpu, expRamMb`.
+
+**Limits.** A fork-per-file runner between ticks is not seen, so measured cpu can understate (the max over 4 samples, the p90 over runs and the free-CPU test, which reads the machine's real busy cores, bound this). A stale `.use` (150 s) reverts the lease to declared. An idle holder that bursts can oversubscribe for at most one tick (25 s), bounded by the physical-cores cap.
+
+### Stuck holders
+
+A run lease with no progress (CPU time, I/O counters, new or ended processes, idle-probe activity) for 15 minutes while held past its expected hold (the lease limit, else 30 minutes) is STUCK. Both numbers are the `stuck` rule in `config/resource-rules.json` (`quietMs`, `defaultHoldMs`).
+
+Option `stuck_holder_policy`: `flag` (default) keeps the lease; `release` lets the sweep free it, logged once, without stopping the process. A release is sticky: the `.cleared` tombstone stops the heartbeat from reviving it, and the wrapper logs that it "was released ... keeps running without it". Any other value counts as `flag`. Progress sampling rides the reap tick, so it needs `reap_policy` not `off`.
+
+Status: holder rows gain `progress` and `stuck`; text `STUCK (no progress Nm on cpu, io: held Nm > expected Nm; policy flag: kept)` replaces OVER TIME / IDLE?, and the session line shows ` STUCK <age>`. Signals: Windows I/O is read, write and other transfer bytes; Linux reads `/proc/<pid>/io`; macOS has no I/O counter, so cpu, spawn and probe only. Sidecar: `lease-<id>.prog`.
+
+### Reaping a lease's children
+
+The wrapper of a `run` lease records its process tree (pid + creation time) in `lease-<id>.tree` (a timer, first tick at about 3 s, then every 25 s; one process snapshot per tick, about 1.2 s on Windows, always outside the ledger lock). Bound leases, non-run leases and ci-local record nothing; a class can opt out with `reapTree: false`.
+
+**When it stops processes:** at release (`why: release`: the recorded tree plus live descendants of the wrapper); in the sweep (`sweep`, `status`, a heartbeat sweep that reclaimed a dead lease) for trees whose lease is gone and whose wrapper is no longer running (`why: sweep`); and in each tick's orphan pass (`why: orphan`). A lease hand-released with `release <id>` while its wrapper runs is not an orphan. Hooks never snapshot.
+
+**How:** one pid at a time, children first. Windows `taskkill /F /PID <pid>` (never `/T`); POSIX SIGTERM, re-check pid + creation time, then SIGKILL. A reused pid is skipped.
+
+**Never stopped, whatever the policy:** claude, Stream Deck, this process and its ancestors, pids 4 and below, the wrapper itself, anything matched by `reap_never`, and everything under a protected process.
+
+**Options.** `reap_policy`: `on` (default), `dry-run` (the plan goes to `reaps.jsonl` as `mode: would-kill`, once per tree, nothing stopped), `off` (nothing snapshotted, recorded or stopped); an unknown value counts as `dry-run`. `reap_never`: comma-separated, case-insensitive substring of name, executable or command line, or `/regex/flags`.
+
+**`reap --dry-run [--json]`** is read-only: one snapshot, and for every recorded tree whose lease is gone and wrapper not running it prints each process that would be stopped (pid, image, memory, lease id, why) and each spared one with its reason. Without `--dry-run` it is a usage error pointing to `sweep`.
+
+**`reaps.jsonl`** (ledger dir, rotates at 512 KB): one row per process `{ts, mode: 'kill'|'would-kill', why, lease, pid, image, creationTime, parentPid, memMb, how: 'recorded'|'descendant', ok}`. The wrapper prints one stderr line when it stops something.
+
 ## Part 3: the CLI, the launcher and the status schema
 
 ### CLI
@@ -202,7 +251,9 @@ node <plugin>/scripts/resource-queue.mjs unreserve <resource> [--for <group>]
 node <plugin>/scripts/resource-queue.mjs hold [--until <time>]
 node <plugin>/scripts/resource-queue.mjs resume
 node <plugin>/scripts/resource-queue.mjs status [--json] [--resource <name>] [--sample] [--strays]
+node <plugin>/scripts/resource-queue.mjs grants [--hours N] [--json]
 node <plugin>/scripts/resource-queue.mjs sweep
+node <plugin>/scripts/resource-queue.mjs reap --dry-run [--json]
 node <plugin>/scripts/resource-queue.mjs release <lease-id>
 node <plugin>/scripts/resource-queue.mjs install-launcher
 ```
@@ -241,7 +292,8 @@ It picks the newest `plugins/cache/*/agent-companion/<version>` copy (falling ba
   reservations: [ { id, resource, forGroup, owner: { pid, session }, ownerAlive,
                     createdAt, expiresAt, remainingMs, reason } ],
   recentClears: [ { at, rule, type, id, pid, label, project, repo, worktree, session, resources, evidence } ],
-  legacyLocks, strays }
+  legacyLocks, strays,
+  foreign: { count, dirs: [ { dir, count } ] } }
 ```
 
 Times are epoch ms. `expiresAt` in `reservations` is the effective end, after the 4 hour cap. `blockedBy` lists resource names (and `hold`); `blockedReason` is the text of why (slots wanted vs available, held, outside load), `''` when nothing blocks; the box reason needs `--sample` (without a sample the box check is skipped and a job held only by outside load shows no reason). The text form prints it as a `why:` line under the head of the queue. Status does not sample the CPU unless asked and never throws. The key sets are pinned in `tests/resource-queue-status.test.mjs`. A reader ignores unknown keys and treats a missing `reservations` as empty.
@@ -250,13 +302,19 @@ Times are epoch ms. `expiresAt` in `reservations` is the effective end, after th
 
 ### Hook interface
 
-Hooks do not spawn the CLI to look: they import `scripts/ci-budget.mjs` and call `resourceStatus(opts)` in-process (the same object as `status --json`, no sampling, fail soft), and `scripts/resource-queue.mjs` for `installLauncher()` and `launcherPath()`. Measured by hand: the first import costs about 11 ms, the first `resourceStatus()` about 3 ms, a repeat under 1 ms. A hook must not take `admit.lock`, write the ledger, or wait.
+Hooks do not spawn the CLI to look: they import `scripts/ci-budget.mjs` and call `resourceStatus(opts)` in-process (the same object as `status --json`, no sampling, fail soft), and `scripts/resource-queue.mjs` for `installLauncher()` and `launcherPath()`. Measured by hand: the first import costs about 11 ms, the first `resourceStatus()` about 3 ms, a repeat under 1 ms. A hook must not take `admit.lock` or wait. Since 0.31.62 a status call does sweep the ledger (expired, dead-pid and over-ceiling entries are dropped, no process-table call), so a lease no waiter ever noticed is cleared; pass `sweep: false` to read only.
 
 ### The resource gate (PreToolUse, Bash)
 
 A heavy command started bare overloads the machine and, because the hooks share its CPU, makes the guards fail open. The gate refuses or rewrites such a command so that it runs through the queue. It is `hooks/lib/resource-gate.mjs` (a pure classifier plus `gateDecision` and `rewriteCommand`), run as step 1 of `hooks/bash-tail.mjs`, which is the one hook that rewrites Bash input; the output-tail step then wraps the gate's result. No extra hook process is added.
 
 **What counts as heavy.** The classifier matches whole-suite and whole-project work, using the measured classes: end-to-end runs, a full or directory-wide vitest, `node --test` over a directory, a push gate with heavy checks, lint and typecheck of a project, an Android emulator, gradle, and `npm ci`. Each match names a class from the rules file. It does not touch: a targeted run (one test file, a single-file eslint), a command already wrapped in the queue, agent-templates `ci-local` (which holds its own lease), quoted or echoed text, or anything when `RESOURCE_QUEUE=0` or `AC_RESOURCE_LEASE` is in the environment. `bash -c` strings, wrappers, heredocs and groups are followed or wrapped whole. Known limits: bare `vitest` counts as a full run; a positional filter without a slash counts as targeted; `npm run check` counts as lint.
+
+**Tools and classes (0.31.62).** The gate covers the Bash and PowerShell tools (`hooks.json` matcher `^(Bash|PowerShell)$`). Besides the classes above it has `build` (box 6: xcodebuild, cargo build/check/clippy, dotnet build/publish, msbuild, go build, mvn/mvnw/mvnd, docker build/buildx/compose build|up, vite/quasar/nuxt/next/webpack build, `npm run build`) and `test-suite` (box 8: cargo test, dotnet test, go test, pytest, jest, npm e2e or test-suite scripts). A user override file merges by class id and can change a class's box share or patterns.
+
+**PowerShell.** Forms such as `.\gradlew.bat build`, `& .\gradlew.bat build` and `cd app; .\gradlew.bat build` are recognised; the queued command uses `resource-queue.mjs run --shell powershell`. Opt a command out with `$env:RESOURCE_QUEUE = 0; <command>` (Bash: `RESOURCE_QUEUE=0 <command>`). In `rewrite` mode a PowerShell command is denied by default, with the queued command in the reason, because the hooks docs do not state that the PowerShell tool honours `updatedInput`; set `resource_gate_powershell_rewrite` to `true` once a live check shows a rewritten command runs. Deny, hint and off are unaffected.
+
+**Banned commands.** Refused in every mode and not opt-out-able (`RESOURCE_QUEUE=0` is ignored): empty infinite loops (`while(1){}`, `for(;;){}`), which pin a core and have starved the box (use a real workload through the queue), and `taskkill /IM <name>`, which kills every process of that name including other agents' (kill by PID, or limit CPU with ProcessorAffinity on the one process). The deny text names the alternative.
 
 **Modes** (option `resource_gate`):
 

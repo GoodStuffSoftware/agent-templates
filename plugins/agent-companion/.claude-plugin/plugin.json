@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.61",
+  "version": "0.31.62",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -384,6 +384,30 @@
       "description": "What the spawn guard does with a ladder-rung spawn whose model is right but whose effort is one step above the routing table's rung for its TYPE. \"rewrite\" (default): rewrite it silently to the table's rung (silent_fixes: effort_fit_rewrite). \"warn\": a note only. \"off\": the old two-step threshold. A `Rung: <reason>` line in the brief opts out and keeps the named rung. Default and why (usage audit 2026-11-21): 149 spawns ran one step above the table, about 58-75 extra units.",
       "default": "rewrite"
     },
+    "reap_policy": {
+      "type": "string",
+      "title": "Stop leftover processes of a finished lease",
+      "description": "What the resource queue does with processes a run lease started and left behind when it ended (a test server, a browser, a watcher). \"on\" (default): stop the recorded ones when the lease is released, or when its holder died (found by the sweep), one process at a time, children first, only if pid and creation time still match what was recorded. \"dry-run\": log what would be stopped in reaps.jsonl and stop nothing. \"off\": record and stop nothing. Any other value counts as \"dry-run\". Never stopped, whatever the value: claude, Stream Deck, this process and its ancestors, and anything matched by reap_never. See `resource-queue.mjs reap --dry-run`.",
+      "default": "on"
+    },
+    "live_capacity": {
+      "type": "string",
+      "title": "Resource queue: slots follow the machine's real capacity",
+      "description": "\"on\" (default): a held box lease is charged what its process tree really uses (measured CPU, after about 80 s, never above its declared size, never below 1), a new job whose history is known is charged its usual usage, admission also needs free CPU and RAM above the reserve, and total charged units never exceed the physical cores. Unknown jobs, and any lease without a fresh measure, keep their declared size. Needs reap_policy not \"off\" (the measuring rides the reap tick). \"off\": every lease costs its declared size, as before 0.31.62. Change takes effect for the next process that reads the ledger.",
+      "default": "on"
+    },
+    "stuck_holder_policy": {
+      "type": "string",
+      "title": "Resource queue: what to do with a stuck holder",
+      "description": "A run lease whose process tree made no progress (CPU time, I/O counters, new or ended processes, probe activity) for 15 minutes while it is past its expected hold is shown as STUCK in status and the session's Shared resources line. \"flag\" (default): show it and keep the lease. \"release\": the sweep also frees the lease so others can run; the process is never stopped and may still be running. Any other value counts as \"flag\". Needs reap_policy not \"off\" (the progress sampling rides the reap tick). The window and expected hold are the \"stuck\" rule in config/resource-rules.json.",
+      "default": "flag"
+    },
+    "reap_never": {
+      "type": "string",
+      "title": "Processes the reaper never stops",
+      "description": "Comma-separated names the reaper must never stop, on top of its built-in list (claude, Stream Deck, and shared daemons such as the Gradle and Kotlin daemons, adb, pm2, MSBuild node reuse, watchman, sccache, emulators). Each entry is a case-insensitive substring of the process name, executable path or command line, or a /regex/flags. Empty by default.",
+      "default": ""
+    },
     "lookup_role_policy": {
       "type": "string",
       "title": "Lookup role declared under another TYPE",
@@ -713,6 +737,12 @@
       "description": "Comma-separated permission modes in which resource_gate=rewrite rewrites the command (default bypassPermissions only: permission rules are checked against the REWRITTEN command). In any other mode a rewrite becomes a deny with the same wrapped command in its text. \"any\" lifts the limit. Has no effect on deny, hint or off.",
       "default": "bypassPermissions"
     },
+    "resource_gate_powershell_rewrite": {
+      "type": "boolean",
+      "title": "Resource queue gate: rewrite PowerShell commands",
+      "description": "Off by default. The gate also covers the PowerShell tool, but Claude Code's docs do not say that PowerShell honours a PreToolUse updatedInput, and a hook cannot tell whether a rewrite was applied (if it were ignored, the heavy command would run unqueued). So with resource_gate=rewrite a heavy PowerShell command is DENIED with the queued command in the text (fail closed) unless this is true. Turn it on only after checking in a live session that a PowerShell rewrite takes effect.",
+      "default": false
+    },
     "shared_resources_line": {
       "type": "boolean",
       "title": "Shared resources line",
@@ -765,6 +795,24 @@
       "type": "boolean",
       "title": "Read dedupe",
       "description": "Deny a Read of lines this agent already read, when the file is unchanged since and the read is at least 2,000 characters. Fills the gap Claude Code's own 'file unchanged' stub leaves: a range inside an earlier larger read, or a repeat of an earlier range after another one. The denial says so in one sentence and the same call, repeated, runs. Per agent; cleared by an edit, any change of the file, and compaction. Off = every Read runs. Also CLAUDE_PLUGIN_OPTION_READ_DEDUPE=0.",
+      "default": true
+    },
+    "read_cap": {
+      "type": "boolean",
+      "title": "Read cap for subagents",
+      "description": "A subagent's Read of a text file with no limit, longer than the line count below, is capped to that many lines and the agent is told how many lines the file has and how to read the rest (offset and limit, or grep -n first). Whole-file Reads are the main way workers reach the context hand-off. Main thread, images, PDFs, notebooks and Reads that already have a limit are untouched. Off = every Read runs as asked. Also CLAUDE_PLUGIN_OPTION_READ_CAP=0.",
+      "default": true
+    },
+    "read_cap_lines": {
+      "type": "number",
+      "title": "Read cap: lines",
+      "description": "The cap of the subagent Read cap, in lines: a Read with no limit on a longer text file is limited to this many lines (a Read from an offset is capped only when more than this many lines remain).",
+      "default": 300
+    },
+    "interrupted_worker_notice": {
+      "type": "boolean",
+      "title": "Interrupted-worker notice",
+      "description": "An interrupt of the lead ends its in-flight background subagents without any notification (their transcripts end with '[Request interrupted by user]'). On the lead's next prompt, one line per such worker, once each: its name and description, when it was cut off, its last handoff file if it wrote one, and to respawn it fresh on the same rung from that file or its original brief. Off = no notice.",
       "default": true
     },
     "catchup_note": {

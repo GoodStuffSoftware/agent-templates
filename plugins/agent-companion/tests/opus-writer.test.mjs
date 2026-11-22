@@ -171,6 +171,20 @@ test('opus_writer_policy: allow keeps the old behaviour: nothing rewritten, no t
   assert.equal(junk.upd?.subagent_type, RUNG, 'an unknown value reads as the default');
 });
 
+test('Opus writers stay rewritten to Sonnet whatever the brief states: Rung reason, Rung and PREMIUM lines do not exempt (operator policy 2026-11-14)', () => {
+  const OPUS_MED = 'agent-companion:ac-opus-medium';
+  const header = ['TYPE: integration', 'ROLE: writer', 'REVIEW: lead', ''].join('\n');
+  const reason = 'Rung reason: opus-medium because this changes the shared scheduling logic every project depends on.\n';
+  const premium = 'PREMIUM: the scheduler is shared infrastructure for every agent on this machine.\n';
+  for (const [name, text] of [['both', reason + premium], ['reason only', reason], ['premium only', premium], ['Rung: form', 'Rung: needs depth\n']]) {
+    const r = spawn({ subagent_type: OPUS_MED, prompt: header + text + 'build the thing' }, { sid: 'sess-ow-pol-' + name });
+    assert.equal(r.res.status, 0, r.res.stderr);
+    assert.equal(r.upd?.subagent_type, RUNG, name);
+    assert.equal(r.upd?.model, 'sonnet', name);
+    assert.equal(r.rows.length, 1, name);
+  }
+});
+
 test('a writer already on Sonnet (or Haiku) is not touched and writes no telemetry', () => {
   const a = spawn({ subagent_type: RUNG, prompt: 'ROLE: writer\nTYPE: large-refactor\nbuild it' }, { sid: 'sess-ow-s1' });
   assert.equal(a.rows.length, 0);

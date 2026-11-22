@@ -31,7 +31,7 @@
         ]
       },
       {
-        "matcher": "^Bash$",
+        "matcher": "^(Bash|PowerShell)$",
         "hooks": [
           {
             "type": "command",
@@ -53,6 +53,14 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/read-dedupe.mjs",
               "--event",
               "pre"
+            ],
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/read-cap.mjs"
             ],
             "timeout": 10
           }

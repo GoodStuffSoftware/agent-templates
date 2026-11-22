@@ -71,8 +71,17 @@ import {
   mkdirSync, writeFileSync, readFileSync, readdirSync, renameSync, unlinkSync, statSync, existsSync,
 } from 'node:fs';
 import {
-  BOX, loadRules, capacityOf, ramReserveMb, liveVerdict, liveCeilingMs, appendClear, recentClears, scanStrays, NAME_RE, processTable,
+  BOX, ruleOf, limitsFor, loadRules, capacityOf, claudeHome, ramReserveMb, liveVerdict, liveCeilingMs, appendClear, recentClears, appendGrant, readGrants, summarizeGrants, scanStrays, NAME_RE, processTable,
 } from './lib/resource-rules.mjs';
+import {
+  reapTree, reapOrphans, readTree, writeTree, removeTree, listTrees, recordTree, normalizePolicy, parseNever,
+  processSnapshot, realKill, treeFile, planReap,
+} from './lib/reaper.mjs';
+import {
+  LIVE_DEFAULTS, normalizeLive, usageKeys, readUse, writeUse, removeUse, measureOf, makeUseTracker, appendUsage, expectedFor, effectiveBox, useFile,
+  PROG_DEFAULTS, progFile, readProg, writeProg, procIo, makeProgressTracker, stuckOf,
+} from './lib/live-capacity.mjs';
+import { opt } from '../hooks/lib/context.mjs';
 import { join, basename, dirname, resolve } from 'node:path';
 import {
   tmpdir, availableParallelism, cpus, constants as osConstants, getPriority, setPriority, freemem, totalmem,
@@ -95,7 +104,18 @@ export const DEFAULT_SLICE_FILES = 6; // test files per worker in one slice of a
 export const DEFAULT_QUEUE_MAX_WAIT_MS = 30 * 60_000; // a full run's queue wait
 export const DEFAULT_EXPRESS_MAX_WAIT_MS = 5 * 60_000; // a targeted run's wait
 const LEGACY_MAX_AGE_MS = 45 * 60 * 1000; // the old mutex's own age cap
-const ADMIT_STALE_MS = 10_000;
+// A live holder's lock is never stolen inside this window. The slowest thing done under the lock is the
+// hidden PowerShell process-table call (20 s timeout, resource-rules.mjs), once per unverified lease, so the
+// holder also refreshes the lock's `at` before each such call (touchAdmit); the window only has to cover one call.
+// A lock whose pid is dead is recovered at once whatever its age.
+const ADMIT_STALE_MS = 60_000;
+// A later ticket may start ahead of a blocked head only when it cannot delay it (see evaluateFit). After a head has
+// been passed over this many times it blocks every later box user again (strict FIFO). 6: with a 16-unit budget
+// and 2-4 unit lints that is about one full turnover of the box, enough to use the idle gap behind a lane-blocked
+// head, and finite so a stream of small jobs can never keep a head waiting past that turnover.
+export const BACKFILL_MAX_PASSES = 6;
+// The tombstone of a cleared lease outlives 300 s for as long as the old holder's pid lives (see readState).
+const TOMBSTONE_MAX_AGE_MS = 7 * 24 * 3600_000;
 const DEBRIS_MAX_AGE_MS = 600_000; // *.tmp-* / *.stale-* left by a crash between write and rename
 const ADMIT_RETRY_CODES = ['EPERM', 'EBUSY', 'EACCES'];
 export const MAX_RESERVATION_MS = 4 * 3600_000; // a reservation never lasts longer than this
@@ -143,14 +163,32 @@ export function projectLabel(start) {
 }
 
 // Repo-neutral and machine-wide, so other repos can take leases from the same
-// budget. CI_BUDGET_DIR wins; else %LOCALAPPDATA%/ci-budget on Windows,
+// budget. CI_BUDGET_DIR wins; else <claude home>/agent-companion/ci-budget on Windows,
 // $XDG_RUNTIME_DIR/ci-budget elsewhere, else os.tmpdir()/ci-budget.
+// Windows: NOT under %LOCALAPPDATA%. The Claude desktop app is MSIX-packaged, so its sessions' writes to
+// %LOCALAPPDATA% land in the package's private copy (%LOCALAPPDATA%\Packages\<pkg>\LocalCache\Local) while
+// Task Scheduler daemons see only the real folder: two ledgers, so nothing was counted across the split
+// (confirmed live, 2026-11). The claude home is outside AppData and seen identically by both. It is the
+// durable config root (a sibling of config/, which holds the resource rules), not state/, which is derived
+// and deletable: a ledger deleted under live holders would let everyone over-admit.
 export function budgetDir(env = process.env) {
   if (env.CI_BUDGET_DIR) return env.CI_BUDGET_DIR;
-  if (process.platform === 'win32') {
-    return env.LOCALAPPDATA ? join(env.LOCALAPPDATA, 'ci-budget') : join(tmpdir(), 'ci-budget');
-  }
+  if (process.platform === 'win32') return join(claudeHome(env), 'agent-companion', 'ci-budget');
   return env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, 'ci-budget') : join(tmpdir(), 'ci-budget');
+}
+
+// Ledgers older versions wrote on Windows (read-only here, counted toward capacity while those versions still
+// run): the real %LOCALAPPDATA%\ci-budget and each MSIX package's private copy of it. A packaged process
+// reading the real folder already sees the merged view; an unpackaged one sees only the real folder, so the
+// private copies are listed too. Empty off Windows.
+export function legacyLedgerDirs(env = process.env) {
+  if (process.platform !== 'win32' || !env.LOCALAPPDATA) return [];
+  const out = [join(env.LOCALAPPDATA, 'ci-budget')];
+  const pk = join(env.LOCALAPPDATA, 'Packages');
+  try {
+    for (const name of readdirSync(pk)) out.push(join(pk, name, 'LocalCache', 'Local', 'ci-budget'));
+  } catch { /* no packages */ }
+  return out;
 }
 
 export function defaultBudget(cores) {
@@ -268,9 +306,122 @@ export function resolveBudgetConfig(env = process.env, { cores = availableParall
 
 const CTX_KEYS = [
   'dir', 'budget', 'heavyCost', 'heavyMax', 'express', 'maxFull', 'pollMs', 'staleMs',
-  'heartbeatMs', 'announceMs', 'sampleMs', 'off', 'legacyDir', 'legacyUnits', 'heavyMaxWaitMs',
+  'heartbeatMs', 'announceMs', 'sampleMs', 'off', 'legacyDir', 'foreignDirs', 'legacyUnits', 'heavyMaxWaitMs',
   'queueMaxWaitMs', 'expressMaxWaitMs', 'reserve', 'loadPct', 'sliceFactor', 'rules', 'session', 'project', 'freemem', 'totalmem', 'delay',
+  'reap', 'reapSeams', 'live', 'liveCfg', 'stuck', 'mirrorDir',
 ];
+
+// ---------------------------------------------------------------- live capacity (scripts/lib/live-capacity.mjs)
+//
+// Option `live_capacity` (on | off, default on); `ctx.live` (boolean) takes precedence over it, `ctx.liveCfg` replaces the numbers.
+// Off = the declared charge everywhere (the pre-0.31.62 behaviour). Read lazily, once per ctx.
+function liveOn(ctx) {
+  if (ctx.live === undefined) {
+    let v = 'on';
+    try { v = opt('live_capacity', 'on'); } catch { /* default */ }
+    ctx.live = normalizeLive(v);
+  }
+  return !!ctx.live;
+}
+const lc = (ctx) => (ctx._lc ??= { ...LIVE_DEFAULTS, ...(ctx.liveCfg ?? {}) });
+
+// ---------------------------------------------------------------- stuck holders (scripts/lib/live-capacity.mjs, section "progress")
+//
+// Option `stuck_holder_policy` (flag | release, default flag); `ctx.stuck` {policy} takes precedence over it. A live holder with no
+// progress for the "stuck" rule's quiet window, past its expected hold, is always FLAGGED (STUCK in status and the
+// session line). With `release` the sweep also frees its lease (never the process). Unknown text = flag. Read lazily.
+function stuckPolicy(ctx) {
+  if (ctx._stuckPolicy === undefined) {
+    let v = ctx.stuck?.policy;
+    if (v === undefined) { v = 'flag'; try { v = opt('stuck_holder_policy', 'flag'); } catch { /* default */ } }
+    ctx._stuckPolicy = String(v ?? '').trim().toLowerCase() === 'release' ? 'release' : 'flag';
+  }
+  return ctx._stuckPolicy;
+}
+
+// ---------------------------------------------------------------- reaping a lease's children (scripts/lib/reaper.mjs)
+//
+// Settings: `ctx.reap` {policy, never, trackMs} when given, else the plugin options reap_policy / reap_never.
+// Seams: `ctx.reapSeams` {table, kill}: table is a function returning process rows (or an array), kill the reaper's
+// kill seam; defaults are the real process snapshot and realKill. Resolved lazily, once per ctx, so a ledger call
+// that never reaps never reads an option. The process snapshot is slow (about 1.2 s on Windows) and is NEVER taken
+// while the admit lock is held: every call below runs after the ledger call that needed the lock has returned.
+const REAP_FIRST_TICK_MS = 3_000;
+const REAP_TICK_MS = 25_000;
+
+/**
+ * Read-only plan for `resource-queue.mjs reap --dry-run`: one snapshot, then for every recorded tree whose lease is
+ * gone what the orphan pass would do. Writes nothing and kills nothing (planReap, never reapTree). Takes no lock.
+ * Returns {policy, dir, tableOk, entries: [{id, rootPid, skipped?: 'wrapper-running', plan?}]}.
+ */
+export function reapPlan(opts = {}) {
+  const ctx = makeCtx({ ...opts, log: () => {}, registerExit: false });
+  const cfg = reapCfg(ctx);
+  const out = { policy: cfg.policy, dir: ctx.dir, tableOk: true, entries: [] };
+  const orphans = listTrees(ctx.dir).filter((t) => t.tree && !existsSync(join(ctx.dir, `lease-${t.id}.json`)));
+  if (!orphans.length) return out;
+  const table = cfg.table();
+  if (!Array.isArray(table)) { out.tableOk = false; return out; }
+  for (const { id, tree } of orphans) {
+    const live = table.find((r) => r.pid === tree.root.pid);
+    if (live && tree.root.creationTime != null && live.creationTime === tree.root.creationTime) {
+      out.entries.push({ id, rootPid: tree.root.pid, skipped: 'wrapper-running' });
+      continue;
+    }
+    out.entries.push({ id, rootPid: tree.root.pid, plan: planReap({ table, tree, selfPid: process.pid, never: cfg.never }) });
+  }
+  return out;
+}
+
+export function reapSettings(o = {}) {
+  let r = o.reap ?? null;
+  if (!r) {
+    r = {};
+    try { r.policy = opt('reap_policy', 'on'); r.never = opt('reap_never', ''); } catch { /* defaults: on, nothing extra */ }
+  }
+  const seam = o.reapSeams?.table;
+  const tableFn = typeof seam === 'function' ? seam : Array.isArray(seam) ? () => seam : () => processSnapshot();
+  return {
+    policy: normalizePolicy(r.policy),
+    never: parseNever(r.never ?? ''),
+    firstTickMs: r.firstTickMs ?? REAP_FIRST_TICK_MS,
+    trackMs: r.trackMs ?? REAP_TICK_MS,
+    table: tableFn,
+    kill: o.reapSeams?.kill ?? realKill,
+  };
+}
+
+function reapCfg(ctx) {
+  if (!ctx._reapCfg) ctx._reapCfg = reapSettings(ctx);
+  return ctx._reapCfg;
+}
+
+function reapLog(ctx, results) {
+  for (const { result } of results) {
+    if (!result) continue;
+    const killed = result.targets.filter((t) => t.ok);
+    if (result.policy === 'on' && killed.length) {
+      ctx.log(`resource-queue: stopped ${killed.length} leftover process${killed.length === 1 ? '' : 'es'} of lease ${result.lease} (${[...new Set(killed.map((t) => t.image))].join(', ')}); logged in reaps.jsonl`);
+    }
+  }
+}
+
+/** The orphan pass: recorded trees whose lease is gone and whose wrapper is not running. `table` reuses a snapshot already taken. */
+function reapOrphanPass(ctx, why, table = null) {
+  try {
+    const cfg = reapCfg(ctx);
+    if (cfg.policy === 'off') return [];
+    const leaseExists = (id) => existsSync(join(ctx.dir, `lease-${id}.json`));
+    if (!listTrees(ctx.dir).some((t) => !leaseExists(t.id))) return []; // nothing orphaned: no process-table read
+    const rows = table ?? cfg.table();
+    if (!Array.isArray(rows)) return [];
+    const out = reapOrphans({
+      dir: ctx.dir, table: rows, leaseExists, selfPid: process.pid, policy: cfg.policy, never: cfg.never, kill: cfg.kill, now: ctx.now(), why,
+    });
+    reapLog(ctx, out);
+    return out;
+  } catch { return []; /* best effort: reaping never fails a ledger call */ }
+}
 
 // Environment config, then explicit options on top, plus the injectable seams.
 function makeCtx(o = {}) {
@@ -279,6 +430,13 @@ function makeCtx(o = {}) {
   for (const k of CTX_KEYS) if (o[k] !== undefined) ctx[k] = o[k];
   ctx.heavyCost = Math.min(ctx.heavyCost, ctx.budget);
   ctx.legacyDir ??= legacyLockDir(o.env ?? process.env);
+  // Only the default ledger counts the pre-0.31.62 AppData ledgers; an explicit dir or CI_BUDGET_DIR is a chosen,
+  // self-contained ledger (tests, other tools) and never reads the machine's real folders.
+  const eenv = o.env ?? process.env;
+  ctx.foreignDirs ??= (o.dir || eenv.CI_BUDGET_DIR) ? [] : legacyLedgerDirs(eenv);
+  // Rollout: copies still on the old Windows path write only the real %LOCALAPPDATA%\ci-budget, so each lease is mirrored
+  // there (a stub with its units, kept alive by the heartbeat) until every session and vendored copy has restarted.
+  ctx.mirrorDir ??= (process.platform === 'win32' && !o.dir && !eenv.CI_BUDGET_DIR && eenv.LOCALAPPDATA) ? join(eenv.LOCALAPPDATA, 'ci-budget') : null;
   ctx.legacyUnits = Math.min(ctx.legacyUnits ?? legacyRunUnits(ctx.cores), ctx.budget);
   ctx.now = o.now ?? Date.now;
   ctx.sleep = o.sleep ?? sleepMs;
@@ -360,6 +518,19 @@ function tryUnlink(file) {
   try { unlinkSync(file); } catch { /* already gone */ }
 }
 
+// Old-path mirror (Windows rollout, see ctx.mirrorDir): `rec` writes or refreshes the lease stub and its heartbeat file in
+// the old ledger; null removes both. Best effort, and never when the mirror folder is the ledger itself.
+function mirrorLease(ctx, id, rec) {
+  if (!ctx.mirrorDir || resolve(ctx.mirrorDir) === resolve(ctx.dir)) return;
+  const f = join(ctx.mirrorDir, `lease-${id}.json`); const hb = join(ctx.mirrorDir, `lease-${id}.hb`);
+  try {
+    if (!rec) { tryUnlink(f); tryUnlink(hb); return; }
+    mkdirSync(ctx.mirrorDir, { recursive: true });
+    writeFileSync(f, JSON.stringify({ ...rec, heartbeatAt: ctx.now() }));
+    writeFileSync(hb, String(ctx.now()));
+  } catch { /* best effort */ }
+}
+
 function writeAtomic(ctx, file, obj) {
   const tmp = `${file}.tmp-${newId()}`;
   writeFileSync(tmp, JSON.stringify(obj));
@@ -371,14 +542,18 @@ function writeAtomic(ctx, file, obj) {
   }
 }
 
-// Move aside first: of several reclaimers, only one rename succeeds.
+// Move aside first: of several reclaimers, only one rename succeeds. Returns true only for that one (this process removed
+// the entry), so a caller logs the clear once, not once per poller that saw the same stale entry.
 function dropFile(file, ...extra) {
+  let won = false;
   try {
     const aside = `${file}.stale-${newId()}`;
     renameSync(file, aside);
+    won = true;
     tryUnlink(aside);
   } catch { /* lost the race, or already gone */ }
   for (const f of extra) tryUnlink(f);
+  return won;
 }
 
 function readJson(file) {
@@ -429,7 +604,9 @@ function verifiedLive(ctx, e, ask) {
   if (d && d.pid === e.pid && fits(num(d.startedAt))) return { pid: e.pid, startedAt: num(d.startedAt) };
   if (!ask) return null;
   let s = null;
+  touchAdmit(ctx); // the call may take 20 s: keep a lock held around it from looking stale
   try { s = ctx.procStart(e.pid); } catch { /* unknown */ }
+  touchAdmit(ctx);
   s = s === null || s === undefined ? NaN : Number(s);
   if (!fits(s)) return null;
   try { writeFileSync(file, JSON.stringify({ pid: e.pid, startedAt: s, verifiedAt: ctx.now() })); } catch { /* best effort */ }
@@ -475,7 +652,19 @@ function noteClear(ctx, e, type, rule, evidence) {
   });
 }
 
-const charge = (ctx, l) => l.units + l.heavy * (l.heavyCost ?? ctx.heavyCost);
+const declaredOf = (ctx, l) => l.units + l.heavy * (l.heavyCost ?? ctx.heavyCost);
+// What a held lease costs the budget: its declared units, or (live capacity, a tracked run lease past warm-up with a
+// fresh measure) what its tree really uses, never above declared and never below the floor.
+// While it warms up (no sample yet, first warmingMs) a lease whose job has a history costs its expected usage; a
+// measure that went stale, or a lease still unmeasured after warmingMs (reaping off, wrapper stalled), costs declared.
+const charge = (ctx, l) => {
+  const d = declaredOf(ctx, l);
+  if (l.kind !== 'run' || l.boundPid > 0 || !liveOn(ctx)) return d;
+  const m = l.measure;
+  if (m?.charge != null) return Math.min(d, m.charge);
+  if (l.expCpu != null && !m?.warm && ctx.now() - num(l.startedAt) < lc(ctx).warmingMs) return effectiveBox(d, l.expCpu, lc(ctx));
+  return d;
+};
 
 // ---------------------------------------------------------------- reservations and holds
 
@@ -556,12 +745,29 @@ const namesOfTicket = (t) => [...(usesBox(t) ? [BOX] : []), ...Object.keys(t.res
 // A ticket that cannot be admitted now for a reason of policy (a hold, or someone else's reservation).
 const passedOver = (state, t) => Boolean(t.paused) || Boolean(reservedAgainst(state.reservations ?? [], namesOfTicket(t), t.group));
 
+// lease-<id>.cleared: the tombstone of a lease the sweep or "release" removed, so the owner's heartbeat does not put
+// it back. It records {pid, at} and stays while that pid is alive (up to 7 days), not for a fixed 300 s: a wrapper
+// that outlives the clear keeps ticking, and the tombstone going first resurrected a cleared lease. An old-format
+// tombstone (a bare timestamp, no pid) keeps the 300 s rule.
+function writeTombstone(ctx, id, pid) {
+  try { writeFileSync(join(ctx.dir, `lease-${id}.cleared`), JSON.stringify({ pid: num(pid), at: ctx.now() }), { flag: 'wx' }); } catch { /* already marked */ }
+}
+function tombstoneHeld(ctx, file) {
+  try {
+    const d = JSON.parse(readFileSync(file, 'utf8'));
+    return Boolean(d && typeof d === 'object' && num(d.pid) > 0 && ctx.isAlive(num(d.pid)) && ctx.now() - num(d.at) < TOMBSTONE_MAX_AGE_MS);
+  } catch { return false; }
+}
+function readCount(file) {
+  try { const n = Math.trunc(Number(readFileSync(file, 'utf8'))); return Number.isFinite(n) && n > 0 ? n : 0; } catch { return 0; }
+}
+
 /**
  * Read the ledger. With reclaim, stale leases and tickets are removed (and
  * returned in `reclaimed`); without it they are listed with a `stale` reason and
  * left alone, and are excluded from the live lists either way.
  */
-export function readState(ctx, { reclaim = true } = {}) {
+export function readState(ctx, { reclaim = true, cheap = false } = {}) {
   let names = [];
   try { names = readdirSync(ctx.dir); } catch { /* no ledger yet */ }
   const leases = []; const tickets = []; const staleEntries = []; const reclaimed = []; const reservations = [];
@@ -594,13 +800,26 @@ export function readState(ctx, { reclaim = true } = {}) {
       if (e.kind === 'full' && d.kind === 'run') e.kind = 'run';
       e.actFile = join(ctx.dir, `lease-${m[1]}.act`);
       e.act = readAct(e.actFile);
+      e.useFile = useFile(ctx.dir, m[1]);
+      // Live capacity: the wrapper's measured usage of this lease (sidecar) and what the job was expected to need.
+      e.expCpu = d.expCpu == null ? null : Math.max(0, num(d.expCpu));
+      e.expRamMb = Math.max(0, Math.trunc(num(d.expRamMb)));
+      e.ukey = typeof d.ukey === 'string' ? d.ukey : '';
+      e.use = null; e.measure = null;
+      e.progFile = progFile(ctx.dir, m[1]);
+      e.prog = e.kind === 'run' && e.boundPid === 0 ? readProg(ctx.dir, m[1]) : null;
+      e.progress = null; e.stuck = null;
+      if (e.kind === 'run' && e.boundPid === 0 && liveOn(ctx)) {
+        e.use = readUse(ctx.dir, m[1]);
+        e.measure = measureOf(e.use, e.units + e.heavy * e.heavyCost, ctx.now(), lc(ctx), e.expCpu);
+      }
       let why = staleReason(ctx, e);
       leaseIds.add(m[1]);
       const liveFile = join(ctx.dir, `lease-${m[1]}.live`);
       // Stale heartbeat, but the wrapper pid is verified to be the holder (not a reused pid): a live
       // holder is flagged and kept, like the idle and max-hold flags, up to the same ceiling.
       if (why === 'heartbeat is stale' && !(e.boundPid > 0)) {
-        const live = verifiedLive(ctx, e, reclaim);
+        const live = verifiedLive(ctx, e, reclaim && !cheap);
         if (live) {
           const hb = Math.max(num(e.heartbeatAt), num(e.hbSide), num(e.startedAt), num(e.createdAt));
           e.hbStale = { heartbeatAgeMs: Math.max(0, ctx.now() - hb), staleMs: ctx.staleMs, pidStartedAt: live.startedAt };
@@ -609,11 +828,15 @@ export function readState(ctx, { reclaim = true } = {}) {
       }
       if (why) {
         staleEntries.push({ ...e, type: 'lease', stale: why });
-        if (reclaim) {
-          dropFile(file, hbFile, e.actFile, liveFile);
+        // A cheap sweep (status, heartbeat) never asks the process table: a stale heartbeat with a live pid is left for a full sweep.
+        if (reclaim && !(cheap && why === 'heartbeat is stale')) {
+          const won = dropFile(file, hbFile, e.actFile, liveFile, e.useFile, e.progFile);
+          mirrorLease(ctx, e.id, null);
           endedLeases.push(e);
-          reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why });
-          noteClear(ctx, e, 'lease', ruleFor(why, 'lease'), { why, pid: e.pid });
+          if (won) { // only the process that removed it reports and logs it
+            reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why });
+            noteClear(ctx, e, 'lease', ruleFor(why, 'lease'), { why, pid: e.pid });
+          }
         }
       } else {
         // Live pid, fresh heartbeat: the config rules (max-hold, idle) may still clear it.
@@ -624,6 +847,12 @@ export function readState(ctx, { reclaim = true } = {}) {
         let v = liveVerdict(ctx.rules, e, ctx.now(), ctx.env, { alive: holderAlive });
         if (v?.keep) { if (v.rule === 'idle') e.idleFlag = v.evidence; else e.overTime = v.evidence; }
         if (v?.alsoIdle) e.idleFlag = v.alsoIdle;
+        // Progress (cpu, io, spawn, probe): stuck = quiet for the rule's window AND past the expected hold. Live holders only.
+        const stuckRule = ruleOf(ctx.rules, 'stuck');
+        if (e.prog && holderAlive && stuckRule?.enabled !== false) {
+          e.progress = stuckOf({ prog: e.prog, act: e.act, startedAt: e.startedAt, maxHoldMs: limitsFor(ctx.rules, e).maxHoldMs, rule: stuckRule, now: ctx.now() });
+          if (e.progress?.stuck) e.stuck = e.progress;
+        }
         // Held only by a stale heartbeat (no max-hold or idle verdict past the ceiling): the same ceiling.
         if (e.hbStale && !(v && !v.keep)) {
           const ceilingMs = liveCeilingMs(ctx.rules);
@@ -632,14 +861,21 @@ export function readState(ctx, { reclaim = true } = {}) {
             v = { rule: 'live-holder-ceiling', evidence: { heldMs, ceilingMs, flaggedBy: 'heartbeat-stale', ...e.hbStale } };
           }
         }
+        // Policy release: a stuck live holder's lease is freed like the ceiling does it; the process is never touched.
+        if (e.stuck && !(v && !v.keep) && stuckPolicy(ctx) === 'release') {
+          v = { rule: 'stuck-holder', evidence: { ...e.stuck, policy: 'release', pid: e.pid } };
+        }
         if (v && !v.keep && reclaim) {
           // The tombstone first, so the owner's heartbeat does not put the lease back.
-          try { writeFileSync(join(ctx.dir, `lease-${m[1]}.cleared`), String(ctx.now()), { flag: 'wx' }); } catch { /* already marked */ }
-          dropFile(file, hbFile, e.actFile, liveFile);
+          writeTombstone(ctx, m[1], e.pid);
+          const won = dropFile(file, hbFile, e.actFile, liveFile, e.useFile, e.progFile);
+          mirrorLease(ctx, e.id, null);
           endedLeases.push(e);
-          reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why: `rule ${v.rule}` });
-          noteClear(ctx, e, 'lease', v.rule, v.evidence);
-          ctx.log(v.rule === 'live-holder-ceiling'
+          if (won) reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why: `rule ${v.rule}` });
+          if (won) noteClear(ctx, e, 'lease', v.rule, v.evidence);
+          if (won) ctx.log(v.rule === 'stuck-holder'
+            ? `resource-queue: RELEASED the lease of pid ${e.pid} (${e.label || e.worktree}): STUCK, no progress for ${Math.round(v.evidence.quietMs / 60_000)} min (limit ${Math.round(v.evidence.quietLimitMs / 60_000)} min), held ${Math.round(v.evidence.heldMs / 60_000)} min > expected ${Math.round(v.evidence.expectedHoldMs / 60_000)} min; option stuck_holder_policy is release. The process is NOT touched and may still be running. Logged in clears.jsonl as stuck-holder.`
+            : v.rule === 'live-holder-ceiling'
             ? `resource-queue: RELEASED the lease of LIVE pid ${e.pid} (${e.label || e.worktree}) held ${Math.round(v.evidence.heldMs / 60_000)} min, past the ${Math.round(v.evidence.ceilingMs / 60_000)} min live-holder ceiling (flagged by ${v.evidence.flaggedBy}); the process is NOT touched and may still be running. Logged in clears.jsonl as live-holder-ceiling.`
             : `resource-queue: cleared the lease of pid ${e.pid} (${e.label || e.worktree}) by rule ${v.rule}; the process is not touched.`);
         } else leases.push(e);
@@ -661,6 +897,7 @@ export function readState(ctx, { reclaim = true } = {}) {
         session: typeof d.session === 'string' ? d.session : '',
         resources: normResources(d.resources), ramMb: Math.max(0, Math.trunc(num(d.ramMb))),
         boxUnits: Math.max(0, Math.trunc(num(d.boxUnits))),
+        expCpu: d.expCpu == null ? null : Math.max(0, num(d.expCpu)), expRamMb: Math.max(0, Math.trunc(num(d.expRamMb))),
         desired: Math.max(1, Math.trunc(num(d.desired)) || 1),
         group: typeof d.group === 'string' ? d.group : '',
       };
@@ -668,13 +905,16 @@ export function readState(ctx, { reclaim = true } = {}) {
       ticketIds.add(m[1]);
       e.pausedFile = join(ctx.dir, `ticket-${m[1]}.paused`);
       const pause = readPause(ctx, e.pausedFile);
+      e.passedFile = join(ctx.dir, `ticket-${m[1]}.passed`); e.passed = readCount(e.passedFile);
       e.paused = Boolean(pause); e.pausedBy = pause ? pause.by : ''; e.pausedUntil = pause ? pause.until : null;
       const why = staleReason(ctx, e);
       if (why) {
         staleEntries.push({ ...e, type: 'ticket', stale: why });
         if (reclaim) {
-          dropFile(file, e.pausedFile); reclaimed.push({ type: 'ticket', pid: e.pid, worktree: e.worktree, why });
-          noteClear(ctx, e, 'ticket', ruleFor(why, 'ticket'), { why, pid: e.pid });
+          if (dropFile(file, e.pausedFile, e.passedFile)) {
+            reclaimed.push({ type: 'ticket', pid: e.pid, worktree: e.worktree, why });
+            noteClear(ctx, e, 'ticket', ruleFor(why, 'ticket'), { why, pid: e.pid });
+          }
         }
       } else tickets.push(e);
       continue;
@@ -688,9 +928,10 @@ export function readState(ctx, { reclaim = true } = {}) {
       if (!rule) { reservations.push(r); continue; }
       staleEntries.push({ ...r, type: 'reservation', stale: rule });
       if (reclaim) {
-        dropFile(file, activeFile(ctx.dir, r.id));
-        reclaimed.push({ type: 'reservation', pid: r.owner.pid, worktree: '', why: rule });
-        noteReservationClear(ctx, r, rule);
+        if (dropFile(file, activeFile(ctx.dir, r.id))) {
+          reclaimed.push({ type: 'reservation', pid: r.owner.pid, worktree: '', why: rule });
+          noteReservationClear(ctx, r, rule);
+        }
       }
     }
   }
@@ -709,8 +950,9 @@ export function readState(ctx, { reclaim = true } = {}) {
       if (!lapseMs) continue;
       const since = Math.max(r.createdAt, last);
       if (now - since < lapseMs) continue;
-      dropFile(r.file, activeFile(ctx.dir, r.id));
+      const wonLapse = dropFile(r.file, activeFile(ctx.dir, r.id));
       reservations.splice(reservations.indexOf(r), 1);
+      if (!wonLapse) continue;
       reclaimed.push({ type: 'reservation', pid: r.owner.pid, worktree: '', why: 'reservation-idle-lapse' });
       noteReservationClear(ctx, r, 'reservation-idle-lapse', null, {
         idleMinutes: Math.round(((now - since) / 60_000) * 10) / 10, lastMatchAt: since, lapseMinutes: lapseMs / 60_000,
@@ -730,20 +972,59 @@ export function readState(ctx, { reclaim = true } = {}) {
         continue;
       }
       // Orphan sidecars (a worker tick landing after its lease was removed).
-      const pm = /^ticket-([0-9a-f]+)\.paused$/.exec(name);
+      const pm = /^ticket-([0-9a-f]+)\.(?:paused|passed)$/.exec(name);
       if (pm && !ticketIds.has(pm[1])) { // a hold left behind by a ticket that is gone
         try { if (Date.now() - statSync(join(ctx.dir, name)).mtimeMs > 60_000) tryUnlink(join(ctx.dir, name)); } catch { /* gone */ }
         continue;
       }
-      const m = /^lease-([0-9a-f]+)\.(?:hb|act|cleared)$/.exec(name);
+      const m = /^lease-([0-9a-f]+)\.(?:hb|act|cleared|use|prog)$/.exec(name);
       if (!m || leaseIds.has(m[1])) continue;
+      if (name.endsWith('.cleared') && tombstoneHeld(ctx, join(ctx.dir, name))) continue;
       try { if (Date.now() - statSync(join(ctx.dir, name)).mtimeMs > 300_000) tryUnlink(join(ctx.dir, name)); } catch { /* gone */ }
     }
   }
   leases.sort((a, b) => num(a.startedAt) - num(b.startedAt) || num(a.pid) - num(b.pid));
   tickets.sort((a, b) => num(a.createdAt) - num(b.createdAt) || num(a.pid) - num(b.pid) || (a.id < b.id ? -1 : 1));
   reservations.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
+  for (const f of readForeignLeases(ctx, leaseIds)) leases.push(f);
   return { leases, tickets, stale: staleEntries, reclaimed, legacy, reservations };
+}
+
+// Leases in the older ledgers (ctx.foreignDirs: the real %LOCALAPPDATA%\ci-budget and the MSIX private copies)
+// that older versions still write while they run. They count toward capacity so a split ledger cannot over-grant.
+// READ-ONLY: never dropped, cleared, resized or released from here (entries carry foreign: true), and never
+// admitted into. Dead pids and leases past the live-holder ceiling since their last sign of life are ignored.
+function readForeignLeases(ctx, seen) {
+  const out = [];
+  const ceiling = liveCeilingMs(ctx.rules) || 4 * 3600_000;
+  for (const dir of ctx.foreignDirs ?? []) {
+    if (resolve(dir) === resolve(ctx.dir)) continue;
+    let names = [];
+    try { names = readdirSync(dir); } catch { continue; }
+    for (const name of names) {
+      const m = /^lease-([0-9a-f]+)\.json$/.exec(name);
+      if (!m || seen.has(m[1])) continue;
+      const d = readJson(join(dir, name));
+      if (!d || typeof d !== 'object') continue;
+      const pid = num(d.pid); const boundPid = Math.max(0, Math.trunc(num(d.boundPid)));
+      if (!(boundPid > 0 ? ctx.isAlive(boundPid) : ctx.isAlive(pid))) continue;
+      const hb = Math.max(num(d.heartbeatAt), num(readHb(join(dir, `lease-${m[1]}.hb`))), num(d.startedAt), num(d.createdAt));
+      if (boundPid <= 0 && ctx.now() - hb > ceiling) continue;
+      seen.add(m[1]);
+      const hc = Math.trunc(num(d.heavyCost));
+      out.push({
+        ...d, id: m[1], file: join(dir, name), foreign: true, foreignDir: dir, pid,
+        kind: d.kind === 'targeted' ? 'targeted' : d.kind === 'run' ? 'run' : 'full',
+        repo: typeof d.repo === 'string' ? d.repo : '', worktree: typeof d.worktree === 'string' ? d.worktree : '',
+        label: typeof d.label === 'string' ? d.label : '', project: typeof d.project === 'string' ? d.project : '',
+        session: typeof d.session === 'string' ? d.session : '', group: typeof d.group === 'string' ? d.group : '', boundPid,
+        resources: normResources(d.resources), ramMb: Math.max(0, Math.trunc(num(d.ramMb))),
+        units: Math.max(0, Math.trunc(num(d.units))), heavy: Math.max(0, Math.trunc(num(d.heavy))),
+        heavyCost: hc >= 1 ? hc : ctx.heavyCost,
+      });
+    }
+  }
+  return out;
 }
 
 // Live holders of the pre-budget run mutex (scripts/ci-lock.mjs, removed in
@@ -788,6 +1069,17 @@ export function totals(ctx, state) {
 
 // ---------------------------------------------------------------- admission mutex
 
+// The lock this process holds, so a slow step inside it (the process-table call) can refresh its `at`.
+let heldAdmit = null;
+function touchAdmit(ctx) {
+  const h = heldAdmit;
+  if (!h || h.ctx !== ctx) return;
+  try {
+    const cur = readJson(h.file);
+    if (cur && cur.token === h.token) writeFileSync(h.file, JSON.stringify({ pid: ctx.pid, at: ctx.now(), token: h.token }));
+  } catch { /* best effort */ }
+}
+
 function withAdmit(ctx, fn) {
   const file = join(ctx.dir, 'admit.lock');
   const token = newId();
@@ -808,9 +1100,12 @@ function withAdmit(ctx, fn) {
     if (dead) { dropFile(file); continue; }
     ctx.sleep(5 + (tries % 5) * 5);
   }
+  const outer = heldAdmit;
+  heldAdmit = { ctx, file, token };
   try {
     return fn();
   } finally {
+    heldAdmit = outer;
     const h = readJson(file);
     if (h && h.token === token) tryUnlink(file);
   }
@@ -863,13 +1158,22 @@ const { workerData, parentPort } = require('node:worker_threads');
 const fs = require('node:fs');
 const flags = new Int32Array(workerData.flags);
 let rec = workerData.rec;
+let disowned = false;
 parentPort.on('message', (m) => { if (m && !m.stop) rec = m; });
 const tick = () => {
   Atomics.store(flags, 1, 1);
   try {
-    if (Atomics.load(flags, 0) === 1) return;
+    if (Atomics.load(flags, 0) === 1 || disowned) return;
+    const gone = !fs.existsSync(workerData.leaseFile);
+    if (gone && fs.existsSync(workerData.clearedFile)) {
+      // Released by hand or by a rule (the tombstone is there): say so once, then write nothing more.
+      disowned = true;
+      try { parentPort.postMessage({ cleared: true }); } catch {}
+      return;
+    }
     try { fs.writeFileSync(workerData.hbFile, String(Date.now())); } catch {}
-    if (!fs.existsSync(workerData.leaseFile) && !fs.existsSync(workerData.clearedFile)) {
+    if (workerData.mirrorHbFile) { try { fs.writeFileSync(workerData.mirrorHbFile, String(Date.now())); } catch {} }
+    if (gone) {
       try { fs.writeFileSync(workerData.leaseFile, JSON.stringify(Object.assign({}, rec, { heartbeatAt: Date.now() })), { flag: 'wx' }); } catch {}
     }
   } finally {
@@ -888,15 +1192,16 @@ const STOP_WAIT_MS = 5000;
 // Returns {stop() -> Promise, stopSync(), setRecord(rec)}. stopSync() blocks
 // until no tick is in progress and none can start (see HB_WORKER_SRC), so the
 // caller may then remove the lease files for good; stop() also ends the thread.
-function startHeartbeat(ctx, { leaseFile, hbFile, clearedFile, rec, beat }) {
+function startHeartbeat(ctx, { leaseFile, hbFile, clearedFile, rec, beat, onCleared = () => {} }) {
   const none = { stop: () => Promise.resolve(), stopSync() {}, setRecord() {} };
   if (!(ctx.heartbeatMs > 0) || ctx.heartbeat === 'off') return none;
   if (ctx.heartbeat === 'worker') {
     try {
       const flags = new Int32Array(new SharedArrayBuffer(8));
       const w = new Worker(HB_WORKER_SRC, {
-        eval: true, workerData: { leaseFile, hbFile, clearedFile, ms: ctx.heartbeatMs, rec, flags: flags.buffer },
+        eval: true, workerData: { leaseFile, hbFile, mirrorHbFile: ctx.mirrorDir && resolve(ctx.mirrorDir) !== resolve(ctx.dir) ? join(ctx.mirrorDir, basename(hbFile)) : null, clearedFile, ms: ctx.heartbeatMs, rec, flags: flags.buffer },
       });
+      w.on('message', (m) => { if (m && m.cleared) onCleared(); });
       w.on('error', (err) => ctx.log(`ci-budget: heartbeat thread failed (${err.message}); the lease may be reclaimed as stale`));
       w.unref();
       const stopSync = () => {
@@ -930,9 +1235,41 @@ function noopLease(ctx, units, kind) {
   return lease;
 }
 
+// What is held at the moment of a grant (box units, and RAM promised by the leases), for the grants row.
+function heldAtGrant(ctx, state) {
+  return { box: totals(ctx, state).held, ramMb: state.leases.reduce((a, l) => a + num(l.ramMb), 0) };
+}
+
+/**
+ * One row in grants.jsonl per grant (docs/resource-queue.md): ts, id, kind, label, project, requested
+ * ({box, <lane>: units}), ramMb, waitedMs, waitedBy ({resource: ms} while it waited), limiting (the resources
+ * that blocked it at any point), backfilled, overCapacity (+ overCap: what it went over), held ({box, ramMb}
+ * before this grant). Never throws.
+ */
+function recordGrant(ctx, lease, f) {
+  try {
+    appendGrant(ctx.dir, {
+      ts: ctx.now(), id: lease.id, kind: lease.kind, label: f.label ?? '', project: ctx.project || ctx.repo || '',
+      requested: { box: f.box ?? lease.units, ...(f.named ?? {}) }, ramMb: f.ramMb ?? 0,
+      waitedMs: Math.max(0, Math.round(f.waitedMs ?? lease.waitedMs ?? 0)),
+      waitedBy: f.waitedBy ?? {}, limiting: f.limiting ?? [], backfilled: Boolean(f.backfilled),
+      overCapacity: Boolean(f.overCapacity), ...(f.overCap?.length ? { overCap: f.overCap } : {}), held: f.held ?? { box: 0, ramMb: 0 },
+    });
+  } catch { /* a log failure never blocks the queue */ }
+}
+
+// ci-local's own queue (full and targeted leases): box is the only resource, so a wait is a box wait.
+function grantBoxLease(ctx, s, lo, extra = {}) {
+  const held = heldAtGrant(ctx, s);
+  const lease = createLease(ctx, lo);
+  const w = Math.max(0, lease.waitedMs ?? 0);
+  recordGrant(ctx, lease, { label: lo.label, box: lo.units, waitedMs: w, waitedBy: w > 0 ? { box: w } : {}, limiting: w > 0 ? ['box'] : [], held, ...extra });
+  return lease;
+}
+
 function createLease(ctx, {
   kind, units, heavy = 0, label = '', waitedMs = 0, resources = {}, ramMb = 0, limits = null, monitored = false,
-  group = '', bindPid = 0,
+  group = '', bindPid = 0, ukey = '', key2 = '', cls = '', expCpu = null, expRamMb = 0,
 }) {
   const id = newId();
   const file = join(ctx.dir, `lease-${id}.json`);
@@ -955,22 +1292,47 @@ function createLease(ctx, {
   if (ramMb > 0) rec.ramMb = ramMb;
   if (limits && Object.keys(limits).length) rec.limits = { ...limits };
   if (monitored) rec.monitored = true;
+  if (ukey) { rec.ukey = ukey; if (key2) rec.key2 = key2; if (cls) rec.cls = cls; }
+  if (expCpu != null && expCpu >= 0) rec.expCpu = expCpu;
+  if (expRamMb > 0) rec.expRamMb = Math.trunc(expRamMb);
   writeFileSync(file, JSON.stringify(rec), { flag: 'wx' });
+  mirrorLease(ctx, id, rec);
+  const tracker = makeUseTracker(lc(ctx)); // live capacity: this lease's measured usage, fed by track()
+  const progress = makeProgressTracker(PROG_DEFAULTS, { ioOf: procIo }); // stuck-holder detector: cpu / io / spawn / output, fed by track()
   try { writeFileSync(hbFile, String(t0)); } catch { /* best effort: heartbeatAt in the lease still counts */ }
   if (monitored) { try { writeFileSync(actFile, `${t0} ${t0}`); } catch { /* best effort */ } }
   let released = false;
   let unmanaged = false;
+  let lastSweepAt = 0;
 
+  // The lease was released from outside (by hand or by a rule; the tombstone holds): the wrapper says so once, stops
+  // its heartbeat and tracking, and lets the child finish. The final release() still tidies the files.
+  let disowned = false;
+  let heartbeat = null;
+  const onCleared = () => {
+    if (disowned || released) return;
+    disowned = true;
+    ctx.log(`resource-queue: lease ${id} was released (by hand or by a rule; see clears); the command keeps running without it.`);
+    try { heartbeat?.stopSync(); } catch { /* best effort */ }
+  };
   const beat = () => {
-    if (released) return;
+    if (released || disowned) return;
+    if (!existsSync(file) && existsSync(clearedFile)) { onCleared(); return; }
     try { writeFileSync(hbFile, String(ctx.now())); } catch { /* best effort */ }
+    mirrorLease(ctx, id, rec);
+    if (ctx.now() - lastSweepAt >= 15_000 || ctx.now() < lastSweepAt) { // a heartbeat sweeps too, at most every 15 s
+      lastSweepAt = ctx.now();
+      let st = null;
+      try { st = readState(ctx, { reclaim: true, cheap: true }); } catch { /* best effort */ }
+      if (st?.reclaimed.some((r) => r.type === 'lease')) reapOrphanPass(ctx, 'sweep'); // after the sweep, outside any lock
+    }
     if (!existsSync(file) && !existsSync(clearedFile)) { // reclaimed while we were frozen (a laptop sleep): put it back
       try { writeFileSync(file, JSON.stringify({ ...rec, heartbeatAt: ctx.now() }), { flag: 'wx' }); } catch { /* raced */ }
     }
   };
-  const heartbeat = bindPid > 0
+  heartbeat = bindPid > 0
     ? { stop: () => Promise.resolve(), stopSync() {}, setRecord() {} }
-    : startHeartbeat(ctx, { leaseFile: file, hbFile, clearedFile, rec: { ...rec }, beat });
+    : startHeartbeat(ctx, { leaseFile: file, hbFile, clearedFile, rec: { ...rec }, beat, onCleared });
 
   const lease = {
     id, kind, dir: ctx.dir, waitedMs, file, clearedFile, actFile,
@@ -980,6 +1342,12 @@ function createLease(ctx, {
     get workers() { return rec.units + rec.heavy; },
     get charge() { return charge(ctx, rec); },
     get released() { return released; },
+    /** True once this wrapper saw its lease released from outside: it no longer heartbeats or tracks. */
+    get disowned() { return disowned; },
+    /** Notice a release from outside now (the wrapper's timers call this; the heartbeat thread usually got there first). */
+    checkCleared() { if (!disowned && !released && !existsSync(file) && existsSync(clearedFile)) onCleared(); return disowned; },
+    /** The child produced `bytes` of output (a progress signal; unused while the wrapper inherits stdio). */
+    noteOutput(bytes) { progress.noteOutput(bytes, ctx.now()); },
     bound: bindPid > 0, boundPid: bindPid,
     beat,
     /** Record a probe result: sampledAt = when it ran, activeAt = the last time the holder was seen working. */
@@ -1000,12 +1368,47 @@ function createLease(ctx, {
       heartbeat.stopSync();
       tryUnlink(file);
       tryUnlink(hbFile);
+      mirrorLease(ctx, id, null);
       tryUnlink(actFile);
       tryUnlink(join(ctx.dir, `lease-${id}.live`));
+      tryUnlink(useFile(ctx.dir, id));
+      tryUnlink(progFile(ctx.dir, id));
       tryUnlink(clearedFile);
+      if (ukey && liveOn(ctx)) { // one history row per measured run (null when the run was too short to trust)
+        try {
+          const row = tracker.row({ key: ukey, key2, cls, repo: ctx.repo, label, project: ctx.project || '', declared: rec.units + rec.heavy * ctx.heavyCost, durMs: Math.max(0, ctx.now() - t0) }, ctx.now());
+          if (row) appendUsage(ctx.dir, row);
+        } catch { /* best effort */ }
+      }
       // A group's job ending restarts the idle clock of its reservations (survives this process).
       try { touchReservations(ctx, group, Object.keys(resources).concat(units > 0 ? [BOX] : [])); } catch { /* best effort */ }
       heartbeat.stop();
+      reapAtRelease();
+    },
+    /** True when this lease records its process tree and reaps it (a run lease with a wrapper, policy not off). */
+    get trackable() { return !released && !disowned && bindPid === 0 && kind === 'run' && reapCfg(ctx).policy !== 'off'; },
+    /** Reap tick (called by the wrapper's timer, never by the heartbeat thread): one snapshot, record the tree, then the orphan pass. */
+    track() {
+      if (!lease.trackable) return null;
+      try {
+        const cfg = reapCfg(ctx);
+        const t0 = Date.now();
+        const table = cfg.table();
+        if (!Array.isArray(table)) return null;
+        const costMs = Date.now() - t0;
+        const tree = recordTree(table, ctx.pid, { prev: readTree(ctx.dir, id), now: ctx.now(), costMs });
+        if (tree) writeTree(ctx.dir, id, tree);
+        if (tree && liveOn(ctx)) {
+          const u = tracker.add(tree, table, ctx.now(), rec.units + rec.heavy * ctx.heavyCost);
+          if (u) writeUse(ctx.dir, id, u);
+        }
+        if (tree) {
+          const pr = progress.add(tree, table, ctx.now());
+          if (pr) writeProg(ctx.dir, id, pr);
+        }
+        reapOrphanPass(ctx, 'orphan', table);
+        return tree;
+      } catch { return null; }
     },
     /**
      * Change this lease's size. `spec` is a number (plain units) or
@@ -1018,6 +1421,8 @@ function createLease(ctx, {
      */
     resize(spec, { wait = false, resample = false } = {}) {
       if (released) throw new Error('ci-budget: resize on a released lease');
+      // Released from outside (by hand or by a rule): a resize must not write the lease file back, which would undo it.
+      if (disowned || lease.checkCleared()) return { units: rec.units, heavy: rec.heavy };
       const s = typeof spec === 'number' ? { units: spec } : { ...spec };
       const want = {
         units: Math.max(0, Math.trunc(s.units ?? rec.units)),
@@ -1049,6 +1454,7 @@ function createLease(ctx, {
     try { heartbeat.stopSync(); } catch { /* best effort */ }
     tryUnlink(file);
     tryUnlink(hbFile);
+    mirrorLease(ctx, id, null);
     heartbeat.stop();
   }
 
@@ -1105,7 +1511,9 @@ function createLease(ctx, {
           got = { units: 0, heavy: 0 };
         } else if (got.units + got.heavy === 0) got.units = 1; // never below one worker (<= what it held)
         rec.units = got.units; rec.heavy = got.heavy; rec.heartbeatAt = ctx.now();
+        if (!mine && existsSync(clearedFile)) return satisfied(got); // dropped from outside while we waited: leave it dropped
         writeAtomic(ctx, file, rec);
+        mirrorLease(ctx, id, rec);
         heartbeat.setRecord(rec);
         try { writeFileSync(hbFile, String(ctx.now())); } catch { /* best effort */ }
         return satisfied(got);
@@ -1117,7 +1525,9 @@ function createLease(ctx, {
           rec.units = want.units > 0 ? Math.max(rec.units, 1) : rec.units;
           if (rec.units + rec.heavy === 0) rec.units = 1;
           rec.heartbeatAt = ctx.now();
+          if (!existsSync(file) && existsSync(clearedFile)) return; // dropped from outside: leave it dropped
           writeAtomic(ctx, file, rec);
+          mirrorLease(ctx, id, rec);
           heartbeat.setRecord(rec);
         });
         ctx.log(`ci-budget: waited ${Math.round((ctx.now() - begin) / 1000)} s for a heavy-lane slot; `
@@ -1137,6 +1547,27 @@ function createLease(ctx, {
       ctx.sleep(ctx.pollMs);
     }
   }
+  // At release (after the files are gone, so no admit lock is held): a fresh snapshot, then the recorded tree's
+  // leftovers are stopped. Only a lease with a tree file does anything, so bound leases and ci-local pay nothing.
+  function reapAtRelease() {
+    try {
+      if (bindPid > 0 || !existsSync(treeFile(ctx.dir, id))) return;
+      const cfg = reapCfg(ctx);
+      if (cfg.policy === 'off') return;
+      const tree = readTree(ctx.dir, id);
+      if (!tree) { removeTree(ctx.dir, id); return; }
+      const table = cfg.table();
+      if (!Array.isArray(table)) return; // unreadable: the tree stays for the orphan pass
+      const result = reapTree({
+        table, tree, selfPid: process.pid, policy: cfg.policy, never: cfg.never, kill: cfg.kill, why: 'release', lease: id, logDir: ctx.dir, now: ctx.now(),
+      });
+      reapLog(ctx, [{ result }]);
+      if (cfg.policy === 'on' ? result.done : !result.targets.length) removeTree(ctx.dir, id);
+      else if (cfg.policy === 'dry-run') writeTree(ctx.dir, id, { ...tree, dryLogged: true }); // logged once; the orphan pass stays quiet
+      reapOrphanPass(ctx, 'orphan', table);
+    } catch { /* best effort */ }
+  }
+
   // A pid-bound lease belongs to the bound pid: this process ending must not release it.
   const unregister = bindPid > 0 ? () => {} : register(ctx, () => lease.release());
   return lease;
@@ -1207,7 +1638,7 @@ function acquireFull(ctx, opts) {
             if (free < 1) return null;
             // A loaded machine (reserve not idle, or over the load threshold) gets one worker.
             const units = Math.min(load.over ? 1 : desired, Math.floor(free));
-            const lease = createLease(ctx, {
+            const lease = grantBoxLease(ctx, s, {
               kind: 'full', units, label: opts.label ?? '', waitedMs: ctx.now() - begin,
             });
             tryUnlink(ticketFile);
@@ -1229,7 +1660,7 @@ function acquireFull(ctx, opts) {
       }
       if (ctx.now() - begin >= ctx.queueMaxWaitMs) { // no unbounded wait: go on with one worker, over budget
         const lease = withAdmit(ctx, () => {
-          const l = createLease(ctx, { kind: 'full', units: 1, label: opts.label ?? '', waitedMs: ctx.now() - begin });
+          const l = grantBoxLease(ctx, readState(ctx, { reclaim: false }), { kind: 'full', units: 1, label: opts.label ?? '', waitedMs: ctx.now() - begin }, { overCapacity: true });
           tryUnlink(ticketFile);
           return l;
         });
@@ -1261,13 +1692,13 @@ function acquireExpress(ctx, opts) {
       const s = readState(ctx, { reclaim: true });
       const t = totals(ctx, s);
       if (t.held + 1 > ctx.budget + ctx.express) return null;
-      return createLease(ctx, { kind: 'targeted', units: 1, label: opts.label ?? '', waitedMs: ctx.now() - begin });
+      return grantBoxLease(ctx, s, { kind: 'targeted', units: 1, label: opts.label ?? '', waitedMs: ctx.now() - begin });
     });
     if (lease) return lease;
     if (ctx.now() - begin >= ctx.expressMaxWaitMs) { // no unbounded wait: go on over budget
-      const forced = withAdmit(ctx, () => createLease(ctx, {
+      const forced = withAdmit(ctx, () => grantBoxLease(ctx, readState(ctx, { reclaim: false }), {
         kind: 'targeted', units: 1, label: opts.label ?? '', waitedMs: ctx.now() - begin,
-      }));
+      }, { overCapacity: true }));
       ctx.log(`ci-budget: waited ${Math.round((ctx.now() - begin) / 1000)} s at the express headroom; `
         + `starting with 1 worker, over budget (CI_LOCAL_EXPRESS_MAX_WAIT_MS=${ctx.expressMaxWaitMs}).`);
       return forced;
@@ -1326,7 +1757,7 @@ export function acquire(opts = {}) {
 /** Non-mutating snapshot of the ledger. `sample: false` skips the 300 ms cpu sample. */
 export function status(opts = {}) {
   const ctx = makeCtx({ ...opts, log: opts.log ?? (() => {}) });
-  const state = readState(ctx, { reclaim: false });
+  const state = readState(ctx, { reclaim: opts.sweep !== false, cheap: true }); // a status call sweeps too (cheap: no process-table call)
   const t = totals(ctx, state);
   const now = ctx.now();
   let busyCores = null; let external = 0; let loaded = null;
@@ -1446,10 +1877,17 @@ const who = (l, now) => `pid ${l.pid}${l.label ? ` "${l.label}"` : ''} for ${Mat
  * box check is skipped and `needsSample` says so); only the part past the budget's
  * headroom is charged (countedExternal). Returns {ok, reasons[{resource, text}], needsSample}.
  */
-function evaluateFit(ctx, state, req, id, external) {
+function evaluateFit(ctx, state, req, id, external, load = null) {
   const reasons = [];
   const now = ctx.now();
   const t = totals(ctx, state);
+  // Live capacity (docs/resource-queue.md): a request with a history costs its expected usage, not its declared size;
+  // the budget is capped at the physical cores; a free-CPU test reads the machine's real busy cores. Off: none of it.
+  const live = liveOn(ctx); const cfg = lc(ctx);
+  const chargeReq = live && req.box > 0 ? effectiveBox(req.box, req.expCpu, cfg) : req.box;
+  const boxLimit = live ? Math.min(ctx.budget, Number.isFinite(Number(ctx.cores)) ? Number(ctx.cores) : ctx.budget) : ctx.budget;
+  const ramReq = live && req.expRamMb > 0 ? req.expRamMb : req.ramMb;
+  const ramOf = (l) => (live && l.expRamMb > 0 ? l.expRamMb : l.ramMb);
   const held = namedHeld(state);
   const me = state.tickets.findIndex((q) => q.id === id);
   const ahead = me < 0 ? state.tickets : state.tickets.slice(0, me);
@@ -1470,13 +1908,32 @@ function evaluateFit(ctx, state, req, id, external) {
     });
     policy = true;
   }
+  // Backfill: a later ticket may go first only when it cannot delay a ticket ahead. Only the box is shared (an exclusive
+  // or named lane stays strict FIFO), the head has not been passed over BACKFILL_MAX_PASSES times, and after the grant
+  // the box (and RAM, when the head needs it) still has room for every skipped head: budget - held - request >= their need.
+  const passed = []; let reservedBox = 0; let reservedRam = 0;
+  const ramGate = state.leases.length > 0 || state.legacy.length > 0;
+  const ramFree = !ramGate ? Infinity
+    : Math.round(ctx.freemem() / MB) - ramReserveMb(ctx.rules, ctx.totalmem() / MB)
+      - state.leases.filter((l) => now - num(l.startedAt) < (ctx.rules?.ram?.rampMs ?? 60_000)).reduce((a, l) => a + ramOf(l), 0);
   for (const e of ahead) {
     // A ticket ahead that is itself held or passed over cannot take anything now, so it blocks no one.
     if (passedOver(state, e)) continue;
     const shared = [];
     if (req.box > 0 && usesBox(e)) shared.push(BOX);
     for (const n of Object.keys(req.named)) if (e.resources?.[n]) shared.push(n);
-    if (shared.length) { reasons.push({ resource: shared[0], text: `queued behind pid ${e.pid} (${shared.join(', ')})` }); break; }
+    if (!shared.length) continue;
+    const headBox = e.kind === 'run' ? (live ? effectiveBox(e.boxUnits, e.expCpu, cfg) : e.boxUnits) : 1;
+    const headRam = live && e.expRamMb > 0 ? e.expRamMb : e.ramMb;
+    const free = boxLimit - t.held - chargeReq - reservedBox >= headBox;
+    const ramOk = !(headRam > 0) || ramFree - ramReq - reservedRam >= headRam;
+    if (shared.length === 1 && shared[0] === BOX && num(e.passed) < BACKFILL_MAX_PASSES && free && ramOk) {
+      passed.push(e.id); reservedBox += headBox; reservedRam += headRam || 0;
+      continue;
+    }
+    reasons.push({ resource: shared[0], text: `queued behind pid ${e.pid} (${shared.join(', ')})` });
+    passed.length = 0;
+    break;
   }
   for (const [name, u] of Object.entries(req.named)) {
     const cap = capacityOf(ctx.rules, ctx.env, name);
@@ -1492,25 +1949,41 @@ function evaluateFit(ctx, state, req, id, external) {
     if (external === null) needsSample = true;
     else {
       const counted = countedExternal(ctx, external);
-      if (req.box > ctx.budget - t.held - counted) {
-        const avail = Math.max(0, ctx.budget - t.held - counted);
+      if (chargeReq > boxLimit - t.held - counted) {
+        const avail = Math.max(0, boxLimit - t.held - counted);
+        const capped = boxLimit < ctx.budget ? `, capped at the ${boxLimit} physical cores` : '';
         reasons.push({
           resource: BOX,
-          text: `box:${req.box} wanted, ${avail} available of ${ctx.budget} (${t.held} held, outside load ~${external} cores; `
+          text: `box:${chargeReq}${chargeReq !== req.box ? ` (expected, declared ${req.box})` : ''} wanted, ${avail} available of ${boxLimit}${capped} (${t.held} held, outside load ~${external} cores; `
             + `${counted} count against the budget after ${Math.max(0, ctx.cores - ctx.budget)} cores of headroom)`,
         });
+      } else if (live && load && Number.isFinite(load.busy)) {
+        // Free CPU: the cores the machine really has idle (above the load threshold's reserve), less what leases that
+        // are still starting have promised but not yet used (their load is not in `busy` yet).
+        const cpuReq = req.expCpu != null ? req.expCpu : req.box;
+        const commit = state.leases
+          .filter((l) => l.kind === 'run' && !(l.boundPid > 0) && !l.measure?.charge && now - num(l.startedAt) < cfg.warmingMs)
+          .reduce((a, l) => a + Math.max(0, (l.expCpu != null ? l.expCpu : declaredOf(ctx, l)) - (l.use?.cpu ?? 0)), 0);
+        const room = overloadThreshold(ctx) - load.busy - commit;
+        if (cpuReq > room) {
+          reasons.push({
+            resource: BOX,
+            text: `cpu ${Math.round(cpuReq * 10) / 10} wanted${req.expCpu != null ? ' (expected)' : ' (declared)'}, ${Math.round(Math.max(0, room) * 10) / 10} free `
+              + `(${Math.round(load.busy * 10) / 10} cores busy of ${ctx.cores}, ${ctx.reserve} kept idle, ${Math.round(commit * 10) / 10} promised to jobs still starting)`,
+          });
+        }
       }
     }
   }
-  if (req.ramMb > 0 && (state.leases.length > 0 || state.legacy.length > 0)) {
+  if (ramReq > 0 && (state.leases.length > 0 || state.legacy.length > 0)) {
     const total = ctx.totalmem() / MB;
     const reserve = ramReserveMb(ctx.rules, total);
     const ramp = ctx.rules?.ram?.rampMs ?? 60_000;
-    const committed = state.leases.filter((l) => now - num(l.startedAt) < ramp).reduce((a, l) => a + l.ramMb, 0);
+    const committed = state.leases.filter((l) => now - num(l.startedAt) < ramp).reduce((a, l) => a + ramOf(l), 0);
     const free = Math.round(ctx.freemem() / MB) - reserve - committed;
-    if (free < req.ramMb) reasons.push({ resource: 'ram', text: `RAM ${req.ramMb} MB needed, ${Math.max(0, free)} MB free after a ${reserve} MB reserve and ${committed} MB still ramping up` });
+    if (free < ramReq) reasons.push({ resource: 'ram', text: `RAM ${ramReq} MB needed${ramReq !== req.ramMb ? ' (expected)' : ''}, ${Math.max(0, free)} MB free after a ${reserve} MB reserve and ${committed} MB still ramping up` });
   }
-  return { ok: reasons.length === 0, reasons, needsSample, policy };
+  return { ok: reasons.length === 0, reasons, needsSample, policy, passed };
 }
 
 function wantsText(req) {
@@ -1551,20 +2024,42 @@ export async function acquireResources(opts = {}) {
   const maxWait = opts.maxWaitMs ?? ctx.queueMaxWaitMs;
   const id = newId();
   const ticketFile = join(ctx.dir, `ticket-${id}.json`);
-  const dropTicket = () => { tryUnlink(ticketFile); tryUnlink(join(ctx.dir, `ticket-${id}.paused`)); };
+  const dropTicket = () => { tryUnlink(ticketFile); tryUnlink(join(ctx.dir, `ticket-${id}.paused`)); tryUnlink(join(ctx.dir, `ticket-${id}.passed`)); };
+  // Live capacity: what this kind of job used last times (usage.jsonl), when the ledger knows it; else declared.
+  const cls = String(opts.cls ?? '');
+  const keys = usageKeys(cls, ctx.repo, label);
+  let exp = null;
+  if (req.box > 0 && liveOn(ctx)) { try { exp = expectedFor(ctx.dir, keys, lc(ctx)); } catch { exp = null; } }
+  if (exp) { req.expCpu = exp.cpu; req.expRamMb = exp.ramMb; }
   const ticket = {
     id, pid: ctx.pid, createdAt: begin, heartbeatAt: begin, repo: ctx.repo, worktree: ctx.worktree, kind: 'run',
     desired: Math.max(1, req.box), boxUnits: req.box, resources: { ...req.named }, ramMb: req.ramMb, label,
     ...(ctx.project ? { project: ctx.project } : {}), ...(ctx.session ? { session: ctx.session } : {}),
     ...(req.group ? { group: req.group } : {}),
+    ...(exp ? { expCpu: exp.cpu, expRamMb: exp.ramMb } : {}),
   };
-  const grant = (units) => {
+  // Which resource blocked this request, and for how long: each poll interval is split over the resources
+  // that blocked it at the start of the interval; the last interval is closed at the grant.
+  const waitedBy = {}; const limited = new Set(); let prevBlockers = []; let lastAccrue = begin;
+  const accrue = (to) => {
+    const dt = to - lastAccrue; lastAccrue = to;
+    if (dt > 0) for (const r of prevBlockers) waitedBy[r] = (waitedBy[r] ?? 0) + dt / prevBlockers.length;
+  };
+  const grant = (units, s, extra = {}) => {
     const alive = req.bindPid > 0 && ctx.isAlive(req.bindPid);
     if (req.bindPid > 0 && !alive) ctx.log(`resource-queue: the bound pid ${req.bindPid} is not running any more; the lease belongs to this process instead.`);
-    return createLease(ctx, {
+    const held = heldAtGrant(ctx, s);
+    const lease = createLease(ctx, {
       kind: 'run', units, label, waitedMs: ctx.now() - begin, resources: req.named, ramMb: req.ramMb,
       limits: opts.limits ?? null, monitored: Boolean(opts.monitored), group: req.group, bindPid: alive ? req.bindPid : 0,
+      ...(req.box > 0 && liveOn(ctx) ? { ukey: keys.exact, key2: keys.coarse, cls, expCpu: exp ? exp.cpu : null, expRamMb: exp ? exp.ramMb : 0 } : {}),
     });
+    accrue(ctx.now());
+    recordGrant(ctx, lease, {
+      label, box: units, named: req.named, ramMb: req.ramMb, waitedMs: ctx.now() - begin,
+      waitedBy: Object.fromEntries(Object.entries(waitedBy).map(([k, v]) => [k, Math.round(v)])), limiting: [...limited], held, ...extra,
+    });
+    return lease;
   };
   try {
     writeFileSync(ticketFile, JSON.stringify(ticket), { flag: 'wx' });
@@ -1574,6 +2069,7 @@ export async function acquireResources(opts = {}) {
   }
   const unregister = register(ctx, dropTicket);
   let lastAnnounce = -Infinity; let lastPos = -1; let announced = false;
+  let exclusiveLogged = false;
   let excluded = 0; let lastTick = begin; let lastPolicy = false; // time held or passed over does not count toward the bounded wait
   try {
     for (;;) {
@@ -1593,13 +2089,18 @@ export async function acquireResources(opts = {}) {
       const fit = evaluateFit(ctx, state, req, id, null);
       let reasons = fit.reasons; let policy = fit.policy;
       if (!reasons.length) {
-        const external = req.box > 0 ? measureLoad(ctx).external : 0;
+        const load = req.box > 0 ? measureLoad(ctx) : null;
+        const external = load ? load.external : 0;
         const got = withAdmit(ctx, () => {
           const s = readState(ctx, { reclaim: true });
-          const f = evaluateFit(ctx, s, req, id, external);
+          const f = evaluateFit(ctx, s, req, id, external, load);
           if (!f.ok) return { reasons: f.reasons, policy: f.policy };
-          const lease = grant(req.box);
+          const lease = grant(req.box, s, { backfilled: (f.passed ?? []).length > 0 });
           dropTicket();
+          for (const hid of f.passed ?? []) { // starvation bound: count this pass on every head we went ahead of
+            const pf = join(ctx.dir, `ticket-${hid}.passed`);
+            try { writeFileSync(pf, String(readCount(pf) + 1)); } catch { /* best effort */ }
+          }
           return { lease };
         });
         if (got.lease) {
@@ -1610,22 +2111,47 @@ export async function acquireResources(opts = {}) {
         reasons = got.reasons; policy = got.policy;
       }
       const tickAt = ctx.now();
+      accrue(tickAt);
+      prevBlockers = [...new Set(reasons.map((r) => r.resource).filter(Boolean))];
+      for (const r of prevBlockers) limited.add(r);
       if (lastPolicy) excluded += tickAt - lastTick;
       lastTick = tickAt; lastPolicy = policy;
       const waited = tickAt - begin - excluded;
       // Held or passed over by a reservation: the wait is the policy's, not the queue's, so it neither
       // goes over budget nor times out here; a hold and a reservation both end by their own clock (4 h at most).
-      if (!policy && waited >= maxWait) { // no unbounded wait: go on over budget
-        const lease = withAdmit(ctx, () => { const l = grant(req.box); dropTicket(); return l; });
-        unregister();
-        ctx.log(`resource-queue: waited ${Math.round(waited / 1000)} s (${reasons.map((r) => r.text).join('; ')}); `
-          + `running over budget (CI_LOCAL_QUEUE_MAX_WAIT_MS=${ctx.queueMaxWaitMs}).`);
-        return lease;
+      let exclusiveWait = '';
+      if (!policy && waited >= maxWait) { // no unbounded wait: go on over budget, but never over an exclusive lane
+        const over = withAdmit(ctx, () => {
+          const s = readState(ctx, { reclaim: true });
+          const held = namedHeld(s);
+          const blocked = []; const overCap = [];
+          for (const [name, u] of Object.entries(req.named)) {
+            const cap = capacityOf(ctx.rules, ctx.env, name);
+            if (u > cap - (held[name] ?? 0)) {
+              if (cap <= 1) {
+                const h = holdersOf(s, name)[0];
+                blocked.push(`${name} (held by ${h ? who(h, ctx.now()) : 'another holder'})`);
+              } else overCap.push(`${name} ${held[name] ?? 0}+${u}/${cap}`);
+            }
+          }
+          if (blocked.length) return { blocked };
+          const l = grant(req.box, s, { overCapacity: true, overCap }); dropTicket();
+          return { lease: l, overCap };
+        });
+        if (over.lease) {
+          unregister();
+          ctx.log(`resource-queue: waited ${Math.round(waited / 1000)} s (${reasons.map((r) => r.text).join('; ')}); `
+            + `OVER-CAPACITY grant: running over budget${over.overCap.length ? ` and over the capacity of ${over.overCap.join(', ')}` : ''} `
+            + `(CI_LOCAL_QUEUE_MAX_WAIT_MS=${ctx.queueMaxWaitMs}).`);
+          return over.lease;
+        }
+        exclusiveWait = `waiting past the ${Math.round(maxWait / 1000)} s bound for exclusive ${over.blocked.join(', ')}; an exclusive lane is never granted over capacity; `;
       }
       if (!policy && waited >= ctx.timeoutMs) throw timeoutError();
-      if (pos !== lastPos || ctx.now() - lastAnnounce >= ctx.announceMs) {
+      if (pos !== lastPos || ctx.now() - lastAnnounce >= ctx.announceMs || (exclusiveWait && !exclusiveLogged)) {
+        if (exclusiveWait) exclusiveLogged = true;
         lastPos = pos; lastAnnounce = ctx.now(); announced = true;
-        ctx.log(`resource-queue: waiting, position ${pos + 1} of ${state.tickets.length || 1} (needs ${wantsText(req)}): ${reasons.map((r) => r.text).join('; ')}`);
+        ctx.log(`resource-queue: waiting, position ${pos + 1} of ${state.tickets.length || 1} (needs ${wantsText(req)}): ${exclusiveWait}${reasons.map((r) => r.text).join('; ')}`);
       }
       await ctx.delay(ctx.pollMs);
     }
@@ -1660,14 +2186,22 @@ function holderOut(ctx, l, units, stale, now) {
     id: l.id, kind: l.kind, pid: l.pid, alive: ctx.isAlive(l.pid), label: l.label || '',
     project: l.project || l.repo || '', repo: l.repo || '', worktree: l.worktree || '', session: l.session || '',
     units, ramMb: l.ramMb || 0, startedAt: num(l.startedAt) || null, heartbeatAt: hb || null,
+    // Live capacity: declared size, what it is charged now, and what its tree measured (null: not tracked or no sample yet).
+    declared: declaredOf(ctx, l), charged: charge(ctx, l),
+    measured: l.measure ? { cpu: l.measure.cpu, ramMb: l.measure.ramMb, n: l.measure.n, ageMs: l.measure.ageMs, warm: l.measure.warm, fresh: l.measure.fresh } : null,
+    expected: l.expCpu != null ? { cpu: l.expCpu, ramMb: l.expRamMb || 0 } : null,
     ageMs: Math.max(0, now - num(l.startedAt)), heartbeatAgeMs: Math.max(0, now - hb),
     lastActivityAt: l.act ? l.act.activeAt : null, idleMs: l.act ? Math.max(0, now - l.act.activeAt) : null,
     stale: stale || null, group: l.group || '', bound: l.boundPid > 0, boundPid: l.boundPid > 0 ? l.boundPid : null,
     overTime: l.overTime ? { heldMs: l.overTime.heldMs, maxHoldMs: l.overTime.maxHoldMs, activity: l.overTime.activity, ...(l.overTime.sample ? { sampleAgeMs: l.overTime.sampleAgeMs, sample: l.overTime.sample } : {}) } : null,
     idleFlag: l.idleFlag ? { idleMs: l.idleFlag.idleMs, idleLimitMs: l.idleFlag.idleLimitMs, sampleAgeMs: l.idleFlag.sampleAgeMs ?? null, sample: l.idleFlag.sample ?? null } : null,
     hbStale: l.hbStale ? { heartbeatAgeMs: l.hbStale.heartbeatAgeMs, staleMs: l.hbStale.staleMs } : null,
+    // Progress (cpu, io, spawn, probe): quietMs is the time since the last sign of work; stuck is set only when every signal is silent
+    // for the rule's window AND the hold is past the expected one (never cpu alone). policy flag keeps the lease, release frees it.
+    progress: l.progress ? { quietMs: l.progress.quietMs, quietLimitMs: l.progress.quietLimitMs, by: l.progress.by, signals: l.progress.signals, fresh: true, stuck: !!l.progress.stuck } : null,
+    stuck: l.stuck ? { quietMs: l.stuck.quietMs, quietLimitMs: l.stuck.quietLimitMs, heldMs: l.stuck.heldMs, expectedHoldMs: l.stuck.expectedHoldMs, signals: l.stuck.signals, by: l.stuck.by, policy: stuckPolicy(ctx) } : null,
     ceilingMs: liveCeilingMs(ctx.rules) || null,
-    releaseCommand: `node "${RELEASE_SCRIPT}" release ${l.id}`,
+    foreign: !!l.foreign, releaseCommand: l.foreign ? null : `node "${RELEASE_SCRIPT}" release ${l.id}`,
   };
 }
 
@@ -1682,7 +2216,9 @@ export function resourceStatus(opts = {}) {
   const base = { schema: 'resource-queue-status', schemaVersion: STATUS_SCHEMA_VERSION, ok: true, generatedAt };
   try {
     const ctx = makeCtx({ ...opts, log: () => {}, registerExit: false });
-    const state = readState(ctx, { reclaim: false });
+    const state = readState(ctx, { reclaim: opts.sweep !== false, cheap: true }); // sweeps expired, dead and over-ceiling entries; no process-table call, no admit lock
+    // The orphan pass takes a process snapshot (slow), so only a caller that asks (the status CLI) pays for it; hooks never do.
+    if (opts.reap === true && opts.sweep !== false) reapOrphanPass(ctx, 'sweep');
     const now = ctx.now();
     const t = totals(ctx, state);
     const held = namedHeld(state);
@@ -1724,8 +2260,11 @@ export function resourceStatus(opts = {}) {
       });
     }
     const queue = state.tickets.map((q, i) => {
-      const req = { box: q.kind === 'run' ? q.boxUnits : 1, named: q.resources ?? {}, ramMb: q.ramMb || 0, group: q.group || '' };
-      const fit = evaluateFit(ctx, state, req, q.id, external);
+      const req = {
+        box: q.kind === 'run' ? q.boxUnits : 1, named: q.resources ?? {}, ramMb: q.ramMb || 0, group: q.group || '',
+        expCpu: q.expCpu ?? null, expRamMb: q.expRamMb || 0,
+      };
+      const fit = evaluateFit(ctx, state, req, q.id, external, busyCores === null ? null : { busy: busyCores, external });
       const hb = Math.max(num(q.heartbeatAt), num(q.createdAt));
       return {
         position: i + 1, id: q.id, kind: q.kind, pid: q.pid, alive: ctx.isAlive(q.pid), label: q.label || '',
@@ -1758,15 +2297,50 @@ export function resourceStatus(opts = {}) {
       machine: {
         cores: ctx.cores, totalRamMb: totalMb, freeRamMb: Math.round(ctx.freemem() / MB), ramReserveMb: ramReserveMb(ctx.rules, totalMb),
         busyCores: busyCores === null ? null : Math.round(busyCores * 10) / 10, externalCores: external, loaded,
+        liveCapacity: liveOn(ctx),
       },
       resources, queue, reservations, recentClears: recentClears(ctx.dir, { now }), legacyLocks, strays,
+      foreign: foreignSummary(state),
     };
   } catch (err) {
     return {
       ...base, ok: false, error: String(err && err.message || err), dir: null, machine: null,
       resources: [], queue: [], reservations: [], recentClears: [], legacyLocks: [], strays: null,
+      foreign: { count: 0, dirs: [] },
     };
   }
+}
+
+// Live leases that sit in an older or other ledger (the old %LOCALAPPDATA%\ci-budget, MSIX private copies): {count, dirs}.
+function foreignSummary(state) {
+  const byDir = {};
+  for (const l of state.leases) if (l.foreign) byDir[l.foreignDir] = (byDir[l.foreignDir] ?? 0) + 1;
+  return { count: Object.values(byDir).reduce((a, b) => a + b, 0), dirs: Object.entries(byDir).map(([dir, count]) => ({ dir, count })) };
+}
+
+/**
+ * The grants summary (read-only): grant rows of the last `hours` (default 24) from grants.jsonl, summarised
+ * (count, median and p90 wait, share of wait time per limiting resource). Never throws.
+ */
+export function grantsSummary(opts = {}) {
+  try {
+    const ctx = makeCtx({ ...opts, log: () => {}, registerExit: false });
+    const hours = Number.isFinite(Number(opts.hours)) && Number(opts.hours) > 0 ? Number(opts.hours) : 24;
+    const rows = readGrants(ctx.dir, { sinceMs: hours * 3600_000, now: ctx.now() });
+    return { ok: true, dir: ctx.dir, hours, ...summarizeGrants(rows) };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message || err) };
+  }
+}
+
+export function formatGrantsSummary(g) {
+  if (!g.ok) return `resource queue: grants unavailable (${g.error})`;
+  if (!g.count) return `Grants in the last ${g.hours} h: none (ledger ${g.dir})`;
+  const lines = [`Grants in the last ${g.hours} h (ledger ${g.dir}): ${g.count}, ${g.waited} waited; wait median ${dur(g.medianWaitMs)}, p90 ${dur(g.p90WaitMs)}, max ${dur(g.maxWaitMs)}, total ${dur(g.totalWaitMs)}`];
+  lines.push(`  backfilled ${g.backfilled}, over capacity ${g.overCapacity}`);
+  if (!g.limiting.length) lines.push('  no grant waited on a resource');
+  for (const r of g.limiting) lines.push(`  limiting ${r.resource.padEnd(12)} ${String(Math.round(r.share * 100)).padStart(3)}% of wait time (${dur(r.waitMs)}, ${r.grants} grant${r.grants === 1 ? '' : 's'})`);
+  return lines.join('\n');
 }
 
 /** The text form of resourceStatus() (what `status` prints without --json). */
@@ -1775,6 +2349,9 @@ export function formatResourceStatus(st) {
   const lines = [];
   const m = st.machine;
   lines.push(`Resource queue (ledger ${st.dir})`);
+  if (st.foreign?.count > 0) {
+    lines.push(`  WARNING: split ledger: ${st.foreign.count} live lease${st.foreign.count === 1 ? '' : 's'} in another ledger (${st.foreign.dirs.map((d) => `${d.dir}: ${d.count}`).join('; ')}); counted toward capacity, read only. Older versions still write there.`);
+  }
   lines.push(`  machine: ${m.cores} cores, RAM ${m.freeRamMb} MB free of ${m.totalRamMb} (reserve ${m.ramReserveMb} MB)`
     + (m.busyCores === null ? '' : `, cpu busy ${m.busyCores} cores, outside load ~${m.externalCores}${m.loaded ? ', LOADED' : ''}`));
   for (const r of st.resources) {
@@ -1783,12 +2360,17 @@ export function formatResourceStatus(st) {
     if (!r.holders.length) lines.push('  free');
     for (const h of r.holders) {
       const flags = [h.bound ? 'BOUND to this pid' : '', h.group ? `group ${h.group}` : '', h.stale ? `STALE (${h.stale})` : '', h.kind !== 'legacy' && !h.alive ? 'PID DEAD' : '',
-        h.overTime ? `OVER TIME (${dur(h.overTime.heldMs)} > ${dur(h.overTime.maxHoldMs)} limit, ${h.overTime.activity}: kept, not released)` : '',
-        h.idleFlag ? `IDLE? (quiet ${dur(h.idleFlag.idleMs)} > ${dur(h.idleFlag.idleLimitMs)}, holder alive: kept, not released)` : '',
+        h.stuck ? `STUCK (no progress ${dur(h.stuck.quietMs)} on ${(h.stuck.signals || []).filter((x) => x !== 'spawn').join(', ')}: held ${dur(h.stuck.heldMs)} > expected ${dur(h.stuck.expectedHoldMs)}; policy ${h.stuck.policy}: ${h.stuck.policy === 'release' ? 'released at the next sweep' : 'kept'})` : '',
+        h.overTime && !h.stuck ? `OVER TIME (${dur(h.overTime.heldMs)} > ${dur(h.overTime.maxHoldMs)} limit, ${h.overTime.activity}: kept, not released)` : '',
+        h.idleFlag && !h.stuck ? (h.progress && h.progress.quietMs < h.idleFlag.idleLimitMs
+          ? `quiet cpu but io active (last progress ${dur(h.progress.quietMs)} ago on ${h.progress.by || 'a signal'}; holder alive: kept)`
+          : `IDLE? (quiet ${dur(h.idleFlag.idleMs)} > ${dur(h.idleFlag.idleLimitMs)}, holder alive: kept, not released)`) : '',
         h.hbStale ? `HEARTBEAT STALE (no beat for ${dur(h.hbStale.heartbeatAgeMs)} > ${dur(h.hbStale.staleMs)}, pid verified alive: kept, not released)` : '',
-        h.overTime || h.idleFlag || h.hbStale
-          ? `[flagged live holder: released by the sweep at ${h.ceilingMs ? `${dur(h.ceilingMs)} held` : 'no ceiling (never)'}, or when it exits; release by hand: ${h.releaseCommand}]` : ''].filter(Boolean).join(' ');
-      lines.push(`  ${h.kind.padEnd(8)} pid ${String(h.pid).padEnd(7)} ${h.units}u  age ${dur(h.ageMs)}  heartbeat ${h.heartbeatAgeMs === null ? 'n/a' : `${dur(h.heartbeatAgeMs)} ago`}`
+        h.stuck || h.overTime || h.idleFlag || h.hbStale
+          ? `[flagged live holder: ${h.stuck?.policy === 'release' ? 'released at the next sweep (stuck), or when it exits' : `released by the sweep at ${h.ceilingMs ? `${dur(h.ceilingMs)} held` : 'no ceiling (never)'}, or when it exits`}; release by hand: ${h.releaseCommand}]` : ''].filter(Boolean).join(' ');
+      const liveTxt = h.measured || (h.charged != null && h.charged !== h.declared)
+        ? `  declared ${h.declared} / charged ${h.charged}${h.measured ? ` / measured ${h.measured.cpu} cpu ${h.measured.ramMb} MB${h.measured.warm && h.measured.fresh ? '' : ' (warming up or stale: charged as declared)'}` : ' (expected from history)'}` : '';
+      lines.push(`  ${h.kind.padEnd(8)} pid ${String(h.pid).padEnd(7)} ${h.units}u${liveTxt}  age ${dur(h.ageMs)}  heartbeat ${h.heartbeatAgeMs === null ? 'n/a' : `${dur(h.heartbeatAgeMs)} ago`}`
         + `${h.idleMs !== null ? `  idle ${dur(h.idleMs)}` : ''}  ${h.project || ''} ${h.worktree}${h.label ? `  [${h.label}]` : ''}${h.session ? `  session ${h.session.slice(0, 8)}` : ''}${flags ? `  ${flags}` : ''}`);
     }
   }
@@ -1807,7 +2389,7 @@ export function formatResourceStatus(st) {
     lines.push(`  #${q.position} pid ${String(q.pid).padEnd(7)} wants ${Object.entries(q.wants).map(([n, u]) => `${n}:${u}`).join(' ')}  waiting ${dur(q.waitedMs)}`
       + `  ${q.project || ''} ${q.worktree}${q.label ? `  [${q.label}]` : ''}${q.group ? `  group ${q.group}` : ''}${q.paused ? '  PAUSED' : ''}`
       + `${q.blockedBy.length ? `  blocked on ${q.blockedBy.join(', ')}` : ''}${q.alive ? '' : '  PID DEAD'}`);
-    if (q.blockedReason && q.position === 1) lines.push(`       why: ${q.blockedReason}`);
+    if (q.blockedReason) lines.push(`       why: ${q.blockedReason}`);
   }
   if (st.recentClears.length) {
     lines.push('');
@@ -1874,15 +2456,16 @@ export function releaseLease(opts = {}) {
   if (!/^[0-9a-f]{4,12}$/.test(id)) return { ok: false, error: `bad lease id "${opts.id ?? ''}" (the hex id from status, at least 4 characters)` };
   let st;
   try { st = readState(ctx, { reclaim: false }); } catch (e) { return { ok: false, error: `ledger unreadable (${e.message})` }; }
-  const hits = [...st.leases, ...st.stale.filter((s) => s.type === 'lease')].filter((l) => l.id.startsWith(id));
+  const hits = [...st.leases.filter((l) => !l.foreign), ...st.stale.filter((s) => s.type === 'lease')].filter((l) => l.id.startsWith(id));
   const uniq = [...new Map(hits.map((l) => [l.id, l])).values()];
   if (!uniq.length) return { ok: false, error: `no lease with id ${id} (see status)` };
   if (uniq.length > 1) return { ok: false, error: `id ${id} matches ${uniq.length} leases (${uniq.map((l) => l.id).join(', ')}); give more characters` };
   const e = uniq[0];
   const wasAlive = ctx.isAlive(e.pid) || (e.boundPid > 0 && ctx.isAlive(e.boundPid));
-  try { writeFileSync(join(ctx.dir, `lease-${e.id}.cleared`), String(ctx.now()), { flag: 'wx' }); } catch { /* already marked */ }
-  dropFile(e.file, e.hbFile, e.actFile, join(ctx.dir, `lease-${e.id}.live`));
-  noteClear(ctx, e, 'lease', 'manual', {
+  writeTombstone(ctx, e.id, e.pid);
+  const won = dropFile(e.file, e.hbFile, e.actFile, join(ctx.dir, `lease-${e.id}.live`), useFile(ctx.dir, e.id), progFile(ctx.dir, e.id));
+  mirrorLease(ctx, e.id, null);
+  if (won) noteClear(ctx, e, 'lease', 'manual', {
     by: 'manual', session: ctx.session || null, byPid: num(ctx.env.CLAUDE_PID) || null, wasAlive,
     heldMs: Math.max(0, ctx.now() - num(e.startedAt)), pid: e.pid,
   });
@@ -1944,7 +2527,9 @@ export function resumeMine(opts = {}) {
 /** Apply the sweep rules to the ledger now (what every acquire does). Returns the cleared entries. */
 export function sweepLedger(opts = {}) {
   const ctx = makeCtx({ ...opts, registerExit: false });
-  return readState(ctx, { reclaim: true }).reclaimed;
+  const reclaimed = readState(ctx, { reclaim: true }).reclaimed;
+  reapOrphanPass(ctx, 'sweep');
+  return reclaimed;
 }
 
 // ---------------------------------------------------------------- CLI

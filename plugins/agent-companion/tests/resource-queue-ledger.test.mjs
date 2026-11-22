@@ -8,11 +8,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import './isolate.mjs';
-import { existsSync, writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, utimesSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { resourceStatus, formatResourceStatus, isPidAlive, sweepLedger } from '../scripts/ci-budget.mjs';
-import { makeWorld, settle, GB, T0 } from './resource-queue-world.mjs';
+import { resourceStatus, formatResourceStatus, isPidAlive, sweepLedger, budgetDir, acquire, releaseLease } from '../scripts/ci-budget.mjs';
+import { writeProg } from '../scripts/lib/live-capacity.mjs';
+import { makeWorld, baseRules, settle, GB, T0 } from './resource-queue-world.mjs';
 
 const heldOf = (w, name) => resourceStatus({ ...w.opts }).resources.find((r) => r.name === name)?.held ?? 0;
 
@@ -86,23 +88,23 @@ test('FIFO is per resource: a box waiter queues behind a box head, a named-only 
 
     const pB = watch('B', w.acq({ box: 2, resources: { 'app-e2e': 1 }, label: 'B' }));
     w.t += 1;
-    const pC = watch('C', w.acq({ box: 2, label: 'C' })); // box is free, but B (ahead, wants box) is the head of the box queue
+    const pC = watch('C', w.acq({ box: 2, label: 'C' })); // box is free and C cannot delay B (room for both): it backfills
     w.t += 1;
     const pD = watch('D', w.acq({ resources: { pool: 1 }, label: 'D' })); // shares nothing with B or C
     w.t += 1;
     const pE = watch('E', w.acq({ resources: { 'app-e2e': 1 }, label: 'E' })); // behind B on app-e2e
     await settle();
-    assert.deepEqual(order, ['D'], 'only the unrelated request passes the blocked head');
-    assert.equal(w.tickets().length, 3, 'B, C and E are queued');
+    assert.deepEqual([...order].sort(), ['C', 'D'], 'the unrelated request and the box backfill pass the blocked head');
+    assert.equal(w.tickets().length, 2, 'B and E are queued');
 
     a.release();
     await settle();
-    assert.deepEqual(order, ['D', 'B', 'C'], 'B first, then C behind it; E waits for B to let go of app-e2e');
+    assert.deepEqual(order.slice(2), ['B'], 'B starts when app-e2e is free; E waits for B to let go of app-e2e');
 
     const b = await pB;
     b.release();
     await settle();
-    assert.deepEqual(order, ['D', 'B', 'C', 'E']);
+    assert.deepEqual(order.slice(2), ['B', 'E']);
     for (const p of [pB, pC, pD, pE]) (await p).release();
   } finally { w.done(); }
 });
@@ -661,17 +663,18 @@ test('box admission: the budget is never exceeded, whatever the headroom', async
   } finally { w.done(); }
 });
 
+// live: false: this is the budget-headroom arithmetic; the live free-CPU test is covered in resource-queue-live.test.mjs.
 test('box admission, small host: 4 cores with budget 2 has 2 cores of headroom; budget >= cores has none', async () => {
-  const small = makeWorld({ budget: 2, cores: 4 });
+  const small = makeWorld({ budget: 2, cores: 4, live: false });
   try {
     assert.equal((await admitWithOutside(small, 2, 1)).immediately, true, 'outside 2 is within the 2 cores of headroom');
   } finally { small.done(); }
-  const small2 = makeWorld({ budget: 2, cores: 4 });
+  const small2 = makeWorld({ budget: 2, cores: 4, live: false });
   try {
     assert.equal((await admitWithOutside(small2, 3, 1)).immediately, false, 'outside 3: 1 counts, 2 - 1 - 1 = 0 available');
   } finally { small2.done(); }
   for (const cores of [2, 1]) { // budget at or above the cores: no headroom, never a negative one
-    const w = makeWorld({ budget: 2, cores });
+    const w = makeWorld({ budget: 2, cores, live: false });
     try {
       assert.equal((await admitWithOutside(w, 1, 1)).immediately, false, `${cores} cores: every outside core counts`);
     } finally { w.done(); }
@@ -739,16 +742,92 @@ test('RAM reserve: the shipped default is max(2 GB, 12.5% of total RAM) and a us
 
 // ---------------------------------------------------------------- bounded wait, fail open
 
-test('the wait is bounded: past maxWait the request runs over budget with exactly one line', async () => {
+test('the wait is bounded: past maxWait a shared (capacity > 1) resource goes over capacity, logged as an over-capacity grant', async () => {
   const w = makeWorld();
   try {
-    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'A' });
-    const b = await w.acq({ resources: { 'app-e2e': 1 }, label: 'B', maxWaitMs: 5000 });
-    assert.equal(heldOf(w, 'app-e2e'), 2, 'over capacity, by design');
-    assert.equal(w.lines.filter((l) => /running over budget/.test(l)).length, 1);
+    const a = await w.acq({ resources: { pool: 2 }, label: 'A' });
+    const b = await w.acq({ resources: { pool: 1 }, label: 'B', maxWaitMs: 5000 });
+    assert.equal(heldOf(w, 'pool'), 3, 'over capacity, logged');
+    assert.equal(w.lines.filter((l) => /OVER-CAPACITY grant.*pool 2\+1\/2/.test(l)).length, 1);
     assert.equal(w.tickets().length, 0);
     a.release();
     b.release();
+  } finally { w.done(); }
+});
+
+test('an exclusive lane (app-e2e, capacity 1) is never granted over capacity, not even after the wait bound', async () => {
+  const w = makeWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'A', pid: 9001 });
+    let b = null;
+    const pb = w.acq({ box: 2, resources: { 'app-e2e': 1 }, label: 'B', pid: 9002, maxWaitMs: 5000 }).then((l) => { b = l; });
+    await settle(40);
+    w.t += 60_000;
+    await settle(40);
+    assert.equal(b, null, 'still queued past the bound');
+    assert.equal(heldOf(w, 'app-e2e'), 1);
+    assert.equal(w.lines.filter((l) => /waiting past the 5 s bound for exclusive app-e2e/.test(l)).length >= 1, true, 'said');
+    assert.ok(!w.lines.some((l) => /OVER-CAPACITY/.test(l)));
+    a.release();
+    await settle(40);
+    await pb;
+    assert.ok(b && !b.off);
+    assert.equal(heldOf(w, 'app-e2e'), 1);
+    b.release();
+  } finally { w.done(); }
+});
+
+// ---------------------------------------------------------------- two ledgers (MSIX split)
+
+test('a live lease in an older ledger (foreignDirs) counts toward capacity; a dead one does not; it is never written', async () => {
+  const w = makeWorld();
+  const old = makeWorld();
+  try {
+    const legacyLease = await old.acq({ resources: { 'app-e2e': 1 }, box: 4, label: 'legacy holder', pid: 7001 });
+    const before = old.files(/./).sort().map((n) => [n, readFileSync(join(old.dir, n), 'utf8')]);
+    let got = null;
+    const p = w.acq({ resources: { 'app-e2e': 1 }, label: 'new', pid: 7002, foreignDirs: [old.dir] }).then((l) => { got = l; });
+    await settle(40);
+    assert.equal(got, null, 'blocked by the lease only the old ledger knows');
+    assert.ok(w.lines.some((l) => /app-e2e 1\/1 held by pid 7001/.test(l)));
+    assert.equal(resourceStatus({ ...w.opts, foreignDirs: [old.dir] }).resources.find((r) => r.name === 'app-e2e').held, 1);
+    w.dead.add(7001);
+    await settle(40);
+    await p;
+    assert.ok(got && !got.off, 'a dead pid in the old ledger stops counting');
+    assert.deepEqual(old.files(/./).sort().map((n) => [n, readFileSync(join(old.dir, n), 'utf8')]), before, 'the old ledger is untouched');
+    got.release();
+    legacyLease.release();
+  } finally { w.done(); old.done(); }
+});
+
+test('the default ledger is outside AppData on Windows, CI_BUDGET_DIR still wins', () => {
+  assert.equal(budgetDir({ CI_BUDGET_DIR: 'X:/o' }), 'X:/o');
+  if (process.platform === 'win32') {
+    const d = budgetDir({ LOCALAPPDATA: 'C:/u/AppData/Local', CLAUDE_CONFIG_DIR: 'C:/u/.claude' });
+    assert.doesNotMatch(d, /AppData/i);
+    assert.match(d.replace(/\\/g, '/'), /^C:\/u\/\.claude\/agent-companion\/ci-budget$/);
+  }
+});
+
+// ---------------------------------------------------------------- admit lock
+
+test('the admit lock of a live holder is not stolen after 15 s; one of a dead process is taken over at once', async () => {
+  const w = makeWorld();
+  try {
+    const lock = join(w.dir, 'admit.lock');
+    writeFileSync(lock, JSON.stringify({ pid: 4242, at: w.t - 15_000, token: 'held' }));
+    const start = w.t;
+    const l = await w.acq({
+      resources: { pool: 1 }, label: 'blocked', pid: 7100,
+      sleep: (ms) => { w.t += ms; if (w.t - start > 30_000) throw new Error('gave up waiting on a live lock'); },
+    });
+    assert.equal(l.off, true, 'failed open (stopped by the test) instead of stealing the live lock');
+    assert.equal(JSON.parse(readFileSync(lock, 'utf8')).token, 'held', "the live holder's lock file is untouched");
+    w.dead.add(4242);
+    const ok = await w.acq({ resources: { pool: 1 }, label: 'after death', pid: 7101 });
+    assert.ok(!ok.off);
+    ok.release();
   } finally { w.done(); }
 });
 
@@ -785,4 +864,293 @@ test('lease heartbeat: the sidecar file is rewritten by a beat and the lease rec
     l.release();
     assert.equal(w.files(/^lease-/).length, 0, 'release removes the record and every sidecar');
   } finally { w.done(); }
+});
+
+// ---------------------------------------------------------------- leg 2: backfill, sweep on status, tombstone
+
+import { readdirSync as lsDir, writeFileSync as putFile } from 'node:fs';
+import { join as joinPath } from 'node:path';
+import { BACKFILL_MAX_PASSES } from '../scripts/ci-budget.mjs';
+
+const headTicket = (w) => lsDir(w.dir).find((n) => /^ticket-[0-9a-f]+\.json$/.test(n)).replace(/^ticket-|\.json$/g, '');
+
+test('backfill: a small box ticket goes first when the blocked head still fits afterwards; not when it would delay it', async () => {
+  const w = makeWorld({ budget: 10 });
+  try {
+    const a = await w.acq({ box: 2, resources: { 'app-e2e': 1 }, label: 'A' });
+    const pB = w.acq({ box: 4, resources: { 'app-e2e': 1 }, label: 'B' }); // blocked on app-e2e
+    w.t += 1;
+    const c = await w.acq({ box: 3, label: 'C' }); // 10 - 2 - 3 = 5 >= 4: cannot delay B
+    assert.equal(c.units, 3, 'C backfilled');
+    c.release();
+    const pD = w.acq({ box: 5, label: 'D' }); // 10 - 2 - 5 = 3 < 4: would delay B
+    await settle();
+    assert.equal(w.tickets().length, 2, 'D waits behind B');
+    a.release();
+    const b = await pB; b.release();
+    (await pD).release();
+  } finally { w.done(); }
+});
+
+test('backfill: an exclusive lane stays strict FIFO, and a head passed over the bound blocks backfill', async () => {
+  const w = makeWorld({ budget: 10 });
+  try {
+    const order = [];
+    const a = await w.acq({ box: 1, resources: { 'app-e2e': 1 }, label: 'A' });
+    const pB = w.acq({ box: 1, resources: { 'app-e2e': 1 }, label: 'B' }).then((l) => { order.push('B'); return l; });
+    w.t += 1;
+    const pC = w.acq({ box: 1, resources: { 'app-e2e': 1 }, label: 'C' }).then((l) => { order.push('C'); return l; });
+    await settle();
+    a.release();
+    await settle();
+    assert.deepEqual(order, ['B'], 'C waits for B on the exclusive lane');
+    (await pB).release(); (await pC).release();
+    const a2 = await w.acq({ box: 2, resources: { 'app-e2e': 1 }, label: 'A2' });
+    const pH = w.acq({ box: 2, resources: { 'app-e2e': 1 }, label: 'H' });
+    await settle();
+    putFile(joinPath(w.dir, `ticket-${headTicket(w)}.passed`), String(BACKFILL_MAX_PASSES));
+    w.t += 1;
+    const pS = w.acq({ box: 1, label: 'S' });
+    await settle();
+    assert.equal(w.tickets().length, 2, 'S is not backfilled past a head at the bound');
+    a2.release();
+    (await pH).release(); (await pS).release();
+  } finally { w.done(); }
+});
+
+test('a status call sweeps an over-ceiling lease and a dead-pid lease with nobody waiting', async () => {
+  const w = makeWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, limits: { maxHoldMs: 60_000 }, monitored: true, label: 'A', pid: 901 });
+    await w.acq({ box: 1, label: 'Z', pid: 902 });
+    w.dead.add(902);
+    assert.equal(w.leases().length, 2);
+    w.t += CEIL + 1000;
+    a.recordActivity(w.t, w.t);
+    resourceStatus({ ...w.opts });
+    assert.equal(w.leases().length, 0, 'both swept by status alone');
+  } finally { w.done(); }
+});
+
+test('a heartbeat after a clear does not put the lease back, even after 300 s', async () => {
+  const w = makeWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, limits: { maxHoldMs: 60_000 }, monitored: true, label: 'A', pid: 903 });
+    w.t += CEIL + 1000;
+    a.recordActivity(w.t, w.t);
+    resourceStatus({ ...w.opts });
+    assert.equal(w.leases().length, 0, 'cleared');
+    w.t += 6 * 60_000;
+    // The old orphan pass aged files by real mtime: age the tombstone's, so the 300 s rule would fire on it.
+    for (const n of w.files(/\.cleared$/)) { const old = new Date(Date.now() - 600_000); utimesSync(join(w.dir, n), old, old); }
+    sweepLedger({ ...w.opts }); // the tombstone survives while pid 903 lives
+    a.beat();
+    assert.equal(w.leases().length, 0, 'not resurrected');
+  } finally { w.done(); }
+});
+
+test('two concurrent sweeps of one dead lease write exactly one clears row, and only the winner reports it', async () => {
+  const w = makeWorld();
+  try {
+    await w.acq({ pid: 7777, resources: { 'app-e2e': 1 }, label: 'doomed' });
+    w.dead.add(7777);
+    // Process B has read the entry and asks whether its pid lives; at that moment process A sweeps the same entry first.
+    let raced = false;
+    const optsB = {
+      ...w.opts,
+      isAlive: (pid) => {
+        if (!raced) { raced = true; sweepLedger({ ...w.opts }); }
+        return !w.dead.has(pid);
+      },
+    };
+    const reclaimedB = sweepLedger(optsB);
+    assert.equal(raced, true, 'the race happened');
+    assert.equal(w.clears().length, 1, 'one row, not one per sweeper');
+    assert.equal(w.clears()[0].rule, 'pid-dead');
+    assert.equal(reclaimedB.length, 0, 'the loser reports nothing');
+    assert.equal(w.leases().length, 0);
+  } finally { w.done(); }
+});
+
+// ---------------------------------------------------------------- stuck holders (leg 4b): policy flag vs release, release sticks
+
+const STUCK_RULE = { id: 'stuck', enabled: true, appliesTo: ['run'], quietMs: 120_000, defaultHoldMs: 240_000 };
+const stuckWorld = (over = {}) => makeWorld({ rules: { ...baseRules(), rules: [...baseRules().rules, STUCK_RULE] }, ...over });
+/** The wrapper's progress sidecar as the sampler writes it: read at "now", last sign of work at `lastAt`. */
+const putProg = (w, lease, over = {}) => writeProg(w.dir, lease.id, {
+  v: 1, at: w.t, n: 6, lastAt: T0, sig: { cpu: 0, io: 0, spawn: 0, out: 0 }, cpuMs: 1000, ioBytes: 5000, outBytes: 0, ...over,
+});
+const stuckHolder = (w) => resourceStatus({ ...w.opts }).resources.find((r) => r.name === 'app-e2e').holders[0];
+
+test('stuck: needs every signal silent AND a hold past the expected one, and a witness beyond tree cpu', async () => {
+  const w = stuckWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'quiet job' });
+    w.t += 300_000; // quiet 5 min (limit 2), held 5 min (expected 4)
+    putProg(w, a);
+    const h = stuckHolder(w);
+    assert.equal(h.stuck.quietMs, 300_000);
+    assert.equal(h.stuck.quietLimitMs, 120_000);
+    assert.equal(h.stuck.heldMs, 300_000);
+    assert.equal(h.stuck.expectedHoldMs, 240_000);
+    assert.equal(h.stuck.policy, 'flag');
+    assert.equal(h.progress.stuck, true);
+    // tree cpu alone is never a verdict: with no io counters and no output the same silence is not stuck
+    putProg(w, a, { ioBytes: null });
+    assert.equal(stuckHolder(w).stuck, null, 'cpu alone');
+    assert.equal(stuckHolder(w).progress.stuck, false);
+    // a recent io tick is progress
+    putProg(w, a, { lastAt: w.t - 20_000, sig: { cpu: 0, io: w.t - 20_000, spawn: 0, out: 0 } });
+    assert.equal(stuckHolder(w).stuck, null, 'io moved 20 s ago');
+    assert.equal(stuckHolder(w).progress.quietMs, 20_000);
+    // a stale record (the wrapper stopped ticking) is not trusted
+    putProg(w, a, { at: w.t - 200_000 });
+    assert.equal(stuckHolder(w).stuck, null);
+    assert.equal(stuckHolder(w).progress, null);
+    a.release();
+  } finally { w.done(); }
+});
+
+test('stuck: quiet but not past the expected hold is not stuck', async () => {
+  const w = stuckWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'young job' });
+    w.t += 200_000; // quiet 200 s (over the 120 s limit), held 200 s (under the 240 s expected hold)
+    putProg(w, a);
+    assert.equal(stuckHolder(w).stuck, null);
+    w.t += 60_000;
+    putProg(w, a);
+    assert.ok(stuckHolder(w).stuck, 'past the expected hold now');
+    a.release();
+  } finally { w.done(); }
+});
+
+test('stuck policy flag: the sweep keeps the lease and nothing is cleared; unknown policy text means flag', async () => {
+  for (const policy of [undefined, 'flag', 'nonsense']) {
+    const w = stuckWorld({ ...(policy === undefined ? {} : { stuck: { policy } }) });
+    try {
+      const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'stuck job' });
+      w.t += 300_000;
+      putProg(w, a);
+      assert.equal(sweepLedger({ ...w.opts }).length, 0, String(policy));
+      assert.equal(w.leases().length, 1);
+      assert.equal(w.clears().length, 0);
+      assert.ok(stuckHolder(w).stuck, 'still shown as STUCK');
+      a.release();
+    } finally { w.done(); }
+  }
+});
+
+test('stuck policy release: the lease is freed with a tombstone and a clears row, the process is never signalled', async () => {
+  const w = stuckWorld({ stuck: { policy: 'release' } });
+  const realKill = process.kill;
+  const signals = [];
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'stuck job', pid: 4711 });
+    w.t += 300_000;
+    putProg(w, a);
+    process.kill = (pid, sig) => { signals.push(sig); return realKill.call(process, pid, sig); };
+    assert.equal(sweepLedger({ ...w.opts }).length, 1);
+    process.kill = realKill;
+    const c = w.clears()[0];
+    assert.equal(c.rule, 'stuck-holder');
+    assert.equal(c.pid, 4711);
+    assert.equal(c.evidence.policy, 'release');
+    assert.equal(c.evidence.quietMs, 300_000);
+    assert.equal(w.leases().length, 0, 'capacity freed');
+    assert.equal(existsSync(join(w.dir, `lease-${a.id}.cleared`)), true, 'tombstone');
+    assert.equal(existsSync(join(w.dir, `lease-${a.id}.prog`)), false, 'sidecar removed with the lease');
+    assert.ok(w.lines.some((l) => /RELEASED the lease of pid 4711/.test(l) && /STUCK/.test(l) && /NOT touched/.test(l)), 'one loud line');
+    assert.deepEqual(signals.filter((s) => s !== 0 && s !== undefined), [], 'never a real signal');
+    // a progressing holder is not released even with the policy on
+    const b = await w.acq({ resources: { 'app-e2e': 1 }, label: 'busy job', pid: 4712 });
+    w.t += 300_000;
+    putProg(w, b, { lastAt: w.t - 10_000, sig: { cpu: 0, io: w.t - 10_000, spawn: 0, out: 0 } });
+    assert.equal(sweepLedger({ ...w.opts }).length, 0);
+    assert.equal(w.leases().length, 1);
+    b.release();
+  } finally { process.kill = realKill; w.done(); }
+});
+
+test('release sticks: a released holder\'s next heartbeat does not re-take the lease and logs one line', async () => {
+  const w = stuckWorld({ stuck: { policy: 'release' } });
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'stuck job', pid: 4713 });
+    w.t += 300_000;
+    putProg(w, a);
+    assert.equal(sweepLedger({ ...w.opts }).length, 1);
+    assert.equal(a.disowned, false, 'not yet noticed');
+    a.beat();
+    assert.equal(w.leases().length, 0, 'the lease file is not written back');
+    assert.equal(a.disowned, true);
+    assert.equal(a.trackable, false);
+    const said = () => w.lines.filter((l) => /was released \(by hand or by a rule/.test(l) && /keeps running without it/.test(l));
+    assert.equal(said().length, 1);
+    w.t += 60_000;
+    a.beat(); a.beat();
+    assert.equal(w.leases().length, 0);
+    assert.equal(said().length, 1, 'said once');
+    a.release(); // only tidies
+    assert.equal(w.leases().length, 0);
+  } finally { w.done(); }
+});
+
+test('release sticks for a hand release too: the wrapper timer notices through checkCleared', async () => {
+  const { releaseLease } = await import('../scripts/ci-budget.mjs');
+  const w = stuckWorld();
+  try {
+    const a = await w.acq({ resources: { 'app-e2e': 1 }, label: 'by hand job', pid: 4714 });
+    assert.equal(a.checkCleared(), false, 'nothing released yet');
+    assert.equal(releaseLease({ ...w.opts, id: a.id }).ok, true);
+    assert.equal(a.checkCleared(), true);
+    a.beat();
+    assert.equal(w.leases().length, 0);
+    a.release();
+  } finally { w.done(); }
+});
+
+test('resize on a lease released from outside does not write the lease file back', () => {
+  const w = makeWorld({ cores: 64, budget: 16 });
+  try {
+    const a = acquire({ ...w.opts, kind: 'full', desired: 4 });
+    const [e] = w.leases();
+    assert.equal(a.resize(2).units, 2);
+    // released by hand: tombstone plus the lease file gone
+    writeFileSync(join(w.dir, `lease-${e.id}.cleared`), JSON.stringify({ by: 'manual', at: w.t }));
+    rmSync(join(w.dir, `lease-${e.id}.json`), { force: true });
+    const got = a.resize(3, { resample: true });
+    assert.equal(got.units, 2, 'nothing granted, nothing written');
+    assert.equal(w.leases().length, 0, 'the release is not undone');
+    assert.equal(a.disowned, true);
+    a.release();
+  } finally { w.done(); }
+});
+
+test('Windows rollout: each lease is mirrored into the old ledger (stub with units and heartbeat) and removed with it; never when the mirror is the ledger', () => {
+  const w = makeWorld({ cores: 64, budget: 16 });
+  const old = mkdtempSync(join(tmpdir(), 'rq-oldpath-'));
+  try {
+    const a = acquire({ ...w.opts, mirrorDir: old, kind: 'full', desired: 5 });
+    const [e] = w.leases();
+    const stub = () => JSON.parse(readFileSync(join(old, `lease-${e.id}.json`), 'utf8'));
+    assert.equal(stub().units, 5); assert.equal(stub().id, e.id); assert.equal(stub().repo, e.repo);
+    assert.ok(existsSync(join(old, `lease-${e.id}.hb`)), 'heartbeat file beside it');
+    a.resize(2);
+    assert.equal(stub().units, 2, 'a resize refreshes the stub');
+    a.release();
+    assert.equal(existsSync(join(old, `lease-${e.id}.json`)), false);
+    assert.equal(existsSync(join(old, `lease-${e.id}.hb`)), false);
+    // a hand release removes the stub too
+    const b = acquire({ ...w.opts, mirrorDir: old, kind: 'full', desired: 3 });
+    const id = w.leases()[0].id;
+    assert.ok(existsSync(join(old, `lease-${id}.json`)));
+    releaseLease({ ...w.opts, mirrorDir: old, id });
+    assert.equal(existsSync(join(old, `lease-${id}.json`)), false);
+    b.release();
+    // the mirror folder equal to the ledger writes nothing extra
+    const c = acquire({ ...w.opts, mirrorDir: w.dir, kind: 'full', desired: 1 });
+    assert.equal(w.leases().length, 1);
+    c.release();
+    assert.equal(w.leases().length, 0);
+  } finally { w.done(); rmSync(old, { recursive: true, force: true }); }
 });

@@ -151,14 +151,18 @@ test('run: without the token the same nested run queues behind its parent (contr
     const nested = b.script('nested-no-token.mjs', `
       import { spawnSync } from 'node:child_process';
       const env = { ...process.env }; delete env.AC_RESOURCE_LEASE;
-      const r = spawnSync(process.execPath, [${JSON.stringify(CLI)}, 'run', '--resource', 'app-e2e', '--max-wait', '1', '--', process.execPath, '-e', 'console.log("inner ran")'], { encoding: 'utf8', windowsHide: true, env });
+      const r = spawnSync(process.execPath, [${JSON.stringify(CLI)}, 'run', '--resource', 'app-e2e', '--max-wait', '1', '--', process.execPath, '-e', 'console.log("inner ran")'], { encoding: 'utf8', windowsHide: true, env, timeout: 6000 });
       console.log(JSON.stringify({ status: r.status, err: r.stderr.trim() }));
     `);
     const r = b.run(['run', '--resource', 'app-e2e', '--', NODE, nested]);
     assert.equal(r.status, 0, r.stderr);
     const got = JSON.parse(r.stdout);
     assert.match(got.err, /waiting, position 1/);
-    assert.match(got.err, /running over budget/);
+    // The exclusive lane is never granted over capacity: past the bound it keeps waiting (the test kills it).
+    assert.match(got.err, /waiting past the 1 s bound for exclusive app-e2e/);
+    assert.doesNotMatch(got.err, /OVER-CAPACITY|running over budget/);
+    // Killed by the test's timeout: null where the signal ends the process, 143 where the CLI traps SIGTERM and exits (Linux).
+    assert.ok(got.status === null || got.status === 143, `killed while waiting, got ${got.status}`);
   } finally { b.done(); }
 });
 
@@ -198,10 +202,11 @@ test('RESOURCE_QUEUE=0 and CI_LOCAL_LOCK=0 run the command at once: no lease, no
       assert.equal(readdirSync(b.ledger).filter((n) => /^ticket-/.test(n)).length, 0);
     }
     // Control: the same request without the opt-out does wait on the holder.
-    const waited = b.run(['run', '--resource', 'app-e2e', '--max-wait', '1', '--', NODE, '-e', 'console.log("went")']);
-    assert.equal(waited.status, 0);
+    const waited = b.run(['run', '--resource', 'app-e2e', '--max-wait', '1', '--', NODE, '-e', 'console.log("went")'], {}, { timeout: 6000 });
+    assert.notEqual(waited.status, 0, 'never granted while the exclusive holder lives');
     assert.match(waited.stderr, /waiting, position 1.*app-e2e 1\/1 held by pid/);
-    assert.match(waited.stderr, /running over budget/);
+    assert.match(waited.stderr, /waiting past the 1 s bound for exclusive app-e2e/);
+    assert.doesNotMatch(waited.stderr, /running over budget/);
   } finally {
     holder.release();
     b.done();

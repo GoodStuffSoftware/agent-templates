@@ -38,13 +38,15 @@ function who(h, long) {
   const name = clip(h.label || (h.session ? String(h.session).slice(0, 8) : h.id), 16);
   if (!long) return name;
   const proj = clip(h.project || h.repo || '', 12);
-  return `${name}${proj ? `@${proj}` : ''} ${ageText(h.ageMs)}${h.alive === false ? ' DEAD' : h.stale ? ' STALE' : ''}${isQuiet(h) ? ' IDLE?' : ''}${h.overTime ? ' OVER' : ''}${h.hbStale ? ' HB?' : ''}`;
+  return `${name}${proj ? `@${proj}` : ''} ${ageText(h.ageMs)}${h.alive === false ? ' DEAD' : h.stale ? ' STALE' : ''}${h.stuck ? ` STUCK ${ageText(h.stuck.quietMs)}` : ''}${isQuiet(h) && !h.stuck && !recentProgress(h) ? ' IDLE?' : ''}${h.overTime && !h.stuck ? ' OVER' : ''}${h.hbStale ? ' HB?' : ''}`;
 }
 
 // A holder over time AND measured quiet shows both flags (the sweep sets idleFlag beside overTime; a
 // status that carries only overTime.activity "idle" is read the same way).
 const isQuiet = (h) => Boolean(h.idleFlag) || h.overTime?.activity === 'idle';
-const isFlagged = (h) => isQuiet(h) || Boolean(h.overTime) || Boolean(h.hbStale);
+// A holder whose progress sampler saw work (io, spawn, output) inside the idle window is not idle, only quiet on cpu.
+const recentProgress = (h) => Boolean(h.progress && h.progress.fresh && !h.progress.stuck && Number(h.progress.quietMs) < Number(h.idleFlag?.idleLimitMs ?? Infinity));
+const isFlagged = (h) => Boolean(h.stuck) || isQuiet(h) || Boolean(h.overTime) || Boolean(h.hbStale);
 // The way out for a hung flagged holder: the stable launcher (installed at SessionStart) plus its lease id.
 export const releaseHint = (h) => `release a flagged one by hand: node ~/.claude/agent-companion/bin/resource-queue.mjs release ${h.id}`;
 
@@ -166,7 +168,7 @@ export function resourceSignature(status, now = Date.now(), leads = 0) {
   const lb = Number(leads) > LEAD_WARN_ABOVE ? 'warn' : leadsShown(leads) ? 'few' : '';
   if (!hasActivity(status, now)) return lb ? JSON.stringify(['leads', lb]) : '';
   const hs = [];
-  for (const r of status.resources ?? []) for (const h of r.holders ?? []) hs.push(`${r.name}:${h.id}:${h.alive === false ? 'd' : h.stale ? 's' : 'a'}${isQuiet(h) ? 'i' : ''}${h.overTime ? 'o' : ''}${h.hbStale ? 'h' : ''}`);
+  for (const r of status.resources ?? []) for (const h of r.holders ?? []) hs.push(`${r.name}:${h.id}:${h.alive === false ? 'd' : h.stale ? 's' : 'a'}${isQuiet(h) ? 'i' : ''}${h.overTime ? 'o' : ''}${h.hbStale ? 'h' : ''}${h.stuck ? 'k' : ''}`);
   return JSON.stringify([
     hs, (status.queue ?? []).map((e) => e.id), (status.reservations ?? []).map((r) => r.id ?? r.resource),
     recentClearsIn(status, now).map((c) => `${c.at}:${c.id}`), lb,

@@ -3,7 +3,9 @@
 //
 //   node <plugin>/scripts/resource-queue.mjs run --resource box:8 [--resource app-e2e[:N]]
 //        [--class <id>] [--ram 4G] [--label <text>] [--max-wait <seconds>] [--shell bash] -- <cmd...>
-//        (--shell bash: one argument, a bash command line run byte for byte by bash)
+//        (--shell bash: one argument, a bash command line run byte for byte by bash;
+//         --shell powershell: the PowerShell command line is read from the AC_RQ_COMMAND environment variable,
+//         no `--` needed, and run by pwsh or powershell.exe: the PowerShell tool's resource gate uses it)
 //   node <plugin>/scripts/resource-queue.mjs status [--json] [--resource <name>] [--sample] [--strays]
 //   node <plugin>/scripts/resource-queue.mjs sweep
 //   node <plugin>/scripts/resource-queue.mjs release <lease-id>
@@ -28,7 +30,7 @@ import { basename, delimiter, dirname, extname, isAbsolute, join, resolve } from
 import { constants as osConstants } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-  acquireResources, inspectLease, resourceStatus, formatResourceStatus, sweepLedger, lowerOwnPriority, releaseAll, REENTRY_ENV,
+  acquireResources, inspectLease, resourceStatus, formatResourceStatus, grantsSummary, formatGrantsSummary, sweepLedger, lowerOwnPriority, releaseAll, REENTRY_ENV, reapSettings, reapPlan,
   reserveResource, unreserveResource, holdMine, resumeMine, releaseLease,
 } from './ci-budget.mjs';
 import {
@@ -39,15 +41,17 @@ export { resourceStatus, formatResourceStatus, acquireResources, reserveResource
 
 const SELF = fileURLToPath(import.meta.url);
 const USAGE = [
-  'usage: resource-queue.mjs run --resource box:N [--resource <name>[:N]] [--class <id>] [--ram 4G] [--label <text>] [--max-wait <s>] [--group <name>] [--bind-pid <pid>] [--shell bash] -- <cmd...>',
+  'usage: resource-queue.mjs run --resource box:N [--resource <name>[:N]] [--class <id>] [--ram 4G] [--label <text>] [--max-wait <s>] [--group <name>] [--bind-pid <pid>] [--shell bash|powershell] -- <cmd...>',
   '       resource-queue.mjs run --resource <name> --bind-pid <pid>          (hold for a running daemon, no command)',
   '       resource-queue.mjs reserve <resource> --for <group> --until <30m|2h|14:30|ISO> [--reason <text>]    (at most 4 h)',
   '       resource-queue.mjs unreserve <resource> [--for <group>]',
   '       resource-queue.mjs hold [--until <time>]    pause my own queued entries (keep their place)',
   '       resource-queue.mjs resume',
   '       resource-queue.mjs status [--json] [--resource <name>] [--sample] [--strays]',
+  '       resource-queue.mjs grants [--hours N] [--json]    summary of the grants log: median and p90 wait, share of wait time per limiting resource',
   '       resource-queue.mjs release <lease-id>       release one lease by hand (a hung live holder); the process is not touched',
   '       resource-queue.mjs sweep',
+  '       resource-queue.mjs reap --dry-run [--json]    show which leftover processes of finished leases would be stopped (stops nothing, writes nothing)',
   '       resource-queue.mjs install-launcher',
 ].join('\n');
 
@@ -108,7 +112,8 @@ export function buildRequest({ resources = [], ram = null, cls = null }, rules, 
   const idle = ruleOf(rules, 'idle');
   const lim = limitsFor(rules, { kind: 'run', units: box, resources: named, limits });
   const monitored = Boolean(idle && idle.enabled !== false && (idle.appliesTo ?? ['run']).includes('run') && lim.idleMs);
-  return { box, resources: named, ramMb, limits, class: cls, monitored, probe };
+  const reapTree = klass ? klass.reapTree !== false : true; // per class: reapTree: false opts out of tree tracking
+  return { box, resources: named, ramMb, limits, class: cls, monitored, probe, reapTree };
 }
 
 /** Subtract what an ancestor lease already holds (re-entrancy). Returns the remainder or null when all is covered. */
@@ -185,7 +190,22 @@ export function bashFor(env = process.env, exists = existsSync) {
   return null;
 }
 
-/** The env variable `run --shell bash` passes the command line in. */
+/**
+ * The PowerShell for `run --shell powershell`, or null: pwsh when on PATH (a superset of what the
+ * PowerShell tool's commands use, with `&&`), else Windows PowerShell.
+ */
+export function powershellFor(env = process.env) {
+  const pwsh = findOnPath('pwsh', env);
+  if (pwsh) return pwsh;
+  if (process.platform !== 'win32') return null;
+  return findOnPath('powershell', env) || join(env.SystemRoot || env.windir || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+}
+
+// Runs the command line from the environment variable and keeps a native program's exit code (-Command alone
+// reports only success or failure of the last statement).
+export const POWERSHELL_WRAPPER = '$global:LASTEXITCODE = 0; Invoke-Expression $env:AC_RQ_COMMAND; if ($LASTEXITCODE) { exit $LASTEXITCODE } elseif (-not $?) { exit 1 } else { exit 0 }';
+
+/** The env variable `run --shell bash|powershell` passes the command line in. */
 export const SHELL_COMMAND_ENV = 'AC_RQ_COMMAND';
 
 const cmdQuote = (a) => (a === '' || /[\s"&|<>^()%!]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a);
@@ -243,6 +263,14 @@ export async function runUnderQueue({
       return 127;
     }
   }
+  let pwsh = null;
+  if (shell === 'powershell') {
+    pwsh = (io.powershellFor ?? powershellFor)(env);
+    if (!pwsh) {
+      err('resource-queue: --shell powershell: no PowerShell found (pwsh or powershell.exe); the command was not run. Run it without the queue: prefix $env:RESOURCE_QUEUE = 0.');
+      return 127;
+    }
+  }
   lowerOwnPriority();
   const off = String(env.RESOURCE_QUEUE ?? '').trim() === '0' || String(env.CI_LOCAL_LOCK ?? '').trim() === '0';
   let req = request; let lease = null;
@@ -264,7 +292,7 @@ export async function runUnderQueue({
   if (!off && req) {
     for (const [s, h] of early) process.on(s, h);
     lease = await (io.acquire ?? acquireResources)({
-      env, box: req.box, resources: req.resources, ramMb: req.ramMb, label, limits: req.limits, monitored: req.monitored,
+      env, cls: request.class ?? '', box: req.box, resources: req.resources, ramMb: req.ramMb, label, limits: req.limits, monitored: req.monitored,
       maxWaitMs: maxWaitSeconds === null ? undefined : maxWaitSeconds * 1000, log: err, group, bindPid, ...(io.ledger ?? {}),
     });
     for (const [s, h] of early) process.off(s, h);
@@ -283,6 +311,9 @@ export async function runUnderQueue({
   if (bash) {
     childEnv[SHELL_COMMAND_ENV] = cmd[0];
     plan = { file: bash, args: ['-c', `eval "$${SHELL_COMMAND_ENV}"`], verbatim: false, mode: 'bash' };
+  } else if (pwsh) {
+    childEnv[SHELL_COMMAND_ENV] = cmd[0];
+    plan = { file: pwsh, args: ['-NoProfile', '-NonInteractive', '-Command', POWERSHELL_WRAPPER], verbatim: false, mode: 'powershell' };
   } else plan = planCommand(cmd, env);
   let child;
   try {
@@ -295,17 +326,14 @@ export async function runUnderQueue({
     return e.code === 'EACCES' ? 126 : 127;
   }
 
-  let probeTimer = null; let probeNoted = false;
+  let probeTimer = null;
   if (lease && !lease.off && request.monitored) {
     const rules = io.rules ?? loadRules(env);
     const idleRule = ruleOf(rules, 'idle') ?? {};
     const sampleMs = io.probeMs ?? idleRule.sampleMs ?? 30_000;
     let prev = null; let activeAt = Date.now();
     probeTimer = setInterval(() => {
-      if (lease.cleared && !probeNoted) {
-        probeNoted = true;
-        err(`resource-queue: this lease was cleared by a rule (see "status --json" recent clears); the command keeps running.`);
-      }
+      if (lease.checkCleared()) return; // released from outside: the lease logs it once; no more probing or recording
       const s = (io.probe ?? sampleTree)(child.pid, { prev, minCpuPct: idleRule.minCpuPct ?? 5, ...request.probe });
       if (!s) return; // unreadable: leave the sidecar alone, the lease reads "unknown", never "idle"
       prev = s;
@@ -313,6 +341,21 @@ export async function runUnderQueue({
       lease.recordActivity(s.at, activeAt, s.ev);
     }, sampleMs);
     probeTimer.unref?.();
+  }
+
+  // Tree tracking (reaper.mjs): a timer of this wrapper, not the heartbeat thread. Each tick takes ONE process
+  // snapshot (slow on Windows), outside any ledger lock, records the lease's tree, then runs the orphan pass.
+  let reapTimer = null;
+  if (lease && !lease.off && !lease.bound && request.reapTree !== false && lease.trackable) {
+    const rc = reapSettings(io.ledger ?? {});
+    const tick = () => {
+      if (lease.released || lease.checkCleared()) return; // released from outside: stop tracking, the child finishes unleased
+      try { lease.track(); } catch { /* best effort */ }
+      reapTimer = setTimeout(tick, rc.trackMs);
+      reapTimer.unref?.();
+    };
+    reapTimer = setTimeout(tick, rc.firstTickMs);
+    reapTimer.unref?.();
   }
 
   const fwd = (sig) => () => {
@@ -333,10 +376,28 @@ export async function runUnderQueue({
     child.on('exit', (c, sig) => done(c ?? (sig ? 128 + signalNumber(sig) : 1)));
   });
   clearInterval(probeTimer);
+  clearTimeout(reapTimer);
   clearTimeout(abort.timer);
   for (const [s, h] of handlers) process.off(s, h);
   if (!lease?.bound) lease?.release();
   return code;
+}
+
+/** Text form of reapPlan(): one line per process that would be stopped, then the spared ones. */
+export function formatReapPlan(plan) {
+  if (!plan.tableOk) return 'reap: the process table could not be read; nothing to show.';
+  const lines = [`reap policy: ${plan.policy}${plan.policy === 'off' ? ' (nothing is stopped while it is off; this is only the plan)' : ''}`];
+  if (!plan.entries.length) { lines.push('nothing to reap: no finished lease has recorded processes left.'); return lines.join('\n'); }
+  for (const e of plan.entries) {
+    if (e.skipped) { lines.push(`lease ${e.id}: its wrapper (pid ${e.rootPid}) is still running; not an orphan, left alone`); continue; }
+    const { targets, spared, stale } = e.plan;
+    if (!targets.length) lines.push(`lease ${e.id}: nothing left to stop (${stale.length} recorded process${stale.length === 1 ? '' : 'es'} already gone)`);
+    for (const t of targets) {
+      lines.push(`would stop pid ${t.pid} ${t.image}${t.memMb != null ? ` (${t.memMb} MB)` : ''}: lease ${e.id}, ${t.how} of the wrapper pid ${e.rootPid}, wrapper not running, creation time matches`);
+    }
+    for (const s of spared) lines.push(`  spared pid ${s.pid} ${s.image}: ${s.why}`);
+  }
+  return lines.join('\n');
 }
 
 function wantsLine(r) {
@@ -432,13 +493,13 @@ export async function cli(argv, io = {}) {
     if (cmd === 'run') {
       const sep = rest.indexOf('--');
       if (sep >= 0 && sep === rest.length - 1) throw new Error('run needs a command after "--"');
-      const flags = sep < 0 ? rest : rest.slice(0, sep); const command = sep < 0 ? [] : rest.slice(sep + 1);
+      const flags = sep < 0 ? rest : rest.slice(0, sep); let command = sep < 0 ? [] : rest.slice(sep + 1);
       const resources = []; let ram = null; let cls = null; let label = ''; let maxWait = null; let group = ''; let bindPid = 0; let shell = '';
       for (let i = 0; i < flags.length; i += 1) {
         const f = flags[i];
         if (f === '--shell') {
           shell = flagValue(flags, i, f);
-          if (shell !== 'bash') throw new Error(`bad --shell "${shell}" (only bash)`);
+          if (shell !== 'bash' && shell !== 'powershell') throw new Error(`bad --shell "${shell}" (bash or powershell)`);
           i += 1;
         } else if (f === '--group') {
           group = flagValue(flags, i, f);
@@ -461,8 +522,10 @@ export async function cli(argv, io = {}) {
           i += 1;
         } else throw new Error(`unknown option "${f}"`);
       }
+      // --shell powershell: the command line travels in the environment (a Windows PowerShell 5.1 argument loses its double quotes).
+      if (shell === 'powershell' && !command.length && String(env[SHELL_COMMAND_ENV] ?? '').trim()) command = [env[SHELL_COMMAND_ENV]];
       if (!command.length && !bindPid) throw new Error('run needs a command after "--" (or --bind-pid <pid> to hold for a running process)');
-      if (shell && command.length !== 1) throw new Error('--shell bash takes exactly one argument after "--": the command line');
+      if (shell && command.length !== 1) throw new Error(`--shell ${shell} takes exactly one command line (after "--" or, for powershell, in ${SHELL_COMMAND_ENV})`);
       const rules = io.rules ?? loadRules(env);
       const request = buildRequest({ resources, ram, cls }, rules);
       return await runUnderQueue({
@@ -524,7 +587,7 @@ export async function cli(argv, io = {}) {
         else if (rest[i] === '--resource') { only = flagValue(rest, i, '--resource'); i += 1; }
         else throw new Error(`unknown option "${rest[i]}"`);
       }
-      let st = resourceStatus({ env, sample, strays: false, ...(io.ledger ?? {}) });
+      let st = resourceStatus({ env, sample, strays: false, reap: true, ...(io.ledger ?? {}) });
       // The text form takes one CPU sample when something is queued, so it can say why the head is blocked
       // (slots wanted vs available, outside load). `--json` stays unsampled unless asked, as before. The
       // stray scan (a process-table read) runs once, in the last call only.
@@ -539,6 +602,17 @@ export async function cli(argv, io = {}) {
       out(json ? JSON.stringify(st, null, 2) : formatResourceStatus(st));
       return 0;
     }
+    if (cmd === 'grants') {
+      let json = false; let hours = 24;
+      for (let i = 0; i < rest.length; i += 1) {
+        if (rest[i] === '--json') json = true;
+        else if (rest[i] === '--hours') { hours = Number(flagValue(rest, i, '--hours')); i += 1; if (!(hours > 0)) throw new Error('bad --hours (want a positive number)'); }
+        else throw new Error(`unknown option "${rest[i]}"`);
+      }
+      const g = grantsSummary({ env, hours, ...(io.ledger ?? {}) });
+      out(json ? JSON.stringify(g, null, 2) : formatGrantsSummary(g));
+      return 0;
+    }
     if (cmd === 'release') {
       if (rest.length !== 1 || rest[0].startsWith('--')) throw new Error('release needs exactly one lease id (the id shown by status)');
       const r = releaseLease({ env, id: rest[0], ...(io.ledger ?? {}) });
@@ -551,6 +625,18 @@ export async function cli(argv, io = {}) {
     if (cmd === 'sweep') {
       const cleared = sweepLedger({ env, log: err, ...(io.ledger ?? {}) });
       out(cleared.length ? cleared.map((c) => `cleared ${c.type} pid ${c.pid} (${c.why})`).join('\n') : 'nothing to clear');
+      return 0;
+    }
+    if (cmd === 'reap') {
+      let dry = false; let json = false;
+      for (const a of rest) {
+        if (a === '--dry-run') dry = true;
+        else if (a === '--json') json = true;
+        else throw new Error(`unknown option "${a}"`);
+      }
+      if (!dry) throw new Error('reap needs --dry-run: it only shows what would be stopped. To stop leftovers now, run: sweep');
+      const plan = reapPlan({ env, ...(io.ledger ?? {}) });
+      out(json ? JSON.stringify(plan, null, 2) : formatReapPlan(plan));
       return 0;
     }
     if (cmd === 'install-launcher') {

@@ -100,7 +100,7 @@ test('the suite processes and their children inherit the below-normal priority s
     mkdirSync(join(root, 'old-locks'));
     writeFileSync(join(tree, 'scripts', 'ci-local.mjs'), readFileSync(join(REPO, 'scripts', 'ci-local.mjs')));
     mkdirSync(join(tree, 'plugins', 'agent-companion', 'scripts'), { recursive: true });
-    for (const rel of [['scripts', 'ci-budget.mjs'], ['scripts', 'lib', 'resource-rules.mjs'], ['config', 'resource-rules.json']]) {
+    for (const rel of [['scripts', 'ci-budget.mjs'], ['scripts', 'lib', 'resource-rules.mjs'], ['scripts', 'lib', 'reaper.mjs'], ['scripts', 'lib', 'live-capacity.mjs'], ['hooks', 'lib', 'context.mjs'], ['hooks', 'lib', 'routing-profile.mjs'], ['config', 'resource-rules.json']]) {
       mkdirSync(dirname(join(tree, 'plugins', 'agent-companion', ...rel)), { recursive: true });
       writeFileSync(join(tree, 'plugins', 'agent-companion', ...rel), readFileSync(join(REPO, 'plugins', 'agent-companion', ...rel)));
     }

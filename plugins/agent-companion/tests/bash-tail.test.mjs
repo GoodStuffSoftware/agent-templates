@@ -402,7 +402,7 @@ test('hook: a fixture session does not write result rows into the production str
 
 test('hook: hooks.json registers it on exactly ^Bash$ and plugin.json declares both options', () => {
   const hooks = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks.PreToolUse;
-  const entry = hooks.find((h) => h.matcher === '^Bash$');
+  const entry = hooks.find((h) => h.matcher === '^(Bash|PowerShell)$');
   assert.ok(entry);
   assert.ok(entry.hooks[0].args[0].endsWith('hooks/bash-tail.mjs'));
   const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).userConfig;
@@ -664,6 +664,18 @@ test('wrapper: with noclobber on (set -C, and bash -C) the original runs as writ
     assert.equal(plain.status, 3);
     assert.match(plain.stdout, /\[ac-bash-tail\] exit 3; 201 lines/);
   } finally { t.done(); }
+});
+
+test('readPermissionRules: PowerShell(...) deny rules are read too, and a PowerShell deny rule blocks the wrap', () => {
+  const fx = makeFixture();
+  try {
+    const cd = join(fx.dir, 'cfg');
+    mkdirSync(cd, { recursive: true });
+    writeFileSync(join(cd, 'settings.json'), JSON.stringify({ permissions: { deny: ['PowerShell(git push:*)', 'PowerShell', 'Edit(x)'] } }));
+    const rules = readPermissionRules({ claudeDirPath: cd });
+    assert.deepEqual(rules.map((r) => `${r.kind}:${r.pattern}`), ['deny:git push:*', 'deny:']);
+    assert.ok(blockingPermissionRule(rules.slice(0, 1), 'git push origin main'), 'the PowerShell deny rule matches like a Bash one');
+  } finally { fx.cleanup(); }
 });
 
 test('readPermissionRules: a settings file with a UTF-8 BOM is read, so its deny rule is seen', () => {
