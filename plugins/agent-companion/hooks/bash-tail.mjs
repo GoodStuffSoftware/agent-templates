@@ -45,6 +45,7 @@ import {
   analyze, wrapCommand, outputTarget, pruneOldOutputs, modeAllowed, shellPath, TELEMETRY_STREAM,
   readPermissionRules, blockingPermissionRule,
 } from './lib/bash-tail.mjs';
+import { worktreeRemoveDecision } from './lib/worktree-remove.mjs';
 import { gateDecision, gateMode, DEFAULT_GATE_MODE, TELEMETRY_STREAM as GATE_STREAM } from './lib/resource-gate.mjs';
 
 // Enterprise-managed settings, where Claude Code reads them.
@@ -111,6 +112,28 @@ try {
   input = p.tool_input;
   if (!input || typeof input.command !== 'string') passthrough();
   if (isServedCall(p)) passthrough();
+
+  // ---- step 0: worktree remove over junctions (scripts/worktree-remove-safe.mjs) ---------
+  // A `git worktree remove` of a tree that holds junctions or directory symlinks is rewritten to the
+  // safe script (git follows a Windows junction and empties its target). Silent: no note, a rewrite
+  // the agent never has to act on; a denial only when a rewrite is not clean. Opt-out: worktree_remove_safe=false.
+  try {
+    if (opt('worktree_remove_safe', true) && /worktree/.test(input.command) && !permissionHit(p, input.command)) {
+      const w = worktreeRemoveDecision(input.command, {
+        cwd: typeof p.cwd === 'string' && p.cwd ? p.cwd : process.cwd(),
+        shell: isPs ? 'powershell' : 'bash',
+        psRewrite: opt('resource_gate_powershell_rewrite', false) === true,
+      });
+      if (w.action !== 'none') {
+        gateRow(p, { event: w.action === 'deny' ? 'worktree-remove-denied' : 'worktree-remove-rewritten', tool: p.tool_name, command_chars: input.command.length, count: w.count });
+        if (w.action === 'deny') {
+          writeAndExit(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: w.text } }));
+        }
+        gateCommand = w.command;
+        finish();
+      }
+    }
+  } catch { /* fails open: the command runs as written */ }
 
   // ---- step 1: the resource gate (independent of the output-tail option) ------
   try {
