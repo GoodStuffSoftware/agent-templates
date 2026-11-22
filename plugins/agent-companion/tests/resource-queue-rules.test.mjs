@@ -42,7 +42,7 @@ const shipped = () => loadRules({ AC_RESOURCE_RULES: join(tmpdir(), 'rq-no-such-
 test('the shipped rules name every measured class with a box size, RAM and a hold limit', () => {
   const r = shipped();
   const ids = r.classes.map((c) => c.id).sort();
-  assert.deepEqual(ids, ['e2e', 'e2e-spec', 'emulator', 'fs-emulator', 'gradle', 'install', 'lint', 'node-test-full', 'push-gate', 'vitest-dir', 'vitest-full']);
+  assert.deepEqual(ids, ['build', 'e2e', 'e2e-spec', 'emulator', 'fs-emulator', 'gradle', 'install', 'lint', 'node-test-full', 'push-gate', 'test-suite', 'vitest-dir', 'vitest-full']);
   for (const c of r.classes) {
     assert.ok(c.box >= 1, `${c.id} box`);
     assert.ok(c.ramMb > 0, `${c.id} ramMb`);

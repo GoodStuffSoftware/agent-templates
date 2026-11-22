@@ -119,7 +119,7 @@ Shipped defaults: `plugins/agent-companion/config/resource-rules.json`. The user
 |---|---|
 | `ram` | `reserveMb` (null = auto), `reserveMinMb` 2048, `reserveFraction` 0.125, `rampMs` 60000 |
 | `resources.<name>` | `capacity`, and the limits `maxHoldMs`, `minHoldMs`, `idleMs` for leases that hold it |
-| `classes[]` | A named kind of heavy command: `id`, `box` units, `resources`, `ramMb`, `maxHoldMs`, `ports` (listening-socket bands that count as activity), `busyChildren` (process names that count as activity), `notes`. `run --class <id>` fills the request from it. The shipped classes are `e2e`, `e2e-spec`, `push-gate`, `vitest-full`, `vitest-dir`, `lint`, `emulator`, `gradle`, `fs-emulator`, `install` and `node-test-full`. Figures marked M in the file are measured, E are conservative estimates |
+| `classes[]` | A named kind of heavy command: `id`, `box` units, `resources`, `ramMb`, `maxHoldMs`, `ports` (listening-socket bands that count as activity), `busyChildren` (process names that count as activity), `notes`. `run --class <id>` fills the request from it. The shipped classes are `e2e`, `e2e-spec`, `push-gate`, `vitest-full`, `vitest-dir`, `lint`, `emulator`, `gradle`, `fs-emulator`, `install`, `node-test-full`, `build` and `test-suite`. Figures marked M in the file are measured, E are conservative estimates |
 | `rules[]` | The clear rules below. `enabled` and the numbers can be overridden by `id` |
 | `legacyLocks[]` | Held-lock directories of older tooling that the admitter reads (never writes) and waits for. Empty by default. There is no yield file: no file read by the queue can stop every waiter |
 | `strays[]` | Processes that should not run while nothing holds their resource, for `status --strays` |
