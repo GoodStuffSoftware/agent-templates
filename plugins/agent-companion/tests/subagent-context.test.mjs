@@ -239,7 +239,7 @@ test('SubagentStop: a mid-run event reaches the lead next to the runaway flag, o
     const text = ctxText(leadDrain(lead));
     assert.match(text, /runaway spawn: general-purpose/);
     assert.match(text, /subagent context: general-purpose \(worker-ctx-t\) compacted; row in subagent-context\.jsonl\./);
-    assert.doesNotMatch(text, /split what it left|told mid-run/, 'a compaction alone: no advice to the lead');
+    assert.doesNotMatch(text, /brief ONE fresh|told mid-run/, 'a compaction alone: no advice to the lead');
     assert.equal((text.match(/subagent context:/g) || []).length, 1, 'reported once');
     assert.equal(leadDrain(lead).stdout.trim(), '');
     assert.equal(rows().length, 1, 'the stop did not log a second row for the same compaction');
@@ -273,7 +273,9 @@ test('SubagentStop fallback: a worker the mid-run hook never reached is recorded
     assert.equal(logged[0].kind, 'size');
     const text = ctxText(leadDrain(lead));
     assert.match(text, /subagent context: general-purpose \(worker-ctx-t\) passed 110,000 tokens of context \(340,000 at its last call\); it was not reached mid-run\./);
-    assert.match(text, /otherwise split what it left into smaller briefs/);
+    assert.match(text, /otherwise brief ONE fresh same-rung worker with the whole remaining build scope \(code, tests, fixes, landing\)/);
+    assert.match(text, /never split the remaining build across several writers/);
+    assert.doesNotMatch(text, /smaller briefs|its own review/);
   } finally { fx.cleanup(); }
 });
 

@@ -55,6 +55,14 @@
               "pre"
             ],
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/read-cap.mjs"
+            ],
+            "timeout": 10
           }
         ]
       },

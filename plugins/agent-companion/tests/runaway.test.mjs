@@ -181,3 +181,72 @@ test('fails open: missing transcript, garbage stdin', () => {
     assert.equal(b.status, 0);
   } finally { fx.cleanup(); }
 });
+
+// --- interrupted background workers (hooks/lib/interrupted-workers.mjs, delivered by runaway-notice on UserPromptSubmit) ---
+
+function interruptedFixture(fx, { sid = 'lead-int-1' } = {}) {
+  const proj = join(fx.dir, 'proj');
+  const subs = join(proj, sid, 'subagents');
+  mkdirSync(subs, { recursive: true });
+  const lead = join(proj, `${sid}.jsonl`);
+  writeFileSync(lead, '{"type":"user"}\n');
+  const worker = (id, meta, records) => {
+    writeFileSync(join(subs, `agent-${id}.jsonl`), records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    writeFileSync(join(subs, `agent-${id}.meta.json`), JSON.stringify(meta));
+  };
+  const marker = (at) => ({ type: 'user', timestamp: at, message: { role: 'user', content: [{ type: 'text', text: '[Request interrupted by user]' }] } });
+  const prompt = () => runHook('hooks/runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: sid, transcript_path: lead, prompt: 'go on' });
+  return { subs, worker, marker, prompt, lead };
+}
+
+test('interrupted background workers: one line each, once, with the last handoff file; others are left out', () => {
+  const fx = makeFixture();
+  try {
+    const t = interruptedFixture(fx);
+    const handoff = join(fx.dir, 'tasks', 'widget-handoff.md');
+    mkdirSync(join(fx.dir, 'tasks'), { recursive: true });
+    writeFileSync(handoff, '# handoff\n');
+    const write = { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Write', input: { file_path: handoff, content: 'x' } }] } };
+    t.worker('widget-1', { agentType: 'agent-companion:ac-sonnet-high', description: 'Build the widget', name: 'widget-writer', requestShape: 'background' },
+      [write, t.marker('2026-11-21T10:11:12.000Z')]);
+    t.worker('docs-1', { agentType: 'general-purpose', description: 'Survey docs', name: 'docs-scout', requestShape: 'background' },
+      [t.marker('2026-11-21T10:11:12.000Z')]);
+    // not reported: finished normally, resumed after the interrupt, a foreground helper, a quoted marker mid-message
+    t.worker('done-1', { description: 'done one', requestShape: 'background' }, [{ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'STATUS: done' }] } }]);
+    t.worker('resumed-1', { description: 'resumed one', requestShape: 'background' }, [t.marker('2026-11-21T10:00:00.000Z'), { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'carrying on' }] } }]);
+    t.worker('fg-1', { description: 'foreground one', requestShape: 'foreground' }, [t.marker('2026-11-21T10:11:12.000Z')]);
+    t.worker('quoter-1', { description: 'quoter', requestShape: 'background' }, [{ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'the marker is "[Request interrupted by user]"' }] } }]);
+
+    const first = t.prompt();
+    assert.equal(first.json.hookSpecificOutput.hookEventName, 'UserPromptSubmit');
+    const text = first.json.hookSpecificOutput.additionalContext;
+    const rows = text.split('\n');
+    assert.equal(rows.length, 2, text);
+    const w = rows.find((l) => l.includes('widget-writer'));
+    assert.match(w, /background worker interrupted: widget-writer "Build the widget" \(widget-1, agent-companion:ac-sonnet-high\)/);
+    assert.match(w, /at 10:11:12Z/);
+    assert.ok(w.includes(`its last handoff file: ${handoff}`), w);
+    assert.match(w, /Respawn it fresh on the same rung from its handoff or original brief\./);
+    assert.match(rows.find((l) => l.includes('docs-scout')), /it wrote no handoff file/);
+    assert.doesNotMatch(text, /done one|resumed one|foreground one|quoter/);
+
+    assert.equal(t.prompt().stdout.trim(), '', 'each worker is reported once');
+    t.worker('late-1', { description: 'late one', name: 'late', requestShape: 'background' }, [t.marker('2026-11-21T10:30:00.000Z')]);
+    const later = t.prompt().json.hookSpecificOutput.additionalContext;
+    assert.equal(later.split('\n').length, 1);
+    assert.match(later, /late "late one"/);
+  } finally { fx.cleanup(); }
+});
+
+test('interrupted-worker notice: a subagent payload, the option off and no subagents directory are all silent', () => {
+  const fx = makeFixture();
+  try {
+    const t = interruptedFixture(fx, { sid: 'lead-int-2' });
+    t.worker('held-1', { description: 'x', requestShape: 'background' }, [t.marker('2026-11-21T10:11:12.000Z')]);
+    const base = { hook_event_name: 'UserPromptSubmit', session_id: 'lead-int-2', transcript_path: t.lead };
+    assert.equal(runHook('hooks/runaway-notice.mjs', { ...base, agent_id: 'w1' }).stdout.trim(), '');
+    assert.equal(runHook('hooks/runaway-notice.mjs', base, { env: { CLAUDE_PLUGIN_OPTION_INTERRUPTED_WORKER_NOTICE: '0' } }).stdout.trim(), '');
+    assert.equal(runHook('hooks/runaway-notice.mjs', { ...base, session_id: 'lead-int-3', transcript_path: join(fx.dir, 'proj', 'lead-int-3.jsonl') }).stdout.trim(), '');
+    assert.match(t.prompt().json.hookSpecificOutput.additionalContext, /held-1/, 'the silent runs claimed nothing');
+  } finally { fx.cleanup(); }
+});
