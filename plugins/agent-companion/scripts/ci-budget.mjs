@@ -1982,6 +1982,7 @@ export function resourceStatus(opts = {}) {
     return {
       ...base, ok: false, error: String(err && err.message || err), dir: null, machine: null,
       resources: [], queue: [], reservations: [], recentClears: [], legacyLocks: [], strays: null,
+      foreign: { count: 0, dirs: [] },
     };
   }
 }
