@@ -31,7 +31,9 @@
     { "id": "gradle", "box": 6, "resources": { "gradle-{cwd}": 1 }, "ramMb": 4000, "maxHoldMs": 480000, "notes": "exclusive per project directory ({cwd} becomes an 8-hex hash of the working directory)" },
     { "id": "fs-emulator", "box": 3, "resources": { "fs-emu-ports": 1 }, "ramMb": 500, "maxHoldMs": 1800000 },
     { "id": "install", "box": 3, "ramMb": 1000, "maxHoldMs": 600000, "notes": "npm ci; disk and Defender bound (E)" },
-    { "id": "node-test-full", "box": 8, "ramMb": 1500, "maxHoldMs": 720000, "notes": "node --test over a whole directory (not ci-local, which holds its own lease); E: the ci-budget plain budget is 8" }
+    { "id": "node-test-full", "box": 8, "ramMb": 1500, "maxHoldMs": 720000, "notes": "node --test over a whole directory (not ci-local, which holds its own lease); E: the ci-budget plain budget is 8" },
+    { "id": "build", "box": 6, "ramMb": 3000, "maxHoldMs": 900000, "notes": "E: compile and bundle steps of other toolchains and package scripts: xcodebuild, cargo, dotnet, go build, docker build, npm run build, vite/nuxt/next/quasar build" },
+    { "id": "test-suite", "box": 8, "ramMb": 2000, "maxHoldMs": 900000, "notes": "E: test runs of other toolchains: pytest, cargo test, dotnet test, go test" }
   ],
   "rules": [
     { "id": "pid-dead", "builtin": true, "applies": "leases and tickets", "when": "the holder or requester pid is not alive; cleared at once" },

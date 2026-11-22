@@ -3,7 +3,9 @@
 //
 //   node <plugin>/scripts/resource-queue.mjs run --resource box:8 [--resource app-e2e[:N]]
 //        [--class <id>] [--ram 4G] [--label <text>] [--max-wait <seconds>] [--shell bash] -- <cmd...>
-//        (--shell bash: one argument, a bash command line run byte for byte by bash)
+//        (--shell bash: one argument, a bash command line run byte for byte by bash;
+//         --shell powershell: the PowerShell command line is read from the AC_RQ_COMMAND environment variable,
+//         no `--` needed, and run by pwsh or powershell.exe: the PowerShell tool's resource gate uses it)
 //   node <plugin>/scripts/resource-queue.mjs status [--json] [--resource <name>] [--sample] [--strays]
 //   node <plugin>/scripts/resource-queue.mjs sweep
 //   node <plugin>/scripts/resource-queue.mjs release <lease-id>
@@ -39,7 +41,7 @@ export { resourceStatus, formatResourceStatus, acquireResources, reserveResource
 
 const SELF = fileURLToPath(import.meta.url);
 const USAGE = [
-  'usage: resource-queue.mjs run --resource box:N [--resource <name>[:N]] [--class <id>] [--ram 4G] [--label <text>] [--max-wait <s>] [--group <name>] [--bind-pid <pid>] [--shell bash] -- <cmd...>',
+  'usage: resource-queue.mjs run --resource box:N [--resource <name>[:N]] [--class <id>] [--ram 4G] [--label <text>] [--max-wait <s>] [--group <name>] [--bind-pid <pid>] [--shell bash|powershell] -- <cmd...>',
   '       resource-queue.mjs run --resource <name> --bind-pid <pid>          (hold for a running daemon, no command)',
   '       resource-queue.mjs reserve <resource> --for <group> --until <30m|2h|14:30|ISO> [--reason <text>]    (at most 4 h)',
   '       resource-queue.mjs unreserve <resource> [--for <group>]',
@@ -188,7 +190,22 @@ export function bashFor(env = process.env, exists = existsSync) {
   return null;
 }
 
-/** The env variable `run --shell bash` passes the command line in. */
+/**
+ * The PowerShell for `run --shell powershell`, or null: pwsh when on PATH (a superset of what the
+ * PowerShell tool's commands use, with `&&`), else Windows PowerShell.
+ */
+export function powershellFor(env = process.env) {
+  const pwsh = findOnPath('pwsh', env);
+  if (pwsh) return pwsh;
+  if (process.platform !== 'win32') return null;
+  return findOnPath('powershell', env) || join(env.SystemRoot || env.windir || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+}
+
+// Runs the command line from the environment variable and keeps a native program's exit code (-Command alone
+// reports only success or failure of the last statement).
+export const POWERSHELL_WRAPPER = '$global:LASTEXITCODE = 0; Invoke-Expression $env:AC_RQ_COMMAND; if ($LASTEXITCODE) { exit $LASTEXITCODE } elseif (-not $?) { exit 1 } else { exit 0 }';
+
+/** The env variable `run --shell bash|powershell` passes the command line in. */
 export const SHELL_COMMAND_ENV = 'AC_RQ_COMMAND';
 
 const cmdQuote = (a) => (a === '' || /[\s"&|<>^()%!]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a);
@@ -246,6 +263,14 @@ export async function runUnderQueue({
       return 127;
     }
   }
+  let pwsh = null;
+  if (shell === 'powershell') {
+    pwsh = (io.powershellFor ?? powershellFor)(env);
+    if (!pwsh) {
+      err('resource-queue: --shell powershell: no PowerShell found (pwsh or powershell.exe); the command was not run. Run it without the queue: prefix $env:RESOURCE_QUEUE = 0.');
+      return 127;
+    }
+  }
   lowerOwnPriority();
   const off = String(env.RESOURCE_QUEUE ?? '').trim() === '0' || String(env.CI_LOCAL_LOCK ?? '').trim() === '0';
   let req = request; let lease = null;
@@ -286,6 +311,9 @@ export async function runUnderQueue({
   if (bash) {
     childEnv[SHELL_COMMAND_ENV] = cmd[0];
     plan = { file: bash, args: ['-c', `eval "$${SHELL_COMMAND_ENV}"`], verbatim: false, mode: 'bash' };
+  } else if (pwsh) {
+    childEnv[SHELL_COMMAND_ENV] = cmd[0];
+    plan = { file: pwsh, args: ['-NoProfile', '-NonInteractive', '-Command', POWERSHELL_WRAPPER], verbatim: false, mode: 'powershell' };
   } else plan = planCommand(cmd, env);
   let child;
   try {
@@ -468,13 +496,13 @@ export async function cli(argv, io = {}) {
     if (cmd === 'run') {
       const sep = rest.indexOf('--');
       if (sep >= 0 && sep === rest.length - 1) throw new Error('run needs a command after "--"');
-      const flags = sep < 0 ? rest : rest.slice(0, sep); const command = sep < 0 ? [] : rest.slice(sep + 1);
+      const flags = sep < 0 ? rest : rest.slice(0, sep); let command = sep < 0 ? [] : rest.slice(sep + 1);
       const resources = []; let ram = null; let cls = null; let label = ''; let maxWait = null; let group = ''; let bindPid = 0; let shell = '';
       for (let i = 0; i < flags.length; i += 1) {
         const f = flags[i];
         if (f === '--shell') {
           shell = flagValue(flags, i, f);
-          if (shell !== 'bash') throw new Error(`bad --shell "${shell}" (only bash)`);
+          if (shell !== 'bash' && shell !== 'powershell') throw new Error(`bad --shell "${shell}" (bash or powershell)`);
           i += 1;
         } else if (f === '--group') {
           group = flagValue(flags, i, f);
@@ -497,8 +525,10 @@ export async function cli(argv, io = {}) {
           i += 1;
         } else throw new Error(`unknown option "${f}"`);
       }
+      // --shell powershell: the command line travels in the environment (a Windows PowerShell 5.1 argument loses its double quotes).
+      if (shell === 'powershell' && !command.length && String(env[SHELL_COMMAND_ENV] ?? '').trim()) command = [env[SHELL_COMMAND_ENV]];
       if (!command.length && !bindPid) throw new Error('run needs a command after "--" (or --bind-pid <pid> to hold for a running process)');
-      if (shell && command.length !== 1) throw new Error('--shell bash takes exactly one argument after "--": the command line');
+      if (shell && command.length !== 1) throw new Error(`--shell ${shell} takes exactly one command line (after "--" or, for powershell, in ${SHELL_COMMAND_ENV})`);
       const rules = io.rules ?? loadRules(env);
       const request = buildRequest({ resources, ram, cls }, rules);
       return await runUnderQueue({
