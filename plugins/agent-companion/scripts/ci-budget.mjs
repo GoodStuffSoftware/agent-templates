@@ -100,6 +100,13 @@ const LEGACY_MAX_AGE_MS = 45 * 60 * 1000; // the old mutex's own age cap
 // holder also refreshes the lock's `at` before each such call (touchAdmit); the window only has to cover one call.
 // A lock whose pid is dead is recovered at once whatever its age.
 const ADMIT_STALE_MS = 60_000;
+// A later ticket may start ahead of a blocked head only when it cannot delay it (see evaluateFit). After a head has
+// been passed over this many times it blocks every later box user again (strict FIFO). 6: with a 16-unit budget
+// and 2-4 unit lints that is about one full turnover of the box, enough to use the idle gap behind a lane-blocked
+// head, and finite so a stream of small jobs can never keep a head waiting past that turnover.
+export const BACKFILL_MAX_PASSES = 6;
+// The tombstone of a cleared lease outlives 300 s for as long as the old holder's pid lives (see readState).
+const TOMBSTONE_MAX_AGE_MS = 7 * 24 * 3600_000;
 const DEBRIS_MAX_AGE_MS = 600_000; // *.tmp-* / *.stale-* left by a crash between write and rename
 const ADMIT_RETRY_CODES = ['EPERM', 'EBUSY', 'EACCES'];
 export const MAX_RESERVATION_MS = 4 * 3600_000; // a reservation never lasts longer than this
@@ -584,12 +591,29 @@ const namesOfTicket = (t) => [...(usesBox(t) ? [BOX] : []), ...Object.keys(t.res
 // A ticket that cannot be admitted now for a reason of policy (a hold, or someone else's reservation).
 const passedOver = (state, t) => Boolean(t.paused) || Boolean(reservedAgainst(state.reservations ?? [], namesOfTicket(t), t.group));
 
+// lease-<id>.cleared: the tombstone of a lease the sweep or "release" removed, so the owner's heartbeat does not put
+// it back. It records {pid, at} and stays while that pid is alive (up to 7 days), not for a fixed 300 s: a wrapper
+// that outlives the clear keeps ticking, and the tombstone going first resurrected a cleared lease. An old-format
+// tombstone (a bare timestamp, no pid) keeps the 300 s rule.
+function writeTombstone(ctx, id, pid) {
+  try { writeFileSync(join(ctx.dir, `lease-${id}.cleared`), JSON.stringify({ pid: num(pid), at: ctx.now() }), { flag: 'wx' }); } catch { /* already marked */ }
+}
+function tombstoneHeld(ctx, file) {
+  try {
+    const d = JSON.parse(readFileSync(file, 'utf8'));
+    return Boolean(d && typeof d === 'object' && num(d.pid) > 0 && ctx.isAlive(num(d.pid)) && ctx.now() - num(d.at) < TOMBSTONE_MAX_AGE_MS);
+  } catch { return false; }
+}
+function readCount(file) {
+  try { const n = Math.trunc(Number(readFileSync(file, 'utf8'))); return Number.isFinite(n) && n > 0 ? n : 0; } catch { return 0; }
+}
+
 /**
  * Read the ledger. With reclaim, stale leases and tickets are removed (and
  * returned in `reclaimed`); without it they are listed with a `stale` reason and
  * left alone, and are excluded from the live lists either way.
  */
-export function readState(ctx, { reclaim = true } = {}) {
+export function readState(ctx, { reclaim = true, cheap = false } = {}) {
   let names = [];
   try { names = readdirSync(ctx.dir); } catch { /* no ledger yet */ }
   const leases = []; const tickets = []; const staleEntries = []; const reclaimed = []; const reservations = [];
@@ -628,7 +652,7 @@ export function readState(ctx, { reclaim = true } = {}) {
       // Stale heartbeat, but the wrapper pid is verified to be the holder (not a reused pid): a live
       // holder is flagged and kept, like the idle and max-hold flags, up to the same ceiling.
       if (why === 'heartbeat is stale' && !(e.boundPid > 0)) {
-        const live = verifiedLive(ctx, e, reclaim);
+        const live = verifiedLive(ctx, e, reclaim && !cheap);
         if (live) {
           const hb = Math.max(num(e.heartbeatAt), num(e.hbSide), num(e.startedAt), num(e.createdAt));
           e.hbStale = { heartbeatAgeMs: Math.max(0, ctx.now() - hb), staleMs: ctx.staleMs, pidStartedAt: live.startedAt };
@@ -637,7 +661,8 @@ export function readState(ctx, { reclaim = true } = {}) {
       }
       if (why) {
         staleEntries.push({ ...e, type: 'lease', stale: why });
-        if (reclaim) {
+        // A cheap sweep (status, heartbeat) never asks the process table: a stale heartbeat with a live pid is left for a full sweep.
+        if (reclaim && !(cheap && why === 'heartbeat is stale')) {
           dropFile(file, hbFile, e.actFile, liveFile);
           endedLeases.push(e);
           reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why });
@@ -662,7 +687,7 @@ export function readState(ctx, { reclaim = true } = {}) {
         }
         if (v && !v.keep && reclaim) {
           // The tombstone first, so the owner's heartbeat does not put the lease back.
-          try { writeFileSync(join(ctx.dir, `lease-${m[1]}.cleared`), String(ctx.now()), { flag: 'wx' }); } catch { /* already marked */ }
+          writeTombstone(ctx, m[1], e.pid);
           dropFile(file, hbFile, e.actFile, liveFile);
           endedLeases.push(e);
           reclaimed.push({ type: 'lease', pid: e.pid, worktree: e.worktree, why: `rule ${v.rule}` });
@@ -696,12 +721,13 @@ export function readState(ctx, { reclaim = true } = {}) {
       ticketIds.add(m[1]);
       e.pausedFile = join(ctx.dir, `ticket-${m[1]}.paused`);
       const pause = readPause(ctx, e.pausedFile);
+      e.passedFile = join(ctx.dir, `ticket-${m[1]}.passed`); e.passed = readCount(e.passedFile);
       e.paused = Boolean(pause); e.pausedBy = pause ? pause.by : ''; e.pausedUntil = pause ? pause.until : null;
       const why = staleReason(ctx, e);
       if (why) {
         staleEntries.push({ ...e, type: 'ticket', stale: why });
         if (reclaim) {
-          dropFile(file, e.pausedFile); reclaimed.push({ type: 'ticket', pid: e.pid, worktree: e.worktree, why });
+          dropFile(file, e.pausedFile, e.passedFile); reclaimed.push({ type: 'ticket', pid: e.pid, worktree: e.worktree, why });
           noteClear(ctx, e, 'ticket', ruleFor(why, 'ticket'), { why, pid: e.pid });
         }
       } else tickets.push(e);
@@ -758,13 +784,14 @@ export function readState(ctx, { reclaim = true } = {}) {
         continue;
       }
       // Orphan sidecars (a worker tick landing after its lease was removed).
-      const pm = /^ticket-([0-9a-f]+)\.paused$/.exec(name);
+      const pm = /^ticket-([0-9a-f]+)\.(?:paused|passed)$/.exec(name);
       if (pm && !ticketIds.has(pm[1])) { // a hold left behind by a ticket that is gone
         try { if (Date.now() - statSync(join(ctx.dir, name)).mtimeMs > 60_000) tryUnlink(join(ctx.dir, name)); } catch { /* gone */ }
         continue;
       }
       const m = /^lease-([0-9a-f]+)\.(?:hb|act|cleared)$/.exec(name);
       if (!m || leaseIds.has(m[1])) continue;
+      if (name.endsWith('.cleared') && tombstoneHeld(ctx, join(ctx.dir, name))) continue;
       try { if (Date.now() - statSync(join(ctx.dir, name)).mtimeMs > 300_000) tryUnlink(join(ctx.dir, name)); } catch { /* gone */ }
     }
   }
@@ -1040,10 +1067,15 @@ function createLease(ctx, {
   if (monitored) { try { writeFileSync(actFile, `${t0} ${t0}`); } catch { /* best effort */ } }
   let released = false;
   let unmanaged = false;
+  let lastSweepAt = 0;
 
   const beat = () => {
     if (released) return;
     try { writeFileSync(hbFile, String(ctx.now())); } catch { /* best effort */ }
+    if (ctx.now() - lastSweepAt >= 15_000 || ctx.now() < lastSweepAt) { // a heartbeat sweeps too, at most every 15 s
+      lastSweepAt = ctx.now();
+      try { readState(ctx, { reclaim: true, cheap: true }); } catch { /* best effort */ }
+    }
     if (!existsSync(file) && !existsSync(clearedFile)) { // reclaimed while we were frozen (a laptop sleep): put it back
       try { writeFileSync(file, JSON.stringify({ ...rec, heartbeatAt: ctx.now() }), { flag: 'wx' }); } catch { /* raced */ }
     }
@@ -1406,7 +1438,7 @@ export function acquire(opts = {}) {
 /** Non-mutating snapshot of the ledger. `sample: false` skips the 300 ms cpu sample. */
 export function status(opts = {}) {
   const ctx = makeCtx({ ...opts, log: opts.log ?? (() => {}) });
-  const state = readState(ctx, { reclaim: false });
+  const state = readState(ctx, { reclaim: opts.sweep !== false, cheap: true }); // a status call sweeps too (cheap: no process-table call)
   const t = totals(ctx, state);
   const now = ctx.now();
   let busyCores = null; let external = 0; let loaded = null;
@@ -1550,13 +1582,31 @@ function evaluateFit(ctx, state, req, id, external) {
     });
     policy = true;
   }
+  // Backfill: a later ticket may go first only when it cannot delay a ticket ahead. Only the box is shared (an exclusive
+  // or named lane stays strict FIFO), the head has not been passed over BACKFILL_MAX_PASSES times, and after the grant
+  // the box (and RAM, when the head needs it) still has room for every skipped head: budget - held - request >= their need.
+  const passed = []; let reservedBox = 0; let reservedRam = 0;
+  const ramGate = state.leases.length > 0 || state.legacy.length > 0;
+  const ramFree = !ramGate ? Infinity
+    : Math.round(ctx.freemem() / MB) - ramReserveMb(ctx.rules, ctx.totalmem() / MB)
+      - state.leases.filter((l) => now - num(l.startedAt) < (ctx.rules?.ram?.rampMs ?? 60_000)).reduce((a, l) => a + l.ramMb, 0);
   for (const e of ahead) {
     // A ticket ahead that is itself held or passed over cannot take anything now, so it blocks no one.
     if (passedOver(state, e)) continue;
     const shared = [];
     if (req.box > 0 && usesBox(e)) shared.push(BOX);
     for (const n of Object.keys(req.named)) if (e.resources?.[n]) shared.push(n);
-    if (shared.length) { reasons.push({ resource: shared[0], text: `queued behind pid ${e.pid} (${shared.join(', ')})` }); break; }
+    if (!shared.length) continue;
+    const headBox = e.kind === 'run' ? e.boxUnits : 1;
+    const free = ctx.budget - t.held - req.box - reservedBox >= headBox;
+    const ramOk = !(e.ramMb > 0) || ramFree - req.ramMb - reservedRam >= e.ramMb;
+    if (shared.length === 1 && shared[0] === BOX && num(e.passed) < BACKFILL_MAX_PASSES && free && ramOk) {
+      passed.push(e.id); reservedBox += headBox; reservedRam += e.ramMb || 0;
+      continue;
+    }
+    reasons.push({ resource: shared[0], text: `queued behind pid ${e.pid} (${shared.join(', ')})` });
+    passed.length = 0;
+    break;
   }
   for (const [name, u] of Object.entries(req.named)) {
     const cap = capacityOf(ctx.rules, ctx.env, name);
@@ -1590,7 +1640,7 @@ function evaluateFit(ctx, state, req, id, external) {
     const free = Math.round(ctx.freemem() / MB) - reserve - committed;
     if (free < req.ramMb) reasons.push({ resource: 'ram', text: `RAM ${req.ramMb} MB needed, ${Math.max(0, free)} MB free after a ${reserve} MB reserve and ${committed} MB still ramping up` });
   }
-  return { ok: reasons.length === 0, reasons, needsSample, policy };
+  return { ok: reasons.length === 0, reasons, needsSample, policy, passed };
 }
 
 function wantsText(req) {
@@ -1631,7 +1681,7 @@ export async function acquireResources(opts = {}) {
   const maxWait = opts.maxWaitMs ?? ctx.queueMaxWaitMs;
   const id = newId();
   const ticketFile = join(ctx.dir, `ticket-${id}.json`);
-  const dropTicket = () => { tryUnlink(ticketFile); tryUnlink(join(ctx.dir, `ticket-${id}.paused`)); };
+  const dropTicket = () => { tryUnlink(ticketFile); tryUnlink(join(ctx.dir, `ticket-${id}.paused`)); tryUnlink(join(ctx.dir, `ticket-${id}.passed`)); };
   const ticket = {
     id, pid: ctx.pid, createdAt: begin, heartbeatAt: begin, repo: ctx.repo, worktree: ctx.worktree, kind: 'run',
     desired: Math.max(1, req.box), boxUnits: req.box, resources: { ...req.named }, ramMb: req.ramMb, label,
@@ -1681,6 +1731,10 @@ export async function acquireResources(opts = {}) {
           if (!f.ok) return { reasons: f.reasons, policy: f.policy };
           const lease = grant(req.box);
           dropTicket();
+          for (const hid of f.passed ?? []) { // starvation bound: count this pass on every head we went ahead of
+            const pf = join(ctx.dir, `ticket-${hid}.passed`);
+            try { writeFileSync(pf, String(readCount(pf) + 1)); } catch { /* best effort */ }
+          }
           return { lease };
         });
         if (got.lease) {
@@ -1785,7 +1839,7 @@ export function resourceStatus(opts = {}) {
   const base = { schema: 'resource-queue-status', schemaVersion: STATUS_SCHEMA_VERSION, ok: true, generatedAt };
   try {
     const ctx = makeCtx({ ...opts, log: () => {}, registerExit: false });
-    const state = readState(ctx, { reclaim: false });
+    const state = readState(ctx, { reclaim: opts.sweep !== false, cheap: true }); // sweeps expired, dead and over-ceiling entries; no process-table call, no admit lock
     const now = ctx.now();
     const t = totals(ctx, state);
     const held = namedHeld(state);
@@ -1983,7 +2037,7 @@ export function releaseLease(opts = {}) {
   if (uniq.length > 1) return { ok: false, error: `id ${id} matches ${uniq.length} leases (${uniq.map((l) => l.id).join(', ')}); give more characters` };
   const e = uniq[0];
   const wasAlive = ctx.isAlive(e.pid) || (e.boundPid > 0 && ctx.isAlive(e.boundPid));
-  try { writeFileSync(join(ctx.dir, `lease-${e.id}.cleared`), String(ctx.now()), { flag: 'wx' }); } catch { /* already marked */ }
+  writeTombstone(ctx, e.id, e.pid);
   dropFile(e.file, e.hbFile, e.actFile, join(ctx.dir, `lease-${e.id}.live`));
   noteClear(ctx, e, 'lease', 'manual', {
     by: 'manual', session: ctx.session || null, byPid: num(ctx.env.CLAUDE_PID) || null, wasAlive,

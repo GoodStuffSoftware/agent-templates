@@ -17,7 +17,7 @@ const TOP = ['dir', 'generatedAt', 'legacyLocks', 'machine', 'ok', 'queue', 'rec
 const MACHINE = ['busyCores', 'cores', 'externalCores', 'freeRamMb', 'loaded', 'ramReserveMb', 'totalRamMb'];
 const RESOURCE = ['capacity', 'free', 'held', 'holders', 'name'];
 const HOLDER = [
-  'ageMs', 'alive', 'bound', 'boundPid', 'ceilingMs', 'group', 'hbStale', 'heartbeatAgeMs', 'heartbeatAt', 'id', 'idleFlag', 'idleMs', 'kind', 'label', 'lastActivityAt', 'overTime', 'pid', 'project', 'ramMb',
+  'ageMs', 'alive', 'bound', 'boundPid', 'ceilingMs', 'foreign', 'group', 'hbStale', 'heartbeatAgeMs', 'heartbeatAt', 'id', 'idleFlag', 'idleMs', 'kind', 'label', 'lastActivityAt', 'overTime', 'pid', 'project', 'ramMb',
   'releaseCommand', 'repo', 'session', 'stale', 'startedAt', 'units', 'worktree',
 ];
 const QUEUE = [
@@ -109,7 +109,7 @@ test('status lists a stale holder with its reason, and the text form flags it', 
   try {
     await w.acq({ pid: 31337, box: 3, resources: { 'app-e2e': 1 }, label: 'zombie' });
     w.dead.add(31337);
-    const st = resourceStatus({ ...w.opts });
+    const st = resourceStatus({ ...w.opts, sweep: false });
     const h = st.resources.find((r) => r.name === 'app-e2e').holders[0];
     assert.equal(h.stale, 'process is gone');
     assert.equal(h.alive, false);

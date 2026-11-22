@@ -232,7 +232,7 @@ test('a hand-written reservation cannot outlast 4 h or lack an expiry', () => {
     writeFileSync(join(w.dir, 'reservation-bbbb11' + '112222.json'), JSON.stringify({
       id: 'bbbb11' + '112222', resource: 'r', forGroup: 'train2', owner: { pid: 0, session: '' }, createdAt: created,
     }));
-    const st = w.status();
+    const st = w.status({ sweep: false });
     assert.deepEqual(st.reservations.map((r) => r.id), ['aaaa11' + '112222'], 'no expiry: not a reservation');
     assert.equal(st.reservations[0].expiresAt, created + 4 * H, 'status shows the capped end');
     const cleared = sweepLedger(w.opts());

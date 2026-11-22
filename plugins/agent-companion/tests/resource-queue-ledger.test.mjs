@@ -86,23 +86,23 @@ test('FIFO is per resource: a box waiter queues behind a box head, a named-only 
 
     const pB = watch('B', w.acq({ box: 2, resources: { 'app-e2e': 1 }, label: 'B' }));
     w.t += 1;
-    const pC = watch('C', w.acq({ box: 2, label: 'C' })); // box is free, but B (ahead, wants box) is the head of the box queue
+    const pC = watch('C', w.acq({ box: 2, label: 'C' })); // box is free and C cannot delay B (room for both): it backfills
     w.t += 1;
     const pD = watch('D', w.acq({ resources: { pool: 1 }, label: 'D' })); // shares nothing with B or C
     w.t += 1;
     const pE = watch('E', w.acq({ resources: { 'app-e2e': 1 }, label: 'E' })); // behind B on app-e2e
     await settle();
-    assert.deepEqual(order, ['D'], 'only the unrelated request passes the blocked head');
-    assert.equal(w.tickets().length, 3, 'B, C and E are queued');
+    assert.deepEqual([...order].sort(), ['C', 'D'], 'the unrelated request and the box backfill pass the blocked head');
+    assert.equal(w.tickets().length, 2, 'B and E are queued');
 
     a.release();
     await settle();
-    assert.deepEqual(order, ['D', 'B', 'C'], 'B first, then C behind it; E waits for B to let go of app-e2e');
+    assert.deepEqual(order.slice(2), ['B'], 'B starts when app-e2e is free; E waits for B to let go of app-e2e');
 
     const b = await pB;
     b.release();
     await settle();
-    assert.deepEqual(order, ['D', 'B', 'C', 'E']);
+    assert.deepEqual(order.slice(2), ['B', 'E']);
     for (const p of [pB, pC, pD, pE]) (await p).release();
   } finally { w.done(); }
 });
