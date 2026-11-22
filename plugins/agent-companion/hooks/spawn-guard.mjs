@@ -43,7 +43,8 @@
 
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { passthrough } from './lib/context.mjs';
+import { passthrough, deny } from './lib/context.mjs';
+import { holdDenyMessage } from './lib/release-watch-state.mjs';
 
 import { readSpawnBrief } from './lib/sg-brief.mjs';
 import { resolveSpawnRoute } from './lib/sg-route.mjs';
@@ -54,6 +55,8 @@ import { projectRouteAndSelfReview } from './lib/sg-review-plan.mjs';
 import { writeSpawnRow } from './lib/sg-telemetry.mjs';
 import { hardDenials } from './lib/sg-deny.mjs';
 import { finishSpawn } from './lib/sg-finish.mjs';
+import { routeReview, notePendingRouted } from './lib/sg-review-route.mjs';
+import { allowWith } from './lib/sg-helpers.mjs';
 import { writeOpusWriterRow } from './lib/opus-writer.mjs';
 
 // The recommender and the setup SKILL.md as paths a worker can use from any directory: the guard's
@@ -67,6 +70,7 @@ const RECOMMEND_CMD = (() => {
 })();
 
 try {
+  { const held = holdDenyMessage('starting a new agent'); if (held) deny(held); } // post-release hold (lib/release-watch-state.mjs)
   const readSpawnBriefOut = readSpawnBrief();
   const {
     p, input, sid, opusRw, declared, isLadderSpawn, fromDef, trulyInherited, pin, pinned, pinModelOverridden,
@@ -144,7 +148,14 @@ try {
     projectRoutePlan, selfReviewExpected, selfReviewNote, selfReviewInjected,
   } = projectRouteAndSelfReviewOut;
   ({ model, updatedInput, selfReviewSuffix, def } = projectRouteAndSelfReviewOut);
+  // API review routing (api_review_route; lib/sg-review-route.mjs): decided BEFORE the spawn row so the row carries route and
+  // route_reason, applied AFTER hardDenials so a denied spawn is never rewritten. A foreground-block spawn is not routed.
+  const reviewRoute = gate1Action === 'block' ? null : await routeReview({
+    typeIsParity, declaredType, brief, decls, p, input, subagentCaller, model, isCanary, sid, recursionDeny,
+    callerDeclaredType, updatedInput,
+  });
   writeSpawnRow({
+    reviewRoute,
     isCanary, input, model, def, callerEffort, sid, leadLive, p, loadedAtMs, ladderRewrite, declared, fromDef,
     autofilled, trulyInherited, namegateName, subagentCaller, callerModel, declaredWeight, declaredKind,
     declaredConsequence, declaredTypeRaw, declaredType, declaredRole, route, fit, routeLabel,
@@ -158,6 +169,11 @@ try {
     declaredType, leadLabel, recursionDeny, callerDeclaredType, RECOMMEND_CMD,
   });
   if (opusRw) writeOpusWriterRow(opusRw.record);
+  // A review routed to the API credits runs as an ac-haiku call of the API runner: nothing else is appended to its prompt.
+  if (reviewRoute && reviewRoute.updatedInput) {
+    await notePendingRouted({ input, sid, isCanary, rewriteState, rewriteModule });
+    allowWith(null, reviewRoute.updatedInput);
+  }
   // The Opus-writer rewrite is silent: the fit note judges the spawn against the table's row for its TYPE (an opus row), which the
   // rewrite just left on purpose, so it is not said (it stays in the spawn row, fit). The self-review note is NOT dropped: it is about
   // the agent type that will run (a model-only rewrite of general-purpose or a project agent still has no protocol), so the lead still

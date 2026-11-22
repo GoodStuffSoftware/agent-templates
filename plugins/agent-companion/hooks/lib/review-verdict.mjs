@@ -18,6 +18,8 @@
 //                            spawn-guard parses it (null when absent or unusable; effort null for a no-effort model) (0.31.17)
 //                            Older rows carry none of these four; every reader treats a missing field as unknown.
 //   reviewed_branch          the first feat|fix|chore|docs|refactor|release|wip/<name> token in the brief (null when none) (0.31.17)
+//   route, route_reason      api | subagent, and why (api, plan-alternation, plan-cap, high-risk, caller-no, governor-fallback, error, repeat, off, no-range, ambiguous-range): copied from the spawn row's review_route fields (0.31.63);
+//                            scripts/api-review.mjs also appends one row per API review (source api-review, route api)
 //   post_pass_defect         always null on the row itself (unknown); append-only rows are never rewritten. A later FIX or BLOCK on
 //                            the same branch after a PASS appends an outcome row to telemetry/review-outcomes.jsonl instead, and
 //                            the register folds it back as post_pass_defect:true (an upper bound, see docs/TELEMETRY.md) (0.31.17)
@@ -201,7 +203,7 @@ const nonEmptyStr = (x) => typeof x === 'string' && x.length > 0;
 // After a FIX or BLOCK row on a branch: find the most recent earlier PASS row on that branch (within
 // 7 days, any session) that has no outcome row yet, and append one marking a defect found after PASS.
 // No git, no child process; bounded tail reads. Fails open.
-function recordPostPassDefect(fixRow) {
+export function recordPostPassDefect(fixRow) {
   try {
     if (!fixRow.reviewed_branch || (fixRow.review_verdict !== 'FIX' && fixRow.review_verdict !== 'BLOCK')) return null;
     const sid = fixRow.session_id;
@@ -232,6 +234,33 @@ function recordPostPassDefect(fixRow) {
   } catch { return null; }
 }
 
+// The verdict fields of an API review (0.31.63), merged into the api-review exit row so the readers that fold review-verdicts.jsonl on
+// session_id + review_of_tool_use_id (decision-register, usage/telemetry, the post-pass-defect pass) count it. A guard-routed review's
+// PostToolUse sees the rewritten operate prompt and writes no row of its own, so this is the one row. Null when no verdict line parses.
+export function apiVerdictFields({ text, brief, sid, tu, writer, model, effort, risk, projectTier, branch }) {
+  try {
+    const pv = parseVerdict(text);
+    if (!pv) return null;
+    const [wm, we] = String(writer || '').split('/');
+    return {
+      session_id: sid || null,
+      review_of_tool_use_id: tu || null,
+      review_verdict: pv.verdict,
+      review_verdict_raw: pv.raw,
+      declared_type: 'code-review',
+      declared_role: 'reviewer',
+      reviewer_model: model || null,
+      reviewer_effort: effort || null,
+      declared_risk: risk || null,
+      project_tier: projectTier || null,
+      reviewed_model: wm || null,
+      reviewed_effort: we || null,
+      reviewed_branch: branch || branchOf(brief),
+      post_pass_defect: null,
+    };
+  } catch { return null; }
+}
+
 function writeVerdictRow({ sid, tu, name, rv, pv, source, agentId, writer, branch }) {
   if (alreadyRecorded(sid, tu)) return null;
   const orig = spawnRowOf(sid, tu);
@@ -257,6 +286,8 @@ function writeVerdictRow({ sid, tu, name, rv, pv, source, agentId, writer, branc
     reviewed_effort: writer?.effort ?? null,
     reviewed_branch: typeof branch === 'string' && branch ? branch : null,
     post_pass_defect: null,
+    route: orig && orig.review_route ? orig.review_route : 'subagent', // where the review ran (0.31.63): api | subagent
+    route_reason: orig ? orig.review_route_reason ?? null : null,      // why: api | plan-alternation | plan-cap | high-risk | caller-no | governor-fallback | error | repeat | off | no-range | ambiguous-range
     spawn_row_found: !!orig,
     source,
     agent_id: agentId || null,

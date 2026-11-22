@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.62",
+  "version": "0.31.63",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -251,6 +251,18 @@
       "title": "API credits: target share of reviews on credits",
       "description": "Target fraction of writer reviews run on the API credits (default 0.5: alternate by a persisted counter). Pacing and the remaining balance can only lower it.",
       "default": 0.5
+    },
+    "api_review_route": {
+      "type": "string",
+      "title": "API credits: route reviews from the spawn guard",
+      "description": "off (default), writers or all. The spawn guard asks the credit governor for each review spawn (a code-review TYPE with a diff range in the brief) and runs a routed one on the API credits through an ac-haiku call of api-review.mjs; writers = reviews spawned by subagents, all = the lead's too. RISK high, an Opus review, a brief line `API: no`, no (or two competing) diff ranges, a brief that already failed on the API in the last 30 minutes and any error stay as written. The guard routes the reviews a lead spawns; a writer decides its own review once. The routed decision uses the booked ledger only (as every `decide` without an Admin API snapshot does). `api-credits.mjs status` prints the API share of all reviews.",
+      "default": "off"
+    },
+    "api_review_high": {
+      "type": "string",
+      "title": "API credits: RISK high reviews",
+      "description": "plan (default) keeps a review whose brief says RISK: high on a subagent; api lets the guard route it like the others.",
+      "default": "plan"
     },
     "api_credits_item_estimate_usd": {
       "type": "number",
@@ -743,6 +755,12 @@
       "description": "Off by default. The gate also covers the PowerShell tool, but Claude Code's docs do not say that PowerShell honours a PreToolUse updatedInput, and a hook cannot tell whether a rewrite was applied (if it were ignored, the heavy command would run unqueued). So with resource_gate=rewrite a heavy PowerShell command is DENIED with the queued command in the text (fail closed) unless this is true. Turn it on only after checking in a live session that a PowerShell rewrite takes effect.",
       "default": false
     },
+    "worktree_remove_safe": {
+      "type": "boolean",
+      "title": "Safe git worktree remove",
+      "description": "On by default. A `git worktree remove` of a tree that holds a Windows junction or a directory symlink (a shared node_modules, for instance) is rewritten to scripts/worktree-remove-safe.mjs, which removes each link as a link first, because git follows a junction and empties its target. A PowerShell command is denied with the rewritten command in the text unless resource_gate_powershell_rewrite is true. Not seen: bash -c, xargs, aliases and a prefix that takes a value (sudo -u user git). Off = the command runs exactly as written.",
+      "default": true
+    },
     "shared_resources_line": {
       "type": "boolean",
       "title": "Shared resources line",
@@ -814,6 +832,12 @@
       "title": "Interrupted-worker notice",
       "description": "An interrupt of the lead ends its in-flight background subagents without any notification (their transcripts end with '[Request interrupted by user]'). On the lead's next prompt, one line per such worker, once each: its name and description, when it was cut off, its last handoff file if it wrote one, and to respawn it fresh on the same rung from that file or its original brief. Off = no notice.",
       "default": true
+    },
+    "release_watch_hold_minutes": {
+      "type": "number",
+      "title": "Release watch: hold delay (minutes)",
+      "description": "The post-release watch (scripts/release-watch.mjs tick, run every 10 minutes by a scheduled job) checks the newest install at +1, +2, +4, +8, +12, +16, +20 and +24 hours. A flagged check opens a flag shown to lead sessions at SessionStart and on every prompt until the operator answers. If nobody answers within this many minutes of the notice, a hold is written (release-hold.json), except for a flag that only says the watch had nothing to measure (usage-source-empty), which never holds. 0 = notify only, never hold. The hold lifts only with `release-watch.mjs clear` or the words 'clear hold' / 'release hold'.",
+      "default": 30
     },
     "catchup_note": {
       "type": "boolean",

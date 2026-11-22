@@ -37,6 +37,7 @@ import { pendingLine, markFlagsSurfaced } from '../scripts/lib/decision-register
 import {
   readState as readHandoffState, readAcks, evaluate as evaluateHandoff, triageLine, parseTriagePatterns, isTriageCwd, ackCommandFor, paths as handoffPaths, DEFAULT_REPEAT_DAYS,
 } from '../scripts/lib/scout-handoff.mjs';
+import { flagLine as releaseWatchLine } from './lib/release-watch-state.mjs';
 import { pendingUsageSummary, markUsageSurfaced, unattendedReason } from '../scripts/lib/usage/surface.mjs';
 
 const MAX_AGE_DAYS = 7;
@@ -292,10 +293,14 @@ try {
   try { registerPiece = buildRegisterPiece(unattended); } catch { registerPiece = null; }
   const registerLine = registerPiece ? registerPiece.line : null;
 
-  if (!ciLine && !scoutBlock && !releaseLine && !checkupLine && !registerLine && !usageLine) passthrough();
+  // Release watch: an open unanswered flag or a hold shows at every session start until answered or cleared (never marked seen).
+  let watchLine = null;
+  try { watchLine = unattended() ? null : releaseWatchLine(); } catch { watchLine = null; }
 
-  const contextParts = [ciLine, scoutBlock?.context, releaseLine, checkupLine, usageLine, registerLine].filter(Boolean);
-  const summary = scoutBlock?.summary || ciLine || releaseLine || checkupLine || usagePiece?.lines[0] || registerLine;
+  if (!ciLine && !scoutBlock && !releaseLine && !checkupLine && !registerLine && !usageLine && !watchLine) passthrough();
+
+  const contextParts = [watchLine, ciLine, scoutBlock?.context, releaseLine, checkupLine, usageLine, registerLine].filter(Boolean);
+  const summary = watchLine || scoutBlock?.summary || ciLine || releaseLine || checkupLine || usagePiece?.lines[0] || registerLine;
 
   // Last, so a hook that dies before printing has not marked anything surfaced.
   if (registerPiece) { try { markFlagsSurfaced(registerPiece.keys); } catch { /* advisory */ } }

@@ -274,6 +274,10 @@ export const ALLOWED = {
     "export function unitsFromTokens(t, spec, multOverride) {",
     "return usd * (multOverride ?? spec.mult);",
   ],
+  // release-watch.mjs: AGENT_COMPANION_HOME_OVERRIDE is the test sandbox home switch, not a routing override.
+  "scripts/release-watch.mjs": [
+    "!process.env.AGENT_COMPANION_HOME_OVERRIDE && process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'ci-budget', 'clears.jsonl')].filter(Boolean).map((p) => p.replace(/\\\\/g, '/')))];",
+  ],
   "shims/global-hooks/agent-companion-staleness.mjs": [
     "// Same override convention as hooks/self-update.mjs, so a test fixture can",
     "return process.env.AGENT_COMPANION_HOME_OVERRIDE || homedir();",

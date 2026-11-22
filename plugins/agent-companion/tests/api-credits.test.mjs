@@ -9,12 +9,14 @@ import { writeFileSync, readFileSync, mkdirSync, readdirSync, statSync, existsSy
 import { join, dirname } from 'node:path';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
 import {
-  DEFAULT_SHARES, decide, record, recordFailure, recordFallback, reviewStats, summarizeReviews, reviewSummaryLine, status, summaryLine, cycleOf,
+  DEFAULT_SHARES, reviewShareLines, decide, record, recordFailure, recordFallback, reviewStats, summarizeReviews, reviewSummaryLine, status, summaryLine, cycleOf,
   keyConfigured, rejectsPath, rejectsInCycle, REJECTS_MAX_BYTES, billingStatusLines, billingGaps, parseKeySource, parseShares, sharesWarning,
 } from '../scripts/lib/api-credits.mjs';
 import { runApi, validKeyShape, isUnavailable, isWorkspaceMissing, isSpendLimit, hardUsdFrom, softUsdFrom, reviewLimits, reviewLimitsLine, OFFICIAL_ENDPOINT, SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
 import { makeTools } from '../scripts/lib/api-tools.mjs';
-import { main as reviewMain, buildPrompt, readProjectRules, fetchSystem, RULES_CAP } from '../scripts/api-review.mjs';
+import { telemetryDir } from '../hooks/lib/context.mjs';
+import { briefHash } from '../hooks/lib/sg-review-route.mjs';
+import { main as reviewMain, headMismatch, buildPrompt, readProjectRules, fetchSystem, RULES_CAP } from '../scripts/api-review.mjs';
 import { main as creditsMain } from '../scripts/api-credits.mjs';
 import { priceUsage } from '../scripts/lib/pricing.mjs';
 import { spawnSyncHidden } from '../scripts/lib/proc.mjs';
@@ -626,7 +628,8 @@ test('the self-review clause runs the governor before spawning a reviewer, and k
   assert.ok(block.indexOf('1. List anything you built') < block.indexOf('2. State your risk') && block.indexOf('2. State your risk') < block.indexOf('3. Only when your cell names a reviewer'));
   assert.ok(block.includes('the API reviewer has no shell, so skip the API route below'));
   assert.ok(block.includes('--writer sonnet/high --risk <your risk> --review-file'), 'the API runner is told the risk');
-  assert.ok(block.includes('Its brief opens with these four lines, as plain text:') && block.includes('   ROLE: reviewer\n   RISK: <your risk>\n   ```'));
+  assert.ok(block.includes('Its brief opens with these five lines, as plain text:') && block.includes('   ROLE: reviewer\n   RISK: <your risk>\n   API: no\n   ```'), 'the writer\'s own reviewer carries API: no (one advance per review)');
+  assert.ok(block.includes('you decide your own review, once, with the `decide review` below'), 'S1: the writer decides once; the guard does not decide its reviewer again');
   assert.ok(block.includes('the raw output of your own test and build runs'), 'the writer still runs the checks and hands over the output');
   assert.ok(block.includes('Throwaway test code (probes, timing harnesses, temporary diagnostics that never ship) has no review gate'));
   assert.ok(block.includes('runs at most the tests that cover the changed code when they need no build (plus the project\'s own run command when your cell asks for a check in the running app, as the instruction says): no separate builds, no full suite, no e2e, no CI, no commits, no pushes'));
@@ -824,6 +827,51 @@ test('runner: requireVerdict makes a verdict-less or cut-off answer a failure, b
     assert.equal(ok.code, 0, 'a bold verdict line counts');
     const plain = await direct(t, stubFetch([msg([text('ok')])]), { tools: false });
     assert.equal(plain.ok, true);
+  } finally { t.fx.cleanup(); }
+});
+
+const verdictRows = () => {
+  const p = join(telemetryDir(), 'review-verdicts.jsonl');
+  return existsSync(p) ? readFileSync(p, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+};
+
+test('S2: a worktree whose HEAD is not the range head is refused before any API call, and the failed row carries the brief hash', async () => {
+  const t = rig();
+  try {
+    assert.equal(headMismatch(t.repo, 'HEAD~1..HEAD'), null, 'cwd at the range head: fine');
+    assert.match(headMismatch(t.repo, 'HEAD~1..HEAD~1'), /working directory is at [0-9a-f]{9}, not the range head [0-9a-f]{9}/);
+    assert.match(headMismatch(t.repo, 'nope..no-such-ref'), /cannot resolve the range head/);
+    const f = stubFetch([msg([text('VERDICT: PASS')])]);
+    const r = await t.run(f, { extra: ['--diff-ref', 'HEAD~1..HEAD~1'] });
+    assert.equal(r.code, 4);
+    assert.match(r.out, /^API review failed: the working directory is at/);
+    assert.equal(f.calls.length, 0, 'no call, nothing paid');
+    const rows = verdictRows();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].source, 'api-review'); assert.equal(rows[0].ok, false);
+    assert.equal(rows[0].brief_hash, briefHash(readFileSync(t.brief, 'utf8')), 'the guard repeat check keys on this');
+  } finally { t.fx.cleanup(); }
+});
+
+test('S4: a routed review that ends with a verdict writes the verdict row the quality readers fold on', async () => {
+  const t = rig();
+  try {
+    const r = await t.run(stubFetch([msg([text(`VERDICT: FIX${NL}should-fix: a.txt:2 missing check`)])]), { extra: ['--session-id', 'sess-zz', '--tool-use-id', 'toolu_zz9', '--branch', 'fix/zz-demo', '--risk', 'mid'] });
+    assert.equal(r.code, 0);
+    const rows = verdictRows();
+    assert.equal(rows.length, 1);
+    const v = rows[0];
+    assert.equal(v.ok, true); assert.equal(v.source, 'api-review');
+    assert.equal(v.session_id, 'sess-zz'); assert.equal(v.review_of_tool_use_id, 'toolu_zz9');
+    assert.equal(v.review_verdict, 'FIX'); assert.equal(v.reviewed_branch, 'fix/zz-demo'); assert.equal(v.reviewed_model, 'sonnet'); assert.equal(v.reviewed_effort, 'high');
+    assert.equal(v.declared_type, 'code-review'); assert.equal(v.declared_risk, 'mid');
+    // a failed run carries no verdict fields, and is left out of the share
+    const bad = await t.run(stubFetch([msg([text('no verdict here')])]), { extra: ['--session-id', 'sess-zz', '--tool-use-id', 'toolu_zz10'] });
+    assert.equal(bad.code, 4);
+    const after = verdictRows();
+    assert.equal(after.length, 2); assert.equal(after[1].ok, false); assert.equal(after[1].review_verdict, undefined);
+    const lines = reviewShareLines({ file: join(telemetryDir(), 'review-verdicts.jsonl') });
+    assert.match(lines[0], /^review share today: 1 of 1 /, 'the failed run is not counted; the retry subagent row would be');
   } finally { t.fx.cleanup(); }
 });
 

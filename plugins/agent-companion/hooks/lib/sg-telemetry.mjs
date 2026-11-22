@@ -29,7 +29,7 @@ function projectTierOf(cwd, prompt) {
 }
 
 export function writeSpawnRow({
-  isCanary, input, model, def, callerEffort, sid, leadLive, p, loadedAtMs, ladderRewrite, declared, fromDef,
+  reviewRoute, isCanary, input, model, def, callerEffort, sid, leadLive, p, loadedAtMs, ladderRewrite, declared, fromDef,
   autofilled, trulyInherited, namegateName, subagentCaller, callerModel, declaredWeight, declaredKind,
   declaredConsequence, declaredTypeRaw, declaredType, declaredRole, route, fit, routeLabel, parityFloorLabel,
   routed, writer, writerInferred, selfReviewSpawn, reviewBySubagent, selfReviewExpected, selfReviewInjected,
@@ -156,6 +156,8 @@ export function writeSpawnRow({
       tool_use_id: typeof p.tool_use_id === 'string' ? p.tool_use_id : null,
       parent_agent_id: p.agent_id || null, // the agent that made this spawn (same value as caller_agent_id); null = the main thread
       inferred_writer: writerInferred ? writerInferred.label : null, // a review's writer read from its caller's definition (no WRITER line)
+      review_route: reviewRoute ? reviewRoute.route : null,               // api | subagent: where a review spawn ran (api_review_route; null for a non-review spawn)
+      review_route_reason: reviewRoute ? reviewRoute.route_reason : null, // api | plan-alternation | plan-cap | high-risk | caller-no | governor-fallback | error | repeat | off | no-range | ambiguous-range
       self_review: selfReviewSpawn,      // a parity review by a subagent whose own row was FOUND and declares a selfReview type
       review_by_subagent: reviewBySubagent, // the broad count: a parity review by a subagent whose row is not positively a review
       self_review_expected: selfReviewExpected, // for a selfReview TYPE: will this writer review itself? null for other types

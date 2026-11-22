@@ -22,7 +22,8 @@
 // own header in lib/resume-guard.mjs for why a passive mtime/meta check is
 // enough here).
 
-import { readStdin, opt, passthrough, recordDenial } from './lib/context.mjs';
+import { readStdin, opt, passthrough, recordDenial, deny } from './lib/context.mjs';
+import { holdDenyMessage } from './lib/release-watch-state.mjs';
 import { resolveTarget, lastActivityOf, ttlFor, cacheTtlFromDefinition, TTL_MS } from './lib/resume-guard.mjs';
 
 // The hint, and NO permissionDecision: "allow" would also skip the permission
@@ -37,7 +38,8 @@ function hint(systemMessage) {
 }
 
 try {
-  if (!opt('resume_guard', true)) passthrough();
+  const held = holdDenyMessage('resuming a worker');
+  if (!held && !opt('resume_guard', true)) passthrough();
 
   const p = readStdin();
   const input = p.tool_input || {};
@@ -62,6 +64,8 @@ try {
     if (fromDef) ttl = fromDef;
   }
   const idleMs = Date.now() - last.ts;
+  // Post-release hold: a message that restarts an idle worker is a new spawn; the 2-min cut-off is a heuristic: a worker silent for longer inside one long Bash call is treated as idle (refused here, and denied at its next tool call anyway), and one idle for less can be resumed but has every tool call denied, so it can only hand off. a running worker can still be told to hand off.
+  if (held && idleMs > 120000) { try { recordDenial('resume-guard', p, 'release hold'); } catch { /* telemetry */ } deny(held); }
   if (!(idleMs > TTL_MS[ttl])) passthrough(); // still warm (or clock skew): nothing to say
 
   // "large" is configurable; default picked from this operator's own corpus

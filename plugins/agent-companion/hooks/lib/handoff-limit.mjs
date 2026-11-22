@@ -17,6 +17,7 @@
 // longest workers ran 135-206 calls up to 209-217K context before the auto-compaction).
 // Every notice and every deny is one row in telemetry handoff-limit.jsonl; the daily usage report's Efficiency block counts them.
 
+import { isHoldActive } from './release-watch-state.mjs';
 import { openSync, fstatSync, readSync, closeSync, existsSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { opt } from './context.mjs';
@@ -35,6 +36,7 @@ export function handoffConfig(soft) {
     soft: Number(soft) > 0 ? Number(soft) : 0,
     repeat: num('subagent_context_notice_repeat_tokens', HANDOFF_REPEAT_DEFAULT),
     hard: num('subagent_context_hard_tokens', HANDOFF_HARD_DEFAULT),
+    held: isHoldActive(), // post-release hold: the hard limit counts as 0, so the next call is refused
     exempt: String(opt('subagent_handoff_exempt_types', '')).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
   };
 }
@@ -49,7 +51,7 @@ export function isExempt(agentType, exempt) {
 }
 
 // Is the handoff mechanism in force for this worker? (The compaction note does not depend on it.)
-export const handoffActive = (cfg, agentType) => cfg.on && !isExempt(agentType, cfg.exempt);
+export const handoffActive = (cfg, agentType) => cfg.on && (cfg.held || !isExempt(agentType, cfg.exempt));
 
 // --- Repeat notices ------------------------------------------------------------------------------
 const lastKey = (agentId) => `handoff-last-${agentId}`;
@@ -76,11 +78,15 @@ export const DENY_STREAK_TEXT = 5; // denied calls in a row from which the reaso
 export const streakPrefix = (n) => (n >= DENY_STREAK_TEXT ? `${n} calls refused: write the handoff now or give your final reply. ` : '');
 
 // `why`: for a refused Bash/PowerShell command, the specific reason (gitCheck); null for every other tool.
-export function denyText(ctx, hard, variant = 'writer', why = null) {
-  const head = `[agent-companion] Context at ${kTokens(ctx)} is past the hard limit of ${kTokens(hard)}: this call is blocked, and so is every call except the handoff. `
+export function denyText(ctx, hard, variant = 'writer', why = null, held = false) {
+  const head = held
+    ? '[agent-companion] A post-release hold is on: work is paused and this call is blocked, and so is every call except the handoff. '
+      + (why ? `Bash and PowerShell allow only plain git add/commit/push/status/diff/log; this command was refused: ${why}. ` : '')
+    : `[agent-companion] Context at ${kTokens(ctx)} is past the hard limit of ${kTokens(hard)}: this call is blocked, and so is every call except the handoff. `
     + (why ? `Bash and PowerShell allow only plain git add/commit/push/status/diff/log (no pipe, redirect, backtick, $(...) or other command, and only the listed options); this command was refused: ${why}. ` : '');
   if (variant === 'readonly') {
-    return `${head}Write what you have to a file with "handoff" in its name next to your detail file (<task>-handoff.md), or put it in your final reply, then end with "${HANDOFF_RETURN}". Allowed: Write, Edit or Read of a .md file whose name contains "handoff". Everything else, including starting agents, stays blocked.`;
+    return `${head}Write what you have to a file with "handoff" in its name next to your detail file (<task>-handoff.md), or put it in your final reply, then end with "${HANDOFF_RETURN}". Allowed: Write, Edit or Read of a .md file whose name contains "handoff". Everything else, including starting agents, stays blocked.`
+    + (held ? ' If a push is refused because a pre-push gate runs through the shared queue (it is held too), commit, write the handoff file and say the push is pending.' : '');
   }
   return `${head}Finish: commit and push any work in progress to your branch (git add, commit, push, status, diff and log are allowed), write a handoff file <task>-handoff.md next to your detail file (${HANDOFF_FIELDS}; Write, Edit and Read of a .md file whose name contains "handoff" are allowed), then end with "${HANDOFF_RETURN}". Everything else, including starting agents, stays blocked.`;
 }
@@ -359,11 +365,13 @@ export function handoffRow(p, sig, limit, action, limitTokens) {
 // null: nothing to do. { row, why } : deny this call (`why`: the Bash reason, else null). Cheap exits first. A compaction with no request after it
 // yet leaves ctx at its pre-compaction size, so it never denies.
 export function hardCheck(p, sig, cfg) {
-  if (!cfg.on || !(cfg.hard > 0) || !sig || typeof sig.ctx !== 'number' || sig.ctx < cfg.hard) return null;
-  if (sig.boundary && sig.turnsAfterBoundary === 0) return null;
-  if (isExempt(p.agent_type, cfg.exempt)) return null;
+  if (!cfg.on) return null;
+  const held = !!cfg.held;
+  if (!held && (!(cfg.hard > 0) || !sig || typeof sig.ctx !== 'number' || sig.ctx < cfg.hard)) return null;
+  if (!held && sig.boundary && sig.turnsAfterBoundary === 0) return null;
+  if (!held && isExempt(p.agent_type, cfg.exempt)) return null;
   const why = refusal(p);
   if (why === null) return null;
   const bash = p.tool_name === 'Bash' || p.tool_name === 'PowerShell';
-  return { row: handoffRow(p, sig, 'hard', 'deny', cfg.hard), why: bash ? why : null };
+  return { row: handoffRow(p, sig || {}, held ? 'hold' : 'hard' /* N6: row limit 'hold' stands for the spec's reason release-hold; the hold is not tied to a version, only the operator's clear lifts it */, 'deny', held ? 0 : cfg.hard), why: bash ? why : null, held };
 }
