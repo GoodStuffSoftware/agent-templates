@@ -53,6 +53,19 @@ worked example (253 spawns in 8.4 h) and the 0.31.62 and 0.31.63 check logs.
   turn: the operator could have read it. A prompt in a session that never showed the flag is not a reply.
 - The flag record keeps `ack = { session, promptAt, confirmedAt, signal, shownAt }`; `signal` names the proof
   (`transcript-origin-human` or `payload-origin-human`). The explicit clear command and the "clear hold" words are unchanged.
+- **Notified means shown to a person (0.31.65).** The tick writes the flag with `notifiedAt = null`; the first session
+  that shows the flag line (`noteShown`) sets `notifiedAt`, and the hold countdown (`release_watch_hold_minutes`) runs
+  from that first showing, never from the tick. Cause: a tick wrote a flag at 17:00Z, the operator's lead sat idle until
+  19:55Z, and the countdown had run from the tick, so the hold could fire before any lead had shown the flag. A flag that
+  is new or has more than doubled is a new notification and resets `notifiedAt` to null. The flag line states the
+  countdown ("Hold countdown: N min left; ... held at <time>").
+- **The flag line runs in its own process.** `hooks.json` registers `runaway-notice.mjs` twice on UserPromptSubmit:
+  `--watch` (release watch only, timeout 5 s, small state files) and `--no-watch` (budget scan, interrupted-worker scan,
+  notice drain; timeout 10 s). The slow scans can reach their timeout on a large session after an idle spell, and a hook
+  that times out delivers nothing; with the flag line in the same process, one such prompt lost it. No argument runs both
+  (tests, older registrations).
+- **Showing a flag is never an answer.** `noteShown` sets `shownTo` and `notifiedAt` and nothing else; only a confirmed
+  typed reply (above) or the clear command writes `ackedAt`.
 
 ### 2. Evidence floors per metric
 

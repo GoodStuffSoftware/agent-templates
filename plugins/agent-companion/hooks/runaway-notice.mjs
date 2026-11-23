@@ -35,6 +35,11 @@ import { interruptedNotices } from './lib/interrupted-workers.mjs';
 import { checkSessionBudget, SESSION_BUDGET_DEFAULT_UNITS } from './lib/session-budget.mjs';
 
 const EVENTS = new Set(['UserPromptSubmit', 'PostToolUse']);
+// hooks.json registers this script twice on UserPromptSubmit so the release flag cannot be lost to the slow scans: '--watch' runs only the
+// release watch (cheap: small state files), '--no-watch' runs everything else (budget scan, interrupted workers, drain; can reach the hook timeout
+// on a big session after an idle spell, and a timed-out hook shows nothing). No argument runs both (older registrations, tests).
+const ONLY_WATCH = process.argv.includes('--watch');
+const NO_WATCH = process.argv.includes('--no-watch');
 // Text the harness injects as a prompt. A reply that merely starts with "[" or "<" is not in this list and still gets checked.
 const AUTOMATED_MARKER_RE = /^\s*<(task-notification|teammate-message|bus-message|system-reminder|scheduled-task|local-command-(stdout|stderr|caveat)|command-(name|message))\b/i;
 
@@ -43,12 +48,12 @@ try {
   if (callerIsSubagent(p)) passthrough();
   const event = EVENTS.has(p.hook_event_name) ? p.hook_event_name : null;
   if (!event) passthrough();
-  try { checkSessionBudget(p, { threshold: opt('session_budget_units', SESSION_BUDGET_DEFAULT_UNITS) }); } catch { /* advisory: never in the way */ }
-  const interrupted = event === 'UserPromptSubmit' && opt('interrupted_worker_notice', true) ? interruptedNotices(p) : [];
+  if (!ONLY_WATCH) try { checkSessionBudget(p, { threshold: opt('session_budget_units', SESSION_BUDGET_DEFAULT_UNITS) }); } catch { /* advisory: never in the way */ }
+  const interrupted = !ONLY_WATCH && event === 'UserPromptSubmit' && opt('interrupted_worker_notice', true) ? interruptedNotices(p) : [];
   // Release watch: the open-flag or hold line on every lead prompt. Only a typed prompt (origin human, proven by the payload or the
   // transcript) stops the hold countdown or lifts a hold; scheduled wakeups, notifications and peer messages never do.
   let watch = null;
-  if (event === 'UserPromptSubmit') {
+  if (event === 'UserPromptSubmit' && !NO_WATCH) {
     try {
       if (unattendedReason({ payload: p, root: stateRootPath() }) === null) {
         const prompt = String(p.prompt || '');
@@ -67,14 +72,14 @@ try {
           if (wantsClear || (p.origin && p.origin.kind === 'human') || !AUTOMATED_MARKER_RE.test(prompt)) {
             noteCandidate({ sessionId: p.session_id, transcriptPath: p.transcript_path, prompt, payloadOrigin: p.origin, at });
           }
-          watch = releaseWatchLine();
+          watch = releaseWatchLine({ at });
           if (watch && wantsClear) watch += ' The "clear hold" words could not be confirmed as typed by the operator yet: ask the operator to repeat "clear hold", or run the clear command after the operator says so.';
           if (watch) noteShown(p.session_id, at);         // after the candidate: this turn's prompt was typed before the line was shown
         }
       }
     } catch { watch = null; }
   }
-  const text = [watch, renderNotices(drainNotices(p.session_id)), ...interrupted].filter(Boolean).join('\n');
+  const text = [watch, ...(ONLY_WATCH ? [] : [renderNotices(drainNotices(p.session_id))]), ...interrupted].filter(Boolean).join('\n');
   if (!text) passthrough();
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: event, additionalContext: text },
