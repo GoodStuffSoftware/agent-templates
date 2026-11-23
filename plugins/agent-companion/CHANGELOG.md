@@ -2,6 +2,10 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.64 — unreleased
+
+- **Wait-loop cap (option `wait_loop_cap_minutes`, default 60, 0 = off).** A background Bash command whose `until ...; do ... sleep ...; done` or `while` loop has no bound is rewritten in `bash-tail.mjs` (step 0b, `hooks/lib/wait-cap.mjs`) so the loop ends after the cap: it prints `wait-cap: gave up after N min; condition never met` and exits 124. The deadline is a `$SECONDS` test in the loop body, not `timeout` (Windows Git Bash can resolve `timeout` to System32's `timeout.exe`). Loops with `timeout`, `$SECONDS`, a counter or `date +%s`, loops without `sleep`, and foreground commands are untouched; silent, with one `wait-cap-rewritten` row per rewrite in `resource-gate.jsonl`. Why: two `until grep -q "^# duration_ms" ...` loops ran 8+ hours on a log that printed `ℹ duration_ms`, keeping their agents and those agents' worktrees alive. New tests: `tests/wait-cap.test.mjs`.
+
 ## 0.31.63 — 2026-11-22
 
 - **The spawn guard routes reviews to the API credits (options `api_review_route` off|writers|all, `api_review_high` plan|api).** A review spawn (a parity TYPE) with a diff range in its brief is decided by the credit governor inside the guard and, on `api`, rewritten into an `ac-haiku` run of `api-review.mjs` (the original brief kept in `state/review-briefs/`); RISK high, an Opus review, `API: no`, no or two competing diff ranges, a brief whose API run failed in the last 30 minutes, a reviewer's own spawn and any error pass through as written. `decide --peek` answers without advancing the alternation counter; review-verdicts rows carry `route` and `route_reason`, `api-review.mjs` writes one `route: api` row per API review, and `api-credits.mjs status` prints the API share of all reviews for today and 7 days. Default off; this environment's values are in `docs/DEFAULTS-ENVIRONMENT.md`.
