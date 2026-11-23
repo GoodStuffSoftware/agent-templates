@@ -558,7 +558,7 @@ Written by `hooks/bash-tail.mjs` (the gate is its first step) when a heavy Bash 
 | `session_id` | string | the session |
 | `agent_type` | string | null | the caller's agent type |
 | `caller_is_subagent` | boolean | whether a subagent made the call |
-| `event` | string | `denied`, `hinted` or `rewritten`; or `worktree-remove-denied` / `worktree-remove-rewritten` (the junction-safe `git worktree remove` step, option `worktree_remove_safe`, same file) |
+| `event` | string | `denied`, `hinted` or `rewritten`; or `worktree-remove-denied` / `worktree-remove-rewritten` (the junction-safe `git worktree remove` step, option `worktree_remove_safe`, same file); or `wait-cap-rewritten` (a background wait loop got a deadline, option `wait_loop_cap_minutes`; rows carry `tool`, `command_chars`, `count` = loops capped, `cap_minutes`) |
 | `mode` | string | the gate mode in force when it fired (`deny`, `rewrite` or `hint`); absent on `worktree-remove-*` rows |
 | `classes` | string[] | the rules-file classes the command matched (`e2e`, `vitest-full`, `lint` ...); absent on `worktree-remove-*` rows |
 | `tool` | string | `Bash` or `PowerShell`; `rewritten` and `worktree-remove-*` rows |

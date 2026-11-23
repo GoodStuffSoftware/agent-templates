@@ -37,7 +37,7 @@ import { pendingLine, markFlagsSurfaced } from '../scripts/lib/decision-register
 import {
   readState as readHandoffState, readAcks, evaluate as evaluateHandoff, triageLine, parseTriagePatterns, isTriageCwd, ackCommandFor, paths as handoffPaths, DEFAULT_REPEAT_DAYS,
 } from '../scripts/lib/scout-handoff.mjs';
-import { flagLine as releaseWatchLine } from './lib/release-watch-state.mjs';
+import { flagLine as releaseWatchLine, standingLine, noteShown } from './lib/release-watch-state.mjs';
 import { pendingUsageSummary, markUsageSurfaced, unattendedReason } from '../scripts/lib/usage/surface.mjs';
 
 const MAX_AGE_DAYS = 7;
@@ -296,15 +296,21 @@ try {
   // Release watch: an open unanswered flag or a hold shows at every session start until answered or cleared (never marked seen).
   let watchLine = null;
   try { watchLine = unattended() ? null : releaseWatchLine(); } catch { watchLine = null; }
+  // Standing health: one attended line per day when the daily look has findings (reports only, never a hold).
+  let standingPart = null;
+  try { standingPart = unattended() ? null : standingLine(); } catch { standingPart = null; }
 
-  if (!ciLine && !scoutBlock && !releaseLine && !checkupLine && !registerLine && !usageLine && !watchLine) passthrough();
+  if (!ciLine && !scoutBlock && !releaseLine && !checkupLine && !registerLine && !usageLine && !watchLine && !standingPart) passthrough();
 
-  const contextParts = [watchLine, ciLine, scoutBlock?.context, releaseLine, checkupLine, usageLine, registerLine].filter(Boolean);
-  const summary = watchLine || scoutBlock?.summary || ciLine || releaseLine || checkupLine || usagePiece?.lines[0] || registerLine;
+  const contextParts = [watchLine, standingPart, ciLine, scoutBlock?.context, releaseLine, checkupLine, usageLine, registerLine].filter(Boolean);
+  const summary = watchLine || standingPart || scoutBlock?.summary || ciLine || releaseLine || checkupLine || usagePiece?.lines[0] || registerLine;
 
   // Last, so a hook that dies before printing has not marked anything surfaced.
   if (registerPiece) { try { markFlagsSurfaced(registerPiece.keys); } catch { /* advisory */ } }
   if (usagePiece) { try { markUsageSurfaced(stateRootPath(), usagePiece); } catch { /* advisory */ } }
+
+  // The flag line is in this session's context: the first reply typed here counts as the operator's answer.
+  if (watchLine) { try { noteShown(p.session_id); } catch { /* advisory */ } }
 
   process.stdout.write(JSON.stringify({
     systemMessage: summary,

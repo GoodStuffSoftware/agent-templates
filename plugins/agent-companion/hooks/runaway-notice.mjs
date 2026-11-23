@@ -25,13 +25,18 @@
 // notice appear exactly once. Empty stdout when there is nothing queued.
 
 import { readStdin, passthrough, callerIsSubagent, opt, stateRootPath } from './lib/context.mjs';
-import { flagLine as releaseWatchLine, noteReply, isHoldActive, clear as clearWatch } from './lib/release-watch-state.mjs';
+import {
+  flagLine as releaseWatchLine, isHoldActive, clear as clearWatch, now as nowMs, noteShown, noteCandidate, confirmCandidates,
+  matchHumanPrompt, promptSha, CLEAR_WORDS_RE,
+} from './lib/release-watch-state.mjs';
 import { unattendedReason } from '../scripts/lib/usage/surface.mjs';
 import { drainNotices, renderNotices } from './lib/runaway.mjs';
 import { interruptedNotices } from './lib/interrupted-workers.mjs';
 import { checkSessionBudget, SESSION_BUDGET_DEFAULT_UNITS } from './lib/session-budget.mjs';
 
 const EVENTS = new Set(['UserPromptSubmit', 'PostToolUse']);
+// Text the harness injects as a prompt. A reply that merely starts with "[" or "<" is not in this list and still gets checked.
+const AUTOMATED_MARKER_RE = /^\s*<(task-notification|teammate-message|bus-message|system-reminder|scheduled-task|local-command-(stdout|stderr|caveat)|command-(name|message))\b/i;
 
 try {
   const p = readStdin();
@@ -40,20 +45,31 @@ try {
   if (!event) passthrough();
   try { checkSessionBudget(p, { threshold: opt('session_budget_units', SESSION_BUDGET_DEFAULT_UNITS) }); } catch { /* advisory: never in the way */ }
   const interrupted = event === 'UserPromptSubmit' && opt('interrupted_worker_notice', true) ? interruptedNotices(p) : [];
-  // Release watch: the open-flag or hold line on every lead prompt; a genuine prompt then stops the hold countdown.
+  // Release watch: the open-flag or hold line on every lead prompt. Only a typed prompt (origin human, proven by the payload or the
+  // transcript) stops the hold countdown or lifts a hold; scheduled wakeups, notifications and peer messages never do.
   let watch = null;
   if (event === 'UserPromptSubmit') {
     try {
       if (unattendedReason({ payload: p, root: stateRootPath() }) === null) {
         const prompt = String(p.prompt || '');
-        const genuine = !/^\s*<(task-notification|system-reminder|command-|teammate-message|channel|bus-)/.test(prompt);
-        // The operator's words lift a hold: a short genuine prompt saying "clear hold" or "release hold".
-        if (genuine && isHoldActive() && /^(please\s+)?(clear|release)\s+(the\s+)?hold[.!]*$/i.test(prompt.trim())) {
+        const at = nowMs();
+        // The operator's words lift a hold only from a typed prompt. When the transcript record is not written yet, a candidate is
+        // kept and the hold stays; the next prompt confirms it.
+        const typedNow = () => (p.origin && p.origin.kind === 'human')
+          || matchHumanPrompt(p.transcript_path, promptSha(prompt), at - 120e3, at + 10e3);
+        const wantsClear = isHoldActive() && CLEAR_WORDS_RE.test(prompt.trim());
+        if (wantsClear && typedNow()) {
           clearWatch({ by: 'prompt' });
           watch = '[agent-companion] The release hold is lifted on the operator\'s word: new agents, heavy jobs and running workers carry on.';
         } else {
+          confirmCandidates({ at });                      // a candidate from an earlier turn of any session
+          // Skip only exact automated markers with no human origin in the payload; the origin or transcript check is the real gate.
+          if (wantsClear || (p.origin && p.origin.kind === 'human') || !AUTOMATED_MARKER_RE.test(prompt)) {
+            noteCandidate({ sessionId: p.session_id, transcriptPath: p.transcript_path, prompt, payloadOrigin: p.origin, at });
+          }
           watch = releaseWatchLine();
-          if (genuine) noteReply();
+          if (watch && wantsClear) watch += ' The "clear hold" words could not be confirmed as typed by the operator yet: ask the operator to repeat "clear hold", or run the clear command after the operator says so.';
+          if (watch) noteShown(p.session_id, at);         // after the candidate: this turn's prompt was typed before the line was shown
         }
       }
     } catch { watch = null; }

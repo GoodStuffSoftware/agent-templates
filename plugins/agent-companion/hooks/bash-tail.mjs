@@ -9,6 +9,8 @@
 //      a denial carrying the rewritten command unless resource_gate_powershell_rewrite.
 //      A line it cannot rewrite cleanly is denied. Option worktree_remove_safe (default
 //      true). Not seen: `bash -c "..."`, `xargs git worktree remove`, aliases and functions.
+//   0b. wait-loop cap (hooks/lib/wait-cap.mjs): a background command's unbounded `until/while ... sleep`
+//      loop gets a $SECONDS deadline (option wait_loop_cap_minutes, default 60, 0 = off).
 //   1. resource gate (hooks/lib/resource-gate.mjs): a heavy command (full test
 //      suite, E2E, emulator, gradle...) is sent through the machine-wide resource
 //      queue. Setting resource_gate: rewrite | deny | hint | off, default deny.
@@ -55,6 +57,7 @@ import {
   readPermissionRules, blockingPermissionRule,
 } from './lib/bash-tail.mjs';
 import { worktreeRemoveDecision } from './lib/worktree-remove.mjs';
+import { waitCapRewrite } from './lib/wait-cap.mjs';
 import { gateDecision, gateMode, DEFAULT_GATE_MODE, TELEMETRY_STREAM as GATE_STREAM } from './lib/resource-gate.mjs';
 
 // Enterprise-managed settings, where Claude Code reads them.
@@ -143,6 +146,22 @@ try {
         // still gets both rewrites (a heavy command next to the remove is queued or denied as usual).
         origCommand = input.command;
         input = { ...input, command: w.command };
+      }
+    }
+  } catch { /* fails open: the command runs as written */ }
+
+  // ---- step 0b: wait-loop cap (hooks/lib/wait-cap.mjs) ------------------------------------
+  // A BACKGROUND Bash command with an unbounded `until/while ... sleep ...` loop gets a $SECONDS deadline in the
+  // loop body (prints `wait-cap: gave up after N min; condition never met`, exit 124). Foreground calls die at the
+  // tool timeout and are left alone. Silent: no note. Option wait_loop_cap_minutes (default 60, 0 = off).
+  try {
+    const capMin = Number(opt('wait_loop_cap_minutes', 60));
+    if (!isPs && input.run_in_background === true && capMin > 0 && /sleep/.test(input.command) && !permissionHit(p, input.command)) {
+      const c = waitCapRewrite(input.command, capMin);
+      if (c) {
+        gateRow(p, { event: 'wait-cap-rewritten', tool: p.tool_name, command_chars: input.command.length, count: c.count, cap_minutes: capMin });
+        origCommand = origCommand ?? input.command;
+        input = { ...input, command: c.command };
       }
     }
   } catch { /* fails open: the command runs as written */ }

@@ -212,6 +212,25 @@ test('rewrite: the whole line is wrapped unchanged; only a leading cd stays outs
   assert.equal(rewrite('echo hi'), 'echo hi');
 });
 
+test('rewrite: a leading cd with ;, a newline, quotes, spaces, drive paths or -- stays outside, byte for byte', async () => {
+  const w = wrapSegment('npm ci', 'install', LAUNCHER);
+  for (const head of ['cd app && ', 'cd app; ', 'cd app ;', 'cd app\n', 'cd -- app && ', 'cd -- app; ', 'cd "my dir/x y" && ', "cd 'my dir' ; ",
+    'cd C:/work/wt && ', 'cd /c/work/wt; ', 'cd -- "C:/a b" && ', 'cd C:\\work\\wt && ']) {
+    assert.equal(rewrite(`${head}npm ci`), `${head}${w}`, JSON.stringify(head));
+    const d = await dec(`${head}npm ci`, { mode: 'rewrite' });
+    assert.equal(d.action, 'rewrite', JSON.stringify(head));
+  }
+  assert.equal(rewrite('cd app; npm ci | tail -3'), `cd app; ${wrapSegment('npm ci | tail -3', 'install', LAUNCHER)}`);
+});
+
+test('rewrite: a cd the gate cannot verify keeps the denial', async () => {
+  for (const c of ['cd a && cd b && npm ci', 'cd a; cd b; npm ci', 'cd -P a && npm ci', 'cd a b && npm ci', 'cd -- a b; npm ci', '(cd a; npm ci)',
+    'cd $D; npm ci', 'cd a && npm ci && cd ..', 'npm ci; cd a', 'cd a && pushd b && npm ci']) {
+    const d = await dec(c, { mode: 'rewrite' });
+    assert.equal(d.action, 'deny', c);
+  }
+});
+
 test('rewrite: wrapLosesCwd flags a directory change inside the wrapped part only', () => {
   assert.equal(wrapLosesCwd('cd app && npm ci'), false);
   assert.equal(wrapLosesCwd('npm ci && cd app'), true);
