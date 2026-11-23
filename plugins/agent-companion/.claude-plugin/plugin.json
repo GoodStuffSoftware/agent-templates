@@ -719,6 +719,12 @@
       "description": "Rewrite a known long-running Bash command (test, build, install) so its full output goes to a file and only the tail plus that file's path returns to context. Exit code and failures are preserved; short output prints in full; piped, redirected, backgrounded, watch-mode and git commands are never touched. Off = commands run exactly as written. See docs/adr/0004-bash-output-tail.md.",
       "default": true
     },
+    "diff_cap": {
+      "type": "boolean",
+      "title": "Diff cap",
+      "description": "Rewrite a Bash git diff, git show or git log -p call so one call returns at most 400 lines of diff: more goes to a file and the stat, the first 300 lines and the file path come back to read by range. Exit status is kept. Stat, name-only, piped, redirected and background calls are never touched. Off = diffs print as written.",
+      "default": true
+    },
     "git_brief": {
       "type": "boolean",
       "title": "Git brief",

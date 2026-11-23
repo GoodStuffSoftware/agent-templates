@@ -149,9 +149,9 @@ export function leadEffortRolloutId() {
 }
 export function leadEffortCheckText(level) {
   return [
-    `Orchestrating (workers, reviewers, several threads, releases)? Before the first spawn and after any resume or compaction, call get_session with session_id "self" and read its effort (it may show the starting effort: if the operator says it was raised, continue). A lead runs at ${level}; at ${level} or above, say nothing about effort.`,
+    `Orchestrating (workers, reviewers, releases)? Before the first spawn and after any resume or compaction, call get_session with session_id "self" and read its effort (if the operator says it was raised, continue). A lead runs at ${level}; at ${level} or above, say nothing about effort.`,
     `Unattended (scheduledTaskId in get_session, headless or -p run): state the effort once, only if below ${level}.`,
-    `Interactive and below ${level}: state once, in your first report, the effort you run at and that orchestration is tuned for ${level}. This is information only: nothing is asked, nothing waits, no spawn or tool call is held. You cannot change your own effort; the operator can with the app's effort control. Then continue normally and say nothing more about effort this session.`,
+    `Interactive and below ${level}: state once, in your first report, the effort you run at and that orchestration is tuned for ${level}. Information only: nothing is asked or held. You cannot change your own effort; the operator can. Then say nothing more about effort.`,
     'Never raise to max, never lower, never suggest lowering.',
   ].join(' ');
 }
@@ -209,7 +209,7 @@ function builtinRules() {
       scope: 'session-start',
       gate: 'brevity',
       when: null,
-      then: 'Report at outcome level: what happened, what is next, what needs the user. Blockers in full; detail in a linked file, no narrative or recaps.',
+      then: 'Report at outcome level: what happened, what is next, what needs the user. Blockers in full; detail in a linked file; no recaps.',
       note: "Origin: one operator's preference for outcome-level reports (what happened, what is next, what needs the user); date not recorded.",
     },
     {
@@ -246,7 +246,7 @@ function builtinRules() {
       builtin: true,
       scope: 'session-start',
       when: null,
-      then: 'You are an orchestrator: reads, searches, shell, tests and self-contained edits go to subagents; you plan and decide. Max three execution calls in a row. Set each spawn\'s model. A writer brief names the files and the functions or line ranges to change when you know them.',
+      then: 'You are an orchestrator: reads, searches, shell, tests and self-contained edits go to subagents; you plan and decide. Max three execution calls in a row. Set each spawn\'s model. Writer briefs name the files and functions or line ranges.',
       gate: null,
       note: "Origin: one operator's experience that a lead doing its own reads and edits is the costly path; date not recorded.",
     },
@@ -266,7 +266,7 @@ function builtinRules() {
       builtin: true,
       scope: 'session-start',
       when: null,
-      then: 'Continue a worker only while its cache is warm (under 5 minutes) and the follow-on is short (about 10 calls or fewer). Otherwise spawn fresh with a short handoff: continuing re-reads all context each call. A worker that returns "DONE: partial, handoff at <path>" gets a fresh same-rung continuation from that file, not a resume.',
+      then: 'Continue a worker only while its cache is warm (under 5 minutes) and the follow-on is short (about 10 calls or fewer). Otherwise spawn fresh with a short handoff: continuing re-reads all context each call. A worker returning "DONE: partial, handoff at <path>" gets a fresh same-rung continuation from it.',
       gate: null,
       note: "Origin: measured on one operator's workstation since 2026-09-01 (a continued worker cost 0.11-0.16 plan units per call against 0.06-0.07 for a fresh one), wording refined 2026-10-06.",
     },
