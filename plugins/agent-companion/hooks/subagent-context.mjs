@@ -59,7 +59,7 @@ import { allowanceNote, allowanceWatch } from './lib/plan-allowance.mjs';
 try {
   const p = readStdin();
   if (!callerIsSubagent(p)) passthrough();
-  const threshold = handoffThreshold(p.agent_type); // 110000 for the lower rungs, 130000 for sonnet high/xhigh and the opus rungs (options)
+  const threshold = handoffThreshold(p.agent_type); // 110000 for the lower rungs, 130000 for sonnet high/xhigh, 120000 for the opus rungs (options)
   const warnAt = warnThreshold(p.agent_type);
   const ceiling = opt('subagent_ceiling_tokens', CEILING_DEFAULT_TOKENS);
   const repeat = opt('subagent_ceiling_repeat_tokens', CEILING_REPEAT_DEFAULT_TOKENS);
@@ -129,7 +129,7 @@ try {
   const nearLimit = planOn && noticePct > 0 ? allowanceWatch(p, { noticePct }) : null;
 
   const variant = (kinds.includes('size') || repeatNote) ? noticeVariant(readBrief(path), p.agent_type) : 'writer';
-  const info = { ctx: sig ? sig.ctx : undefined, hard: handoffOn ? hcfg.hard : 0 };
+  const info = { ctx: sig ? sig.ctx : undefined, hard: handoffOn ? hcfg.hard : 0, transcript: path };
   const warnLine = warn ? warnText(sig.ctx, threshold, handoffOn ? hcfg.hard : 0, noticeVariant(readBrief(path), p.agent_type)) : '';
   const text = [warnLine, kinds.length ? subagentNoticeText(kinds, threshold, variant, info) : '', repeatNote ? subagentNoticeText(['size'], threshold, variant, info) : '', nudge ? nudge.text : '', step ? step.warn : '', longRun ? longRun.text : '', allowance || '', nearLimit || '']
     .filter(Boolean).join('\n');

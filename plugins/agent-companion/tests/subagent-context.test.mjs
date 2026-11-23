@@ -51,7 +51,8 @@ const pre = (lead, extra = {}) => ({
 const stopPayload = (lead, extra = {}) => ({
   hook_event_name: 'SubagentStop', session_id: SID, transcript_path: lead, agent_id: AGENT, agent_type: 'general-purpose', last_assistant_message: 'STATUS: done', ...extra,
 });
-const ctxText = (r) => r.json?.hookSpecificOutput?.additionalContext || '';
+const noTranscript = (s) => String(s).replace(/ Put the line `transcript: [^`]*` at the top of the handoff file .*$/m, ''); // 0.31.66 sentence, pinned in subagent-context.test.mjs
+const ctxText = (r) => noTranscript(r.json?.hookSpecificOutput?.additionalContext || '');
 const leadDrain = (lead) => runHook('hooks/runaway-notice.mjs', {
   hook_event_name: 'UserPromptSubmit', session_id: SID, transcript_path: lead, prompt: 'go',
 }, { env: { CLAUDE_PLUGIN_OPTION_SESSION_BUDGET_UNITS: '0' } });
@@ -311,6 +312,8 @@ test('hooks.json: a PreToolUse entry with NO matcher runs the hook, the plugin d
   assert.equal(cfg.userConfig.subagent_context_notice_tokens.default, 110000);
   assert.equal(subagentNoticeText(['size'], 110000).startsWith('[agent-companion] Context at 110K: finish the current step, '), true);
   assert.equal(subagentNoticeText(['size'], 110000, 'writer', { ctx: 126000, hard: 150000 }), `[agent-companion] Context at 126K, limit 150K: finish the current step, ${HAND}`);
+  assert.match(subagentNoticeText(['size'], 110000, 'writer', { ctx: 120000, hard: 150000, transcript: '/w/agent-a1.jsonl' }), /Put the line `transcript: \/w\/agent-a1\.jsonl` at the top of the handoff file/);
+  assert.doesNotMatch(subagentNoticeText(['size'], 110000, 'readonly', { transcript: '/w/agent-a1.jsonl' }), /transcript:/);
   assert.equal(subagentNoticeText(['compaction', 'size'], 110000), `[agent-companion] You just compacted. Context at 110K: finish the current step, ${HAND}`);
   assert.equal(subagentNoticeText(['compaction'], 110000), '[agent-companion] You compacted; re-read only what the next step needs and continue.');
   assert.equal(cfg.userConfig.step_budget_compaction_stop.default, 3);

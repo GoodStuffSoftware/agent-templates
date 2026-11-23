@@ -262,5 +262,8 @@ export function subagentNoticeText(kinds, threshold, variant = 'writer', info = 
   if (variant === 'readonly') {
     return `${lead}write your findings so far to your detail file (or the plan file your brief names) and return them with what is left; you edit nothing in the repo, so there is nothing to hand off but the findings.`;
   }
-  return `${lead}commit and push any work in progress to your branch, write a handoff file <task>-handoff.md next to your detail file (${HANDOFF_FIELDS}; ${HANDOFF_STYLE}), then end with "${HANDOFF_RETURN}".`;
+  // 0.31.66: the handoff file starts with the worker's own transcript path, so a successor can search it instead of asking.
+  const tr = typeof info.transcript === 'string' && info.transcript && !/[\r\n`]/.test(info.transcript)
+    ? ` Put the line \`transcript: ${info.transcript}\` at the top of the handoff file (your own transcript: the next worker searches it instead of asking you).` : '';
+  return `${lead}commit and push any work in progress to your branch, write a handoff file <task>-handoff.md next to your detail file (${HANDOFF_FIELDS}; ${HANDOFF_STYLE}), then end with "${HANDOFF_RETURN}".${tr}`;
 }

@@ -6,7 +6,7 @@
 // subagents only; the lead is never touched):
 //   warn        (option subagent_context_warn_tokens, default 110000, 0 = off)  once: keep the handoff file current
 //   soft limit  (option subagent_context_notice_tokens, default 110000; subagent_context_notice_high_tokens, default 130000, for
-//               ac-sonnet-high, ac-sonnet-xhigh and the ac-opus-* rungs)  the handoff notice, then again every
+//               ac-sonnet-high, ac-sonnet-xhigh; subagent_context_notice_opus_tokens, default 120000, for the ac-opus-* rungs)  the handoff notice, then again every
 //               subagent_context_notice_repeat_tokens (default 15000) while the context keeps growing
 //   hard limit  (option subagent_context_hard_tokens, default 150000)    a PreToolUse deny of everything except what a handoff
 //               needs: Write/Edit/Read of a .md file whose name contains "handoff", and Bash/PowerShell that is only git add,
@@ -31,10 +31,14 @@ export const HANDOFF_REPEAT_DEFAULT = 15000;
 export const HANDOFF_HARD_DEFAULT = 150000;
 export const WARN_DEFAULT = 110000;         // 0.31.65: warn (keep the handoff file current), every rung
 export const HANDOFF_HIGH_DEFAULT = 130000; // 0.31.65: hand off, for the higher rungs (sonnet high and xhigh, the opus rungs)
+export const HANDOFF_OPUS_DEFAULT = 120000; // 0.31.66: the opus rungs hand off earlier (an opus planner grew 40K in 6.5 min, past a 20K gap)
 
 // The higher rungs carry more context per step and re-read less, so they hand off later (operator decision 2026-11-23).
 // A bare or plugin-prefixed agent type.
 export const isHighRung = (agentType) => /^(ac-sonnet-(high|xhigh)|ac-opus-[a-z]+)$/.test(String(agentType || '').toLowerCase().replace(/^[^:]*:/, ''));
+
+// The opus rungs (ac-opus-*), bare or plugin-prefixed.
+export const isOpusRung = (agentType) => /^ac-opus-[a-z]+$/.test(String(agentType || '').toLowerCase().replace(/^[^:]*:/, ''));
 
 // The handoff notice line for this agent type: subagent_context_notice_tokens for the lower rungs, subagent_context_notice_high_tokens
 // for the higher rungs (a high value of 0 or less falls back to the lower rungs' line); 0 on the base option = no notice at all.
@@ -42,8 +46,9 @@ export function handoffThreshold(agentType) {
   const base = Number(opt('subagent_context_notice_tokens', 110000));
   if (!(base > 0)) return 0;
   if (!isHighRung(agentType)) return base;
-  const high = Number(opt('subagent_context_notice_high_tokens', HANDOFF_HIGH_DEFAULT));
+  let high = Number(opt('subagent_context_notice_high_tokens', HANDOFF_HIGH_DEFAULT));
   if (!(high > 0)) return base;
+  if (isOpusRung(agentType)) { const o = Number(opt('subagent_context_notice_opus_tokens', HANDOFF_OPUS_DEFAULT)); if (o > 0) high = o; } // 0 or less: the high rungs' line
   // The higher rungs never hand off earlier than the lower ones (a raised base lifts them too), and a notice line at or past the hard
   // stop would never be heard (the hard deny comes first): then the base line stands.
   const t = Math.max(base, high);
@@ -324,16 +329,19 @@ export const allowedAtHard = (p) => refusal(p) === null;
 // The path in a final message that ends "DONE: partial, handoff at <path>" (the last such line wins), else null. The text is the worker's own,
 // so it goes into the lead's context cleaned: control characters removed, at most 300 characters.
 export const HANDOFF_PATH_MAX = 300;
-// 0.31.61 review: only the final non-empty line counts (a quoted rule mid-message never does), the path has no <>"'|*? and ends in .md,
+// 0.31.61 review: the DONE line stands on its own line (a quoted rule inside a sentence never counts), the path has no <>"'|*? and ends in .md,
 // is a handoff file (isHandoffPath), and exists on disk (a relative path resolves against cwd).
 export function handoffReturnPath(msg, cwd) {
   const lines = String(msg || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  const last = lines[lines.length - 1] || '';
-  const m = /^(?:\*\*)?DONE:\s*partial,\s*handoff at\s+`?([^`<>"'|*?\r\n]+?\.md)`?\.?(?:\*\*)?$/i.exec(last);
-  if (!m) return null;
-  const path = m[1].replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim().slice(0, HANDOFF_PATH_MAX);
-  if (!isHandoffPath(path)) return null;
-  try { return existsSync(isAbsolute(path) ? path : resolve(cwd || process.cwd(), path)) ? path : null; } catch { return null; }
+  // 0.31.66: the line may be anywhere in the final message (workers add "Knowledge check ..." lines after it); the last valid one wins.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /^(?:\*\*)?DONE:\s*partial,\s*handoff at\s+`?([^`<>"'|*?\r\n]+?\.md)`?\.?(?:\*\*)?$/i.exec(lines[i]);
+    if (!m) continue;
+    const path = m[1].replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim().slice(0, HANDOFF_PATH_MAX);
+    if (!isHandoffPath(path)) continue;
+    try { if (existsSync(isAbsolute(path) ? path : resolve(cwd || process.cwd(), path))) return path; } catch { /* next line */ }
+  }
+  return null;
 }
 
 // What the lead is told, once, when that worker ends: continue at once, with a fresh worker, no resume.
@@ -355,8 +363,11 @@ export function finalIsComplete(msg) {
   return /\bDONE:(?!\s*partial\b)/i.test(t);
 }
 
+// 0.31.66: a Bash command that writes a handoff .md: a redirect (>, >>) or tee to a path matching *handoff*.md (cat > x <<EOF, echo >>, tee -a).
+export const bashWritesHandoff = (cmd) => typeof cmd === 'string' && /(?:>>?|\btee\b(?:\s+-\w+)*)\s*["']?[^\s"'|;&<>]*handoff[^\s"'|;&<>]*\.md\b/i.test(cmd);
+
 // Did this worker write a handoff file? Reads the last 4 MB of its transcript only. Counted: a Write, Edit or MultiEdit tool_use whose file is a
-// handoff .md (isHandoffPath) and whose tool_result is not an error (a result that is not in the tail does not count against it). A Read never counts.
+// handoff .md (isHandoffPath), or a Bash command writing one (bashWritesHandoff) and whose tool_result is not an error (a result that is not in the tail does not count against it). A Read never counts.
 export function handoffFileWritten(path) {
   let fd;
   try {
@@ -376,7 +387,8 @@ export function handoffFileWritten(path) {
       const content = o && o.message && Array.isArray(o.message.content) ? o.message.content : [];
       for (const c of content) {
         if (!c || typeof c !== 'object') continue;
-        if (c.type === 'tool_use' && ['Write', 'Edit', 'MultiEdit'].includes(c.name) && c.input && isHandoffPath(c.input.file_path)) {
+        if (c.type === 'tool_use' && ((['Write', 'Edit', 'MultiEdit'].includes(c.name) && c.input && isHandoffPath(c.input.file_path))
+            || (c.name === 'Bash' && c.input && bashWritesHandoff(c.input.command)))) {
           if (c.id) writes.set(c.id, true); else anonymous = true;
         } else if (c.type === 'tool_result' && c.is_error === true && c.tool_use_id) failed.add(c.tool_use_id);
       }
