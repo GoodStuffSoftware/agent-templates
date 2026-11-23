@@ -16,7 +16,7 @@ import { mkdirSync, writeFileSync, readFileSync, cpSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, runScript, readJsonl, PLUGIN_ROOT, decisionOf } from './helpers.mjs';
 import {
-  selfReviewConfig, optedOut, setSelfReviewBlock, readSelfReviewBlock, selfReviewBlock,
+  REVIEW_INSTRUCTION, selfReviewConfig, optedOut, setSelfReviewBlock, readSelfReviewBlock, selfReviewBlock,
   SELF_REVIEW_BEGIN, SELF_REVIEW_END, callerSidecarPath,
 } from '../hooks/lib/self-review.mjs';
 
@@ -68,7 +68,7 @@ test('committed rungs: only ac-sonnet-high (the write leg of the selfReview type
       assert.match(block, new RegExp(`^ {3}WRITER: ${rung.model}/${rung.effort}$`, 'm'));
       assert.match(block, /Land your own work/);
       // Project tiers (0.31.50): the writer states a RISK, applies its tier clause's cell, and marks the reviewer's brief.
-      assert.match(block, /^2\. State your risk: `RISK: low\|mid\|high` with the reason, never below the floor/m);
+      assert.match(block, /^2\. State `RISK: low\|mid\|high` with the reason, never below the floor/m);
       assert.match(block, /A cell that names no reviewer skips steps 3-5: go to step 6\./);
       assert.match(block, /With no tier clause in your brief, use project_tier risk: low = unit tests, land, no reviewer; mid = one reviewer by reading; high = one reviewer reads, then checks the changed behaviour in the running app\./);
       assert.match(block, /^ {3}ROLE: reviewer\n {3}RISK: <your risk>$/m);
@@ -745,7 +745,7 @@ test('every stand-alone writer type self-reviews (the 2026-10-02 narrowing is re
 
 test('the protocol tells the writer where its reviewer works', () => {
   const rung = SHIPPED.ladder.find((r) => r.agent === 'ac-opus-xhigh');
-  assert.match(selfReviewBlock(rung, selfReviewConfig(SHIPPED)), /where to read: its own checkout of that sha \(for example `git worktree add --detach <path> <sha>`, run from your working tree\), never your working tree/);
+  assert.match(readFileSync(join(PLUGIN_ROOT, 'docs', 'SELF-REVIEW.md'), 'utf8'), /where to read: its own checkout of that sha \(for example `git worktree add --detach <path> <sha>`, run from your working tree\), never your working tree/);
 });
 
 test('no self-review path for a type that is not listed (an edit worker); every self-review path either denies or sets no decision (never "allow")', () => {
@@ -858,4 +858,9 @@ test('recommend.mjs shows both legs for an Opus-resolving writer type, one short
   assert.doesNotMatch(bf.stdout, /^(plan|write) leg:/m);
   const dev = runScript('scripts/recommend.mjs', ['--type', 'large-refactor', '--weight', '5']);
   assert.doesNotMatch(dev.stdout, /^(plan|write) leg:/m, 'an explicit --weight is a deliberate deviation from the preset');
+});
+
+test('docs/SELF-REVIEW.md stays in sync with REVIEW_INSTRUCTION (the long form the block links)', () => {
+  const doc = readFileSync(join(PLUGIN_ROOT, 'docs', 'SELF-REVIEW.md'), 'utf8').replace(/\r\n/g, '\n');
+  assert.ok(doc.includes(REVIEW_INSTRUCTION), 'edit the doc and REVIEW_INSTRUCTION together');
 });

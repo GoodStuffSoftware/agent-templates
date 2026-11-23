@@ -244,7 +244,9 @@ export function noticeVariant(brief, agentType = '') {
 
 // What a handoff file holds, in the one wording the notice, the deny reason and the writer clause share.
 export const HANDOFF_FIELDS = 'done, remaining, files touched, branch and sha, the exact next step';
-export const kTokens = (n) => `${Math.round(Number(n) / 1000)}K`;
+// How to write it (0.31.65): the next worker reads this file first, so it stays short and points instead of pasting.
+export const HANDOFF_STYLE = 'keep the file under about 4,000 chars, name files and line ranges instead of pasting code, and give the exact next step';
+export const kTokens =(n) => `${Math.round(Number(n) / 1000)}K`;
 
 // The text the subagent sees. A compaction alone is informative only: workers compact and keep going (operator decision
 // 2026-10-27), so no wrap-up and no return is asked. The size notice is the handoff request (0.31.60 wording: "Context at <N>K,
@@ -260,5 +262,5 @@ export function subagentNoticeText(kinds, threshold, variant = 'writer', info = 
   if (variant === 'readonly') {
     return `${lead}write your findings so far to your detail file (or the plan file your brief names) and return them with what is left; you edit nothing in the repo, so there is nothing to hand off but the findings.`;
   }
-  return `${lead}commit and push any work in progress to your branch, write a handoff file <task>-handoff.md next to your detail file (${HANDOFF_FIELDS}), then end with "${HANDOFF_RETURN}".`;
+  return `${lead}commit and push any work in progress to your branch, write a handoff file <task>-handoff.md next to your detail file (${HANDOFF_FIELDS}; ${HANDOFF_STYLE}), then end with "${HANDOFF_RETURN}".`;
 }
