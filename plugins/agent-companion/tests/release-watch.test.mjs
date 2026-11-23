@@ -13,12 +13,12 @@ const HOUR = 3600e3;
 const T = Date.parse('2026-03-01T10:00:00Z');
 
 let tmp; let state; let claude;
-const env = () => ({ ...process.env, CLAUDE_CONFIG_DIR: claude, AGENT_COMPANION_STATE_DIR: state, AGENT_COMPANION_FAKE_NOW: '', CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_MINUTES: '' });
+const env = () => ({ ...process.env, AGENT_COMPANION_DESKTOP_SESSIONS_DIR: join(tmp, 'desk'), CLAUDE_CONFIG_DIR: claude, AGENT_COMPANION_STATE_DIR: state, AGENT_COMPANION_FAKE_NOW: '', CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_MINUTES: '' });
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'rw-'));
   state = join(tmp, 'ac'); claude = join(tmp, 'claude');
   mkdirSync(join(state, 'state'), { recursive: true }); mkdirSync(join(claude, 'plugins'), { recursive: true });
-  process.env.CLAUDE_CONFIG_DIR = claude; process.env.AGENT_COMPANION_STATE_DIR = state; delete process.env.AGENT_COMPANION_FAKE_NOW;
+  process.env.CLAUDE_CONFIG_DIR = claude; process.env.AGENT_COMPANION_STATE_DIR = state; process.env.AGENT_COMPANION_DESKTOP_SESSIONS_DIR = join(tmp, 'desk'); delete process.env.AGENT_COMPANION_FAKE_NOW;
 });
 
 const W = await import('../scripts/release-watch.mjs');
@@ -1226,7 +1226,9 @@ test('held: the CLI lists the held sessions as text and JSON; none recorded says
   S.noteHeld({ session_id: 'lead-a', agent_id: 'sub-1' }, T + 2 * HOUR);
   const t = cli('held').stdout;
   assert.match(t, /2 lead, 1 subagent/);
-  assert.match(t, /message each: lead-a lead-b/);
+  assert.match(t, /lead lead-a  local unmapped/);
+  assert.match(t, /No desktop session found for these .*lead-a \(cwd \/w\/demo\); lead-b \(cwd \/w\/other\)/);
+  assert.doesNotMatch(t, /Send each of these sessions/, 'nothing mapped: no ids to message');
   const j = JSON.parse(cli('held', '--json').stdout);
   assert.equal(j.held, true); assert.equal(j.sessions.length, 3);
 });
@@ -1239,7 +1241,7 @@ test('clear: prints the held list, stores it with clearedAt in the history row; 
   const out = cli('clear', '--by', 'operator').stdout;
   assert.match(out, /cleared \(flag true, hold true\)/);
   assert.match(out, /lead lead-a/); assert.match(out, /lead lead-b/);
-  assert.match(out, /message each: lead-a lead-b/);
+  assert.match(out, /No desktop session found for these/);
   const row = readFileSync(file('release-watch-checks.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.event === 'clear').pop();
   assert.ok(row.clearedAt); assert.equal(row.heldSessions.length, 3);
   assert.equal(S.heldSessions().length, 0, 'no hold now');
@@ -1264,16 +1266,60 @@ test('a new hold starts a new list, and a stale cleared notice is not shown duri
   assert.deepEqual(S.heldSessions().map((x) => x.sessionId), ['lead-c']);
 });
 
-test('wording: a lead is told to arm one 20-minute cron on status; a subagent only to write its handoff and stop', () => {
+test('wording: a lead is told to stop and wait for the local message, no cron; a subagent only to write its handoff and stop', () => {
   startHold();
   const lead = S.flagLine({ at: T + 2 * HOUR });
-  assert.match(lead, /CronCreate every 20 minutes/); assert.match(lead, /release-watch\.mjs status/);
-  assert.match(lead, /delete the cron and resume/);
+  assert.match(lead, /Stop and wait: end your turn now\. A local message arrives in this session when the hold clears/);
+  assert.doesNotMatch(lead, /CronCreate|cron|20 minutes/);
   assert.doesNotMatch(lead, /<plugin root>/);
-  assert.match(S.holdDenyMessage('starting a new agent', { session_id: 'lead-a' }), /CronCreate every 20 minutes/);
+  const deny = S.holdDenyMessage('starting a new agent', { session_id: 'lead-a' });
+  assert.match(deny, /Stop and wait/); assert.doesNotMatch(deny, /CronCreate/);
   const sub = S.holdDenyMessage('resuming a worker', { session_id: 'lead-a', agent_id: 'sub-1' });
   assert.match(sub, /Write your handoff and stop/); assert.doesNotMatch(sub, /CronCreate/);
   assert.equal(S.heldSessions().length, 2, 'the denials were recorded too');
+});
+
+// ---- desktop session ids and the local message after a clear ----
+const putDesktop = (cliId, local, extra = {}, rel = ['acct-1', 'org-1']) => {
+  const d = join(tmp, 'desk', ...rel); mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, local + '.json'), JSON.stringify({ sessionId: local, cliSessionId: cliId, cwd: '/w/demo', title: 'invented', ...extra }));
+};
+
+test('desktop map: Claude Code session id -> local_ id, from every account and org folder; junk and non-session files ignored', () => {
+  putDesktop('lead-a', 'local_aaaa1111-0000-4000-8000-000000000001');
+  putDesktop('lead-b', 'local_bbbb2222-0000-4000-8000-000000000002', {}, ['acct-2', 'org-9']);
+  writeFileSync(join(tmp, 'desk', 'acct-1', 'org-1', 'local_broken.json'), '{nope');
+  writeFileSync(join(tmp, 'desk', 'acct-1', 'org-1', 'notes.json'), JSON.stringify({ sessionId: 'local_x', cliSessionId: 'lead-z' }));
+  const m = S.desktopSessionMap();
+  assert.equal(m.get('lead-a'), 'local_aaaa1111-0000-4000-8000-000000000001');
+  assert.equal(m.get('lead-b'), 'local_bbbb2222-0000-4000-8000-000000000002');
+  assert.equal(m.has('lead-z'), false);
+  assert.equal(S.desktopSessionMap(join(tmp, 'nowhere')).size, 0, 'a missing store is an empty map');
+});
+
+test('clear: mapped leads get the local-message line and localSessionId in JSON; unmapped leads and subagents are not messaged', () => {
+  putDesktop('lead-a', 'local_aaaa1111-0000-4000-8000-000000000001');
+  startHold();
+  S.noteHeld({ session_id: 'lead-a', cwd: '/w/demo' }, T + 2 * HOUR);
+  S.noteHeld({ session_id: 'lead-b', cwd: '/w/other' }, T + 2 * HOUR);
+  S.noteHeld({ session_id: 'lead-a', agent_id: 'sub-1' }, T + 2 * HOUR);
+  const held = cli('held').stdout;
+  assert.match(held, /Send each of these sessions a local message now: local_aaaa1111-0000-4000-8000-000000000001\n/);
+  const out = cli('clear').stdout;
+  assert.match(out, /lead lead-a  local local_aaaa1111-0000-4000-8000-000000000001/);
+  assert.match(out, /^Send each of these sessions a local message now: local_aaaa1111-0000-4000-8000-000000000001$/m);
+  assert.match(out, /No desktop session found for these \(message by hand\): lead-b \(cwd \/w\/other\)/);
+  assert.doesNotMatch(out, /sub-1/);
+});
+
+test('clear --json: localSessionId on each lead entry, null when unmapped', () => {
+  putDesktop('lead-a', 'local_aaaa1111-0000-4000-8000-000000000001');
+  startHold();
+  S.noteHeld({ session_id: 'lead-a' }, T + 2 * HOUR);
+  S.noteHeld({ session_id: 'lead-b' }, T + 2 * HOUR);
+  const j = JSON.parse(cli('clear', '--json').stdout);
+  assert.equal(j.heldSessions.find((x) => x.sessionId === 'lead-a').localSessionId, 'local_aaaa1111-0000-4000-8000-000000000001');
+  assert.equal(j.heldSessions.find((x) => x.sessionId === 'lead-b').localSessionId, null);
 });
 
 // ---- 0.31.66 counting fixes ----

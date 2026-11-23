@@ -796,7 +796,7 @@ export function main(A = process.argv.slice(2)) {
   try {
     if (cmd === 'tick') { const r = tick(); if (A.includes('--json')) console.log(JSON.stringify(r)); return 0; }
     if (cmd === 'status') { console.log(status(S.now(), { all: A.includes('--all'), json: A.includes('--json') })); return 0; }
-    if (cmd === 'held') { const l = S.heldSessions(); console.log(A.includes('--json') ? JSON.stringify({ held: S.isHoldActive(), sessions: l }, null, 1) : S.heldText(l)); return 0; }
+    if (cmd === 'held') { const l = S.withLocalIds(S.heldSessions()); console.log(A.includes('--json') ? JSON.stringify({ held: S.isHoldActive(), sessions: l }, null, 1) : S.heldText(l)); return 0; }
     if (cmd === 'clear') {
       const r = S.clear({ by: argOf(A, '--by') || 'operator' });
       const head = r.flagCleared || r.holdCleared ? `cleared (flag ${r.flagCleared}, hold ${r.holdCleared})` : 'nothing to clear';
