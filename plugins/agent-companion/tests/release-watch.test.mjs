@@ -827,13 +827,23 @@ test('standing-daily: one standing check per day; the same day writes no second 
   assert.equal(W.standingDue(runFile(), T + 25 * HOUR + 25 * HOUR), true);
 });
 
-// A flag written by hand the way a pre-v2 build wrote it (no `v`).
-const legacyFlag = (over = {}) => ({ version: '1.2.3', T: iso(T), check: '+1h', flags: [{ name: 'queue-denied', value: 20, n: 40, level: 3, detail: 'x' }], openedAt: iso(T + HOUR), notifiedAt: iso(T + HOUR), ackedAt: null, shownTo: {}, candidates: [], ack: null, clearedAt: null, cooldown: {}, ...over });
+// A flag written by hand the way a v1 build wrote it (no `v`): items are {name, value, level, limit, detail} with NO sample size; the sample
+// size lives in the v1 check row (metrics.spawns.since, metrics.workers.since.n) and in the detail text ("per N spawns", "n=N").
+const v1Item = (name, value, limit, detail) => ({ name, value, level: value, limit, detail });
+const legacyFlag = (over = {}) => ({ version: '1.2.3', T: iso(T), check: '+1h', flags: [v1Item('queue-denied', 23.1, 20, '6 denied')], openedAt: iso(T + HOUR), notifiedAt: iso(T + HOUR), ackedAt: null, shownTo: {}, candidates: [], ack: null, clearedAt: null, cooldown: {}, ...over });
 const putFlag = (f) => writeFileSync(file('release-watch-flag.json'), JSON.stringify(f));
+// The v1 check row that raised the flag: what a v1 build appended (no `chain`; metrics a subset of the analysis).
+const putV1Check = ({ at = T + HOUR, flags, spawns = 40, workers = 25 } = {}) => {
+  S.appendRow({ at: iso(at), event: 'check', T: iso(T), version: '1.2.3', check: 1, covered: [1], late: false, flags: flags || [v1Item('queue-denied', 23.1, 20, '6 denied')],
+    metrics: { spawns: { since: spawns, base: 700, perHour: { since: spawns, base: 4 } }, workers: { since: { n: workers }, base: { n: 400 } } } });
+};
+const resetRows = () => rmSync(file('release-watch-checks.jsonl'), { force: true });
 
 test('legacy-flag-superseded: a pre-v2 flag whose sample is under the v2 floor is closed, the ack stays and nothing restarts', () => {
   const ackedAt = iso(T + 2 * HOUR);
-  putFlag(legacyFlag({ flags: [{ name: 'queue-denied', value: 20, n: 10, detail: 'x' }, { name: 'hook-error-share', value: 60, n: 8 }], ackedAt }));
+  const items = [v1Item('queue-denied', 23.1, 20, '6 denied'), v1Item('hook-error-share', 60, 50, '8 of 8 workers')];
+  putFlag(legacyFlag({ flags: items, ackedAt }));
+  putV1Check({ flags: items, spawns: 10, workers: 8 });
   const r = W.tick({ at: T + 3 * HOUR, installed: {}, standingRun: none });
   assert.deepEqual(r.migrated, { superseded: true });
   const f = S.readFlag();
@@ -850,15 +860,64 @@ test('legacy-flag-superseded: a pre-v2 flag whose sample is under the v2 floor i
 });
 
 test('legacy-flag-superseded: an item of unknown size or of a name in no class is kept', () => {
-  putFlag(legacyFlag({ flags: [{ name: 'queue-denied', value: 20, n: 10 }, { name: 'mystery', value: 1 }] }));
+  const items = [v1Item('queue-denied', 23.1, 20, '6 denied'), v1Item('mystery', 1, 1, 'x')];
+  putFlag(legacyFlag({ flags: items }));
+  putV1Check({ flags: items, spawns: 10 });
   const r = W.migrateFlag({ at: T + 3 * HOUR });
   assert.deepEqual(r.kept, ['mystery']);
   assert.deepEqual(S.readFlag().flags.map((x) => x.name), ['mystery']);
-  putFlag(legacyFlag({ flags: [{ name: 'queue-denied', value: 20 }] }));
+  // a check row without metrics and a detail without a sample size: unknown n, kept
+  resetRows();
+  putFlag(legacyFlag({ flags: [v1Item('queue-denied', 23.1, 20, '6 denied')] }));
+  S.appendRow({ at: iso(T + HOUR), event: 'check', T: iso(T), version: '1.2.3', check: 1, flags: [v1Item('queue-denied', 23.1, 20, '6 denied')] });
   assert.deepEqual(W.migrateFlag({ at: T + 3 * HOUR }).kept, ['queue-denied'], 'unknown n: kept');
+  // no check row at all: also kept
+  resetRows();
+  putFlag(legacyFlag());
+  assert.deepEqual(W.migrateFlag({ at: T + 3 * HOUR }).kept, ['queue-denied']);
+});
+
+// The live flag, copied in shape from the real state file at 2026-11-22: spawn-rewrites 1 per 26 spawns, queue-denied 6 denied, worker-bash-fail 8.2 with n=355.
+// The v1 check row recorded 26 spawns and 25 workers in the window.
+const LIVE_T = Date.parse('2026-11-22T21:14:56.581Z'); const LIVE_AT = Date.parse('2026-11-22T22:20:01Z');
+const liveItems = () => [v1Item('spawn-rewrites', 3.8, 3, '1 rewrites/denials per 26 spawns'), v1Item('queue-denied', 23.1, 20, '6 denied'), v1Item('worker-bash-fail', 8.2, 7, 'n=355, 29 real failures')];
+function putLive() {
+  resetRows();
+  putFlag(legacyFlag({ T: iso(LIVE_T), flags: liveItems(), openedAt: iso(LIVE_AT), notifiedAt: iso(LIVE_AT) }));
+  S.appendRow({ at: iso(LIVE_AT), event: 'check', T: iso(LIVE_T), version: '1.2.3', check: 1, covered: [1], late: false, flags: liveItems(),
+    metrics: { spawns: { since: 26, base: 700, perHour: { since: 20, base: 4 } }, workers: { since: { n: 25 }, base: { n: 400 } } } });
+}
+const bashOf = (realFails, realFailPct) => ({ n: 355, realFails, realFailPct, refusals: 0, refusalPer100: 0 });
+const liveRun = (bashSince, spawns = 100) => () => metrics({ spawns: { since: spawns, base: 700, perHour: { since: 10, base: 10 } }, bash: { since: bashSince, base: { n: 500, realFails: 5, realFailPct: 1, refusals: 0, refusalPer100: 0 } } });
+
+test('legacy-live-flag: the real v1 flag under v2 on the fallback shapes: only the 355-call Bash item survives', () => {
+  putLive();
+  // the default analysis finds nothing in the empty data tree: the stored shapes decide (26 spawns < 30, 355 Bash calls >= 200)
+  const r = W.migrateFlag({ at: LIVE_AT + HOUR });
+  assert.deepEqual(r, { kept: ['worker-bash-fail'] });
+  assert.deepEqual(S.readFlag().flags.map((x) => x.name), ['worker-bash-fail']);
+  assert.equal(S.readFlag().v, 2); assert.equal(S.flagIsOpen(S.readFlag()), true);
+  // the same through the tick, with a run that saw no spawns
+  putLive();
+  assert.deepEqual(W.tick({ at: LIVE_AT + HOUR, installed: {}, standingRun: none, run: liveRun(bashOf(29, 8.2), 0) }).migrated, { kept: ['worker-bash-fail'] });
+});
+
+test('legacy-live-flag: the real v1 flag under v2 on a re-run of the analysis', () => {
+  // the re-run finds the Bash failure rate under its limit: none of the three items would flag now
+  putLive();
+  assert.deepEqual(W.migrateFlag({ at: LIVE_AT + HOUR, run: liveRun(bashOf(5, 1.4)) }), { superseded: true });
+  assert.equal(S.flagIsOpen(S.readFlag()), false);
+  // the re-run still sees the Bash failure rate over its limit: that item stays, the two small-sample items go
+  putLive();
+  assert.deepEqual(W.migrateFlag({ at: LIVE_AT + HOUR, run: liveRun(bashOf(29, 8.2)) }), { kept: ['worker-bash-fail'] });
+  assert.equal(S.readFlag().flags[0].name, 'worker-bash-fail');
+  // a re-run that saw under half the recorded spawns is no answer: the stored shapes decide, with the same outcome
+  putLive();
+  assert.deepEqual(W.migrateFlag({ at: LIVE_AT + HOUR, run: liveRun(bashOf(5, 1.4), 5) }), { kept: ['worker-bash-fail'] });
 });
 
 test('legacy-flag-still-flags-revoked: a flag still over the v2 floor keeps its items, and an ack without a typed record is revoked with the countdown restarted', () => {
+  putV1Check();
   putFlag(legacyFlag({ ackedAt: iso(T + 2 * HOUR), shownTo: { s1: iso(T + HOUR) }, candidates: [{ x: 1 }] }));
   const at = T + 3 * HOUR;
   const r = W.tick({ at, installed: {}, standingRun: none });
@@ -873,6 +932,7 @@ test('legacy-flag-still-flags-revoked: a flag still over the v2 floor keeps its 
 });
 
 test('legacy-ack-revoked: an ack written by a build without human records is revoked; an unacked flag only gets the v2 marker', () => {
+  putV1Check();
   putFlag(legacyFlag());
   assert.deepEqual(W.migrateFlag({ at: T + 3 * HOUR }), { kept: ['queue-denied'] });
   const f = S.readFlag();
@@ -883,6 +943,7 @@ test('legacy-ack-revoked: an ack written by a build without human records is rev
 
 test('legacy-ack-kept: a legacy ack with a typed record at its time stays, as an ack object naming the session', () => {
   const ackedAt = T + 2 * HOUR;
+  putV1Check();
   putFlag(legacyFlag({ ackedAt: iso(ackedAt), shownTo: { sess1: iso(T + HOUR) } }));
   const projects = join(tmp, 'projects'); mkdirSync(join(projects, 'p'), { recursive: true });
   writeFileSync(join(projects, 'p', 'sess1.jsonl'), [urec(T, 'old'), humanRec(ackedAt + 500, 'looks fine')].join('\n') + '\n');
