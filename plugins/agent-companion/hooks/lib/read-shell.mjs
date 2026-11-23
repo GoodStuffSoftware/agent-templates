@@ -238,6 +238,22 @@ export function isOutputFile(path) {
   return SKIP_EXT.test(p) || /(^|\/)(tmp|temp|\.tmp)\//.test(p) || /(^|\/)[^/]*(stdout|stderr)[^/]*$/.test(p) || /(^|\/)([^/]*[-_.])?output\.(txt|json|md)$/.test(p);
 }
 
+// Is this file inside the read budget's scope? The agent's own repository (nearest ancestor of cwd with a .git, else cwd), and not a
+// log or test-output file. `fs` is { existsSync }, `path` is { resolve, dirname, relative }, `pathUnder` is context.mjs's.
+export function inBudgetScope(file, cwd, pathUnder, fs, path) {
+  let root = cwd;
+  for (let d = path.resolve(cwd), i = 0; i < 20; i += 1) {
+    if (fs.existsSync(path.resolve(d, '.git'))) { root = d; break; }
+    const up = path.dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  const abs = path.resolve(cwd, file);
+  const inRoot = pathUnder(abs, root);
+  if (!inRoot && !pathUnder(abs, cwd)) return false;
+  return !isOutputFile(path.relative(inRoot ? root : cwd, abs));
+}
+
 // --- outline ----------------------------------------------------------------
 
 export const OUTLINE_MAX_CHARS = 1500;

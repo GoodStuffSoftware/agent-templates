@@ -3,10 +3,10 @@
 // Names in fixtures are invented.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import { join, resolve, dirname, relative, isAbsolute } from 'node:path';
 import { makeFixture, runHook, decisionOf } from './helpers.mjs';
-import { parseShellRead, resolveRange, isOutputFile, outlineOf, outlineKind, countLinesIn, mayBeShellRead } from '../hooks/lib/read-shell.mjs';
+import { parseShellRead, resolveRange, isOutputFile, outlineOf, outlineKind, countLinesIn, mayBeShellRead, inBudgetScope } from '../hooks/lib/read-shell.mjs';
 import { decide, decideShell, budgetOf, budgetExempt, invalidate, record } from '../hooks/lib/read-dedupe.mjs';
 
 // --- unit: parseShellRead -----------------------------------------------------
@@ -294,4 +294,40 @@ test('hook: PowerShell tool and Get-Content go through the same path', () => wit
   const d = sh(fx, 'Get-Content src/widget.mjs -TotalCount 100', { tool: 'PowerShell' });
   assert.equal(decisionOf(d.json), 'deny');
   assert.match(reason(d), /Read\(file_path="src\/widget\.mjs", offset=1, limit=100\)/);
+}));
+
+// --- review round 1 (0.31.65): outline survives a denied first read; the Read hook has the same budget scope ---
+
+test('decideShell: a denied first read leaves the outline for the next read that runs', () => {
+  const s = blank();
+  const d = shell(s, 1, 500, { cap: 300, bigLines: 800 });
+  assert.equal(d.action, 'deny');
+  assert.equal(d.outline, undefined);
+  assert.equal(shell(s, 1, 100, { bigLines: 800 }).outline, true, 'the next allowed read carries it');
+  assert.equal(shell(s, 101, 150, { bigLines: 800 }).outline, undefined, 'once');
+});
+
+test('hook: a cat denied for its length does not use up the outline; the Read that follows carries it', () => withFx((fx) => {
+  const f = makeFile(fx, 'src/big.mjs', 800, 60, (i) => (i % 50 === 0 ? `export function task${i}() {}` : `// line ${i}`));
+  const d = sh(fx, 'cat src/big.mjs');
+  assert.equal(decisionOf(d.json), 'deny');
+  assert.match(context(rd(fx, f, 1, 100)), /outline of .*big\.mjs/);
+}));
+
+test('inBudgetScope: source in the repository yes; logs, test output and files outside no', () => withFx((fx) => {
+  const fs = { existsSync };
+  const path = { resolve, dirname, relative };
+  const pu = (child, parent) => { const r = relative(parent, child); return r === '' || (!r.startsWith('..') && !isAbsolute(r)); };
+  assert.equal(inBudgetScope('src/big.mjs', fx.dir, pu, fs, path), true);
+  assert.equal(inBudgetScope(join(fx.dir, 'src', 'big.mjs'), fx.dir, pu, fs, path), true);
+  assert.equal(inBudgetScope('logs/run.log', fx.dir, pu, fs, path), false);
+  assert.equal(inBudgetScope('logs/test-output.txt', fx.dir, pu, fs, path), false);
+  assert.equal(inBudgetScope('tmp/scratch.mjs', fx.dir, pu, fs, path), false);
+  assert.equal(inBudgetScope('../../outside-the-repo.mjs', fx.dir, pu, fs, path), false);
+}));
+
+test('hook: the Read hook still denies new lines of source past the budget (scope check did not switch it off)', () => withFx((fx) => {
+  const f = makeFile(fx, 'src/big.mjs', 900);
+  for (const [a, b] of [[1, 250], [251, 400]]) assert.notEqual(decisionOf(sh(fx, `sed -n '${a},${b}p' src/big.mjs`).json), 'deny');
+  assert.equal(decisionOf(rd(fx, f, 401, 100).json), 'deny');
 }));

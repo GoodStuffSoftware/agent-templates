@@ -43,7 +43,12 @@ export function handoffThreshold(agentType) {
   if (!(base > 0)) return 0;
   if (!isHighRung(agentType)) return base;
   const high = Number(opt('subagent_context_notice_high_tokens', HANDOFF_HIGH_DEFAULT));
-  return high > 0 ? high : base;
+  if (!(high > 0)) return base;
+  // The higher rungs never hand off earlier than the lower ones (a raised base lifts them too), and a notice line at or past the hard
+  // stop would never be heard (the hard deny comes first): then the base line stands.
+  const t = Math.max(base, high);
+  const hard = Number(opt('subagent_context_hard_tokens', HANDOFF_HARD_DEFAULT));
+  return hard > 0 && t >= hard ? base : t;
 }
 
 // The warn line (subagent_context_warn_tokens, 0 = none). It applies only below the handoff line: where the two coincide there is

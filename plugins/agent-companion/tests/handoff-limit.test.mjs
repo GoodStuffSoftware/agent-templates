@@ -544,3 +544,20 @@ test('0.31.65 threshold library: rung classes and lines', async () => {
   assert.equal(lib.warnThreshold('ac-sonnet-high'), 110000);
   assert.match(lib.warnText(111000, 130000, 150000), /Context at 111K \(handoff notice at 130K, hard stop at 150K\)/);
 });
+
+test('0.31.65 threshold library: high rungs never hand off before the lower ones, nor past the hard stop', async () => {
+  const lib = await import('../hooks/lib/handoff-limit.mjs');
+  const keys = ['CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS', 'CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_HARD_TOKENS'];
+  const saved = keys.map((k) => process.env[k]);
+  try {
+    process.env[keys[0]] = '300000'; // base raised above the high default
+    delete process.env[keys[1]];
+    assert.equal(lib.handoffThreshold('ac-opus-high'), 300000, 'not earlier than the lower rungs');
+    delete process.env[keys[0]];
+    process.env[keys[1]] = '120000'; // hard stop below the high line: the notice would never be heard
+    assert.equal(lib.handoffThreshold('ac-opus-high'), 110000);
+    assert.equal(lib.handoffThreshold('ac-sonnet-low'), 110000);
+  } finally {
+    keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
+  }
+});

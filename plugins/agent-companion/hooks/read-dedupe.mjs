@@ -20,11 +20,11 @@
 // taken ("lock-timeout": the hook failed open and, for a post, a read went
 // unrecorded).
 
-import { resolve } from 'node:path';
-import { statSync, readFileSync } from 'node:fs';
-import { readStdin, opt, deny, passthrough, appendLog, writeAndExit, callerIsSubagent } from './lib/context.mjs';
+import { resolve, dirname, relative } from 'node:path';
+import { statSync, readFileSync, existsSync } from 'node:fs';
+import { readStdin, opt, deny, passthrough, appendLog, writeAndExit, callerIsSubagent, pathUnder } from './lib/context.mjs';
 import { isServedCall } from './lib/delegation.mjs';
-import { outlineKind, outlineOf, countLinesIn, OUTLINE_MAX_CHARS } from './lib/read-shell.mjs';
+import { outlineKind, outlineOf, countLinesIn, OUTLINE_MAX_CHARS, inBudgetScope } from './lib/read-shell.mjs';
 import {
   budgetOf, READ_BUDGET_LINES_DEFAULT, OUTLINE_MIN_LINES,
   TELEMETRY_STREAM, agentOf, pathKeyOf, pathHash, statOf, withState, resetAgent, decide, record, invalidate, denyText, requestOf,
@@ -127,7 +127,9 @@ try {
   if (ev === 'pre') {
     // Subagents only: a per-file line budget (read_budget, read_budget_lines) and an outline of a big file on its first read.
     const sub = callerIsSubagent(p);
-    const budget = sub && opt('read_budget', true) ? budgetOf(Number(opt('read_budget_lines', READ_BUDGET_LINES_DEFAULT))) : null;
+    // Same scope as the shell-read hook: the agent's own repository, and not a log or test-output file.
+    const budget = sub && opt('read_budget', true) && inBudgetScope(f, cwd, pathUnder, { existsSync }, { resolve, dirname, relative })
+      ? budgetOf(Number(opt('read_budget_lines', READ_BUDGET_LINES_DEFAULT))) : null;
     let bigLines = 0;
     let outlineText = '';
     if (sub && stat && stat.size > 4000 && stat.size <= 2 * 1024 * 1024 && outlineKind(f)) {

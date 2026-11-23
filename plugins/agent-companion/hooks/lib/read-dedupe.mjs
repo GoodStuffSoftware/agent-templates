@@ -369,8 +369,11 @@ export function decide(state, { agent, pk, input, stat, now = Date.now(), budget
   const idx = (state.reads | 0) + 1;
   state.reads = idx;
   const extras = {};
-  if (bigLines > OUTLINE_MIN_LINES && claimOutline(state, agent, pk, now)) extras.outline = true;
-  const allow = (extra = {}) => ({ value: { action: 'allow', idx, ...extras, ...extra }, dirty: true });
+  // The outline is claimed only by a read that runs: a denied first read leaves it for the next one.
+  const allow = (extra = {}) => {
+    if (bigLines > OUTLINE_MIN_LINES && claimOutline(state, agent, pk, now)) extras.outline = true;
+    return { value: { action: 'allow', idx, ...extras, ...extra }, dirty: true };
+  };
 
   // The stat goes with this call to PostToolUse, which records only a read
   // whose file was unchanged across it. Stored on every allowed read.
@@ -445,8 +448,9 @@ export function decideShell(state, { agent, pk, a, b, total, stat, now = Date.no
   const cpl = Math.max(1, stat.size / total);
   const fresh = () => ({ mtimeMs: stat.mtimeMs, size: stat.size, ctimeMs: stat.ctimeMs, total, since: now, ranges: [], cpl, lines: 0, denied: [], t: now });
   const extras = {};
-  if (bigLines > OUTLINE_MIN_LINES && claimOutline(state, agent, pk, now)) extras.outline = true;
   const run = (action, extra = {}) => {
+    // Claimed only by a read that runs: a denied first read leaves the outline for the next one.
+    if (bigLines > OUTLINE_MIN_LINES && claimOutline(state, agent, pk, now)) extras.outline = true;
     const r = rec ?? (files[pk] = fresh());
     r.ranges = addRange(r.ranges, a, b);
     r.lines = (r.lines || 0) + span;
