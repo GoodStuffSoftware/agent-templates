@@ -108,3 +108,22 @@ test('real run: a loop whose condition comes true before the cap behaves as befo
   assert.match(ran.stdout, /OK-x/);
   assert.doesNotMatch(ran.stdout, /wait-cap/);
 });
+
+test('lib: a command with a heredoc is left completely alone (unquoted, quoted, apostrophes)', () => {
+  const loop = 'until [ -f /tmp/x ]; do sleep 1; done';
+  const cases = [
+    `cat > w.sh <<EOF\n${loop}\nEOF\nbash w.sh`,
+    `cat > w.sh <<'EOF'\n${loop}\nEOF\nbash w.sh`,
+    `cat > w.sh <<-"EOF"\n\t${loop}\nEOF\nbash w.sh`,
+    ['cat > w.sh <<EOF', `echo "it's here"; ${loop}; echo 'unterminated`, 'EOF', 'bash w.sh'].join('\n'),
+  ];
+  for (const c of cases) assert.equal(waitCapRewrite(c, 60), null, c);
+});
+
+test('lib: one deadline per command: a loop re-entered inside an outer loop shares the variable', () => {
+  const cmd = 'for p in 1 2 3; do until [ -f /tmp/$p ]; do sleep 5; done; done';
+  const r = waitCapRewrite(cmd, 60);
+  assert.equal(r.count, 1);
+  assert.equal((r.command.match(/__ac_wc\d+:=/g) || []).length, 1, 'set with := once, never reset per entry');
+  assert.doesNotMatch(r.command, /__ac_wc1=|unset __ac_wc1/);
+});
