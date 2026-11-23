@@ -7,7 +7,7 @@
 //   release-watch-checks.jsonl  one row per check and per clear
 // AGENT_COMPANION_FAKE_NOW moves the clock for tests. Nothing here throws.
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync, renameSync, mkdirSync, openSync, fstatSync, readSync, closeSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync, renameSync, mkdirSync, openSync, fstatSync, readSync, closeSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { stateDir, opt } from './context.mjs';
@@ -169,6 +169,35 @@ export function matchHumanPrompt(path, sha, from, to, readTail = defaultTail) {
     }
   } catch { /* fail closed: no match */ }
   return false;
+}
+
+// Scans lead transcripts (<projectsDir>/*/*.jsonl, modified since `since`, newest first, at most maxFiles) for a typed (isHumanRecord)
+// record written within withinMs of `near`. Used once, by the v2 flag migration, to tell a legacy ack (a bare reply) from a human one.
+// Returns { session, promptAt } or null. Tail reads only; fails closed.
+export function findHumanRecordNear({ projectsDir, since = 0, near, withinMs = 2000, maxFiles = 200, readTail = defaultTail } = {}) {
+  try {
+    if (!projectsDir || !(near > 0)) return null;
+    const files = [];
+    for (const p of readdirSync(projectsDir)) {
+      let ents; try { ents = readdirSync(join(projectsDir, p), { withFileTypes: true }); } catch { continue; }
+      for (const e of ents) {
+        if (!e.isFile() || !e.name.endsWith('.jsonl')) continue;
+        const fp = join(projectsDir, p, e.name);
+        try { const m = statSync(fp).mtimeMs; if (m >= since) files.push({ fp, m, id: e.name.slice(0, -6) }); } catch { /* gone */ }
+      }
+    }
+    files.sort((a, b) => b.m - a.m);
+    for (const { fp, id } of files.slice(0, maxFiles)) {
+      for (const l of readTail(fp) || []) {
+        if (!l || !l.includes('"human"')) continue;
+        let r; try { r = JSON.parse(l); } catch { continue; }
+        if (!isHumanRecord(r)) continue;
+        const t = Date.parse(r.timestamp);
+        if (t > 0 && Math.abs(t - near) <= withinMs) return { session: r.sessionId || id, promptAt: t };
+      }
+    }
+  } catch { /* fail closed */ }
+  return null;
 }
 
 // The flag was shown to this session on this turn. Only an open, unanswered flag; the first time wins.

@@ -511,10 +511,57 @@ function chainChecks({ rs, P, at, analyzeFn, res }) {
   }
 }
 
+// ---------- legacy flag migration (once, at tick start) ----------
+// A flag opened before v2 has no `v`. Each item is re-judged from its stored sample under the v2 floors (by name class): below the floor it would not
+// flag now. All items below -> the flag is closed as "superseded by v2 evidence rules" (the ack stays, no countdown). Some still flag -> those
+// stay; a non-human ack on them is revoked and the countdown restarts, unless a typed record in the lead transcripts sits at the ack time.
+// An item whose sample size is unknown, or whose name is in no class, is kept. A hold is never touched.
+const SPAWN_CLASS = /^(guard:|spawn-rewrites$|queue-denied$|handoff-|struggle$|polling-waste$|runaway$)/;
+const WORKER_CLASS = /^(hook-error-share$|hook-signature:|context-over-150k$|api-errors$|units-|no-final-status$|partial-share$|blocked-share$)/;
+const BASH_CLASS = /^(worker-bash-fail$|harness-refusals$)/;
+const classOf = (name) => (SPAWN_CLASS.test(name) ? 'spawns' : WORKER_CLASS.test(name) ? 'workers' : BASH_CLASS.test(name) ? 'bash' : null);
+export function legacyStillFlags(item, row, FL = floors()) {
+  const cls = classOf(String(item && item.name || ''));
+  if (!cls) return true;
+  const n = typeof item.n === 'number' ? item.n : (row && row.sample && typeof row.sample[cls] === 'number' ? row.sample[cls] : null);
+  return n == null ? true : n >= FL[cls];
+}
+export function migrateFlag({ at = S.now(), projectsDir } = {}) {
+  try {
+    const f = S.readFlag();
+    if (!S.flagIsOpen(f) || f.v != null) return null;
+    const FL = floors();
+    const fT = Date.parse(f.T);
+    const row = S.readRows().filter((r) => r.event === 'check' && (Date.parse(r.chain) === fT || Date.parse(r.T) === fT) && (f.check == null || r.label === f.check || r.label == null)).pop();
+    const kept = f.flags.filter((x) => legacyStillFlags(x, row, FL));
+    if (!kept.length) {
+      S.writeJson(S.paths().flag, { ...f, v: 2, clearedAt: iso(at), clearedBy: 'v2-migration', supersededReason: 'superseded by v2 evidence rules' });
+      S.appendRow({ at: iso(at), event: 'flag-superseded', version: f.version ?? null, flags: f.flags.map((x) => x.name), reason: 'superseded by v2 evidence rules', ackKept: !!f.ackedAt });
+      return { superseded: true };
+    }
+    const next = { ...f, v: 2, flags: kept };
+    let out = { kept: kept.map((x) => x.name) };
+    if (f.ackedAt && !f.ack) {
+      const ackAt = Date.parse(f.ackedAt);
+      const hit = S.findHumanRecordNear({ projectsDir: projectsDir || join(claudeDir(), 'projects'), since: Date.parse(f.notifiedAt) || 0, near: ackAt });
+      if (hit) next.ack = { session: hit.session, promptAt: f.ackedAt, confirmedAt: iso(at), signal: S.HUMAN_SIGNAL.transcript, shownAt: (f.shownTo || {})[hit.session] ?? null };
+      else {
+        next.ackedAt = null; next.ack = null; next.notifiedAt = iso(at); next.candidates = [];
+        S.appendRow({ at: iso(at), event: 'ack-revoked', version: f.version ?? null, reason: 'legacy ack without human record' });
+        out = { ...out, revoked: true };
+      }
+    }
+    S.writeJson(S.paths().flag, next);
+    return out;
+  } catch { return null; }
+}
+
 export function tick({ at = S.now(), installed, holdMinutes, run: analyzeFn = analyze } = {}) {
   const res = { ran: false, checks: [], flagged: [], held: false, installed: false, verdict: null };
   try {
     const P = S.paths();
+    const mig = migrateFlag({ at });
+    if (mig) res.migrated = mig;
     if (!installed) installed = S.readJson(join(claudeDir(), 'plugins', 'installed_plugins.json'));
     const inst = newestInstall(installed);
     if (!inst) return res;
@@ -581,6 +628,7 @@ export function status(at = S.now(), { all = false, json = false } = {}) {
     lines.push(`flag open since ${flag.openedAt}, notified ${flag.notifiedAt}, ${who}: ${flag.flags.map((x) => `${x.name}=${x.value}${x.detail ? ' (' + x.detail + ')' : ''}`).join('; ')}`);
   } else lines.push('no open flag');
   lines.push(hold && !hold.clearedAt ? `HOLD since ${hold.since}: ${hold.reason}` : 'hold: none');
+  if (hold && !hold.clearedAt && flag && flag.clearedBy === 'v2-migration') lines.push('the hold stays for the operator: its flag was closed as superseded by v2 evidence rules, and a hold is never lifted by the migration (run: release-watch.mjs clear)');
   if (standing && standing.verdict) lines.push(`standing: ${standing.at || ''} ${standing.verdict} ${(standing.findings || []).map((x) => (typeof x === 'string' ? x : x.detail || x.name)).join('; ')}`.trim());
   return lines.join('\n');
 }
