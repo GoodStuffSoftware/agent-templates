@@ -73,9 +73,9 @@ test('wording: one template, xhigh and high variants, no max raise, no lowering'
 test('wording: the high text is exactly the operator-facing wording (pinned)', () => {
   assert.equal(
     LEAD_EFFORT_CHECK_TEXT_HIGH,
-    'Orchestrating (workers, reviewers, several threads, releases)? Before the first spawn and after any resume or compaction, call get_session with session_id "self" and read its effort (it may show the starting effort: if the operator says it was raised, continue). A lead runs at high; at high or above, say nothing about effort. ' +
+    'Orchestrating (workers, reviewers, releases)? Before the first spawn and after any resume or compaction, call get_session with session_id "self" and read its effort (if the operator says it was raised, continue). A lead runs at high; at high or above, say nothing about effort. ' +
     'Unattended (scheduledTaskId in get_session, headless or -p run): state the effort once, only if below high. ' +
-    'Interactive and below high: state once, in your first report, the effort you run at and that orchestration is tuned for high. This is information only: nothing is asked, nothing waits, no spawn or tool call is held. You cannot change your own effort; the operator can with the app\x27s effort control. Then continue normally and say nothing more about effort this session. ' +
+    'Interactive and below high: state once, in your first report, the effort you run at and that orchestration is tuned for high. Information only: nothing is asked or held. You cannot change your own effort; the operator can. Then say nothing more about effort. ' +
     'Never raise to max, never lower, never suggest lowering.',
   );
 });

@@ -48,7 +48,7 @@ test('0.31.54: the resume-doctrine rule carries the handoff clause in the same r
   try {
     const { rules } = readRules();
     const rd = rules.find((r) => r.id === 'resume-doctrine');
-    assert.match(rd.then, /A worker that returns "DONE: partial, handoff at <path>" gets a fresh same-rung continuation from that file, not a resume./);
+    assert.match(rd.then, /A worker returning "DONE: partial, handoff at <path>" gets a fresh same-rung continuation from it./);
     assert.equal(rules.filter((r) => /DONE: partial, handoff at/.test(r.then || '')).length, 1, 'one rule, not a new one');
     // The cap test must be able to fail: render at the shipped default cap (3000) AND at 4200, and require that the
     // handoff clause survived (a rule dropped for length is replaced by a "(N more rules dropped" line, never silently).

@@ -47,8 +47,8 @@ test('the wording informs once, never asks or waits, and keeps the unattended ca
   assert.ok(t.length < 1000, `the rule is paid for at every session start: ${t.length} chars`);
   // interactive: state once in the first report, no ask, no wait
   assert.match(t, /Interactive and below xhigh: state once, in your first report, the effort you run at and that orchestration is tuned for xhigh/);
-  assert.match(t, /no spawn or tool call is held/);
-  assert.match(t, /Then continue normally and say nothing more about effort this session/);
+  assert.match(t, /nothing is asked or held/);
+  assert.match(t, /Then say nothing more about effort/);
   assert.match(t, /You cannot change your own effort/);
   assert.doesNotMatch(t, /set_session_effort/);
   assert.doesNotMatch(t, /ToolSearch/);
