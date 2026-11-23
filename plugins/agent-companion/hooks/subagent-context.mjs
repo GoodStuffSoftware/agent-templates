@@ -45,12 +45,12 @@
 import { readStdin, opt, passthrough, deny, recordDenial, callerIsSubagent, appendLog } from './lib/context.mjs';
 import { resolveAgentTranscript } from './lib/runaway.mjs';
 import {
-  CONTEXT_DEFAULT_TOKENS, readContextSignal, claimSignals, recordEvent, subagentNoticeText, noticeVariant, pruneContextState,
+  readContextSignal, claimSignals, claimOnce, recordEvent, subagentNoticeText, noticeVariant, pruneContextState,
 } from './lib/subagent-context.mjs';
 import {
   CEILING_DEFAULT_TOKENS, CEILING_REPEAT_DEFAULT_TOKENS, CEILING_LOG, ceilingCheck,
 } from './lib/context-ceiling.mjs';
-import { HANDOFF_LOG, handoffConfig, handoffActive, noteFirst, repeatDue, hardCheck, handoffRow, denyText, noteDeny, clearDeny, streakPrefix } from './lib/handoff-limit.mjs';
+import { HANDOFF_LOG, handoffThreshold, warnThreshold, warnText, handoffConfig, handoffActive, noteFirst, repeatDue, hardCheck, handoffRow, denyText, noteDeny, clearDeny, streakPrefix } from './lib/handoff-limit.mjs';
 import { STEP_LOG, stepBudgetCheck, readBrief } from './lib/step-budget.mjs';
 import { longRunCheck, logLongRun } from './lib/long-run.mjs';
 import { allowanceNote, allowanceWatch } from './lib/plan-allowance.mjs';
@@ -58,7 +58,8 @@ import { allowanceNote, allowanceWatch } from './lib/plan-allowance.mjs';
 try {
   const p = readStdin();
   if (!callerIsSubagent(p)) passthrough();
-  const threshold = opt('subagent_context_notice_tokens', CONTEXT_DEFAULT_TOKENS);
+  const threshold = handoffThreshold(p.agent_type); // 110000 for the lower rungs, 130000 for sonnet high/xhigh and the opus rungs (options)
+  const warnAt = warnThreshold(p.agent_type);
   const ceiling = opt('subagent_ceiling_tokens', CEILING_DEFAULT_TOKENS);
   const repeat = opt('subagent_ceiling_repeat_tokens', CEILING_REPEAT_DEFAULT_TOKENS);
   const stepsOn = opt('step_budget', true);
@@ -73,6 +74,8 @@ try {
   const repeatNote = handoffOn && sizeLine > 0 && sig && !kinds.includes('size') && !(sig.boundary && sig.turnsAfterBoundary === 0)
     && repeatDue(p.agent_id, sig.ctx, sizeLine, hcfg.repeat);
   const nudge = ceilingCheck(p, sig, { ceiling, repeat });
+  // The warn line (below the handoff line, once): keep the handoff file current. Advice only.
+  const warn = handoffOn && warnAt > 0 && sig && sig.ctx >= warnAt && sig.ctx < threshold && claimOnce(`warn-${p.agent_id}`);
 
   const at = new Date().toISOString();
   for (const kind of kinds) {
@@ -87,7 +90,8 @@ try {
   if (nudge) appendLog(CEILING_LOG, nudge.row);
   if (kinds.includes('size')) { noteFirst(p.agent_id, sig.ctx); appendLog(HANDOFF_LOG, handoffRow(p, sig, 'soft', 'notice', sizeLine)); }
   if (repeatNote) appendLog(HANDOFF_LOG, handoffRow(p, sig, 'soft', 'repeat', sizeLine));
-  if (kinds.length || nudge || repeatNote) pruneContextState();
+  if (warn) appendLog(HANDOFF_LOG, handoffRow(p, sig, 'warn', 'warn', warnAt));
+  if (kinds.length || nudge || repeatNote || warn) pruneContextState();
 
   // The hard limit: past it, only the handoff itself goes through (lib/handoff-limit.mjs allowedAtHard).
   const hard = hardCheck(p, sig, { ...hcfg, on: handoffOn });
@@ -124,7 +128,8 @@ try {
 
   const variant = (kinds.includes('size') || repeatNote) ? noticeVariant(readBrief(path), p.agent_type) : 'writer';
   const info = { ctx: sig ? sig.ctx : undefined, hard: handoffOn ? hcfg.hard : 0 };
-  const text = [kinds.length ? subagentNoticeText(kinds, threshold, variant, info) : '', repeatNote ? subagentNoticeText(['size'], threshold, variant, info) : '', nudge ? nudge.text : '', step ? step.warn : '', longRun ? longRun.text : '', allowance || '', nearLimit || '']
+  const warnLine = warn ? warnText(sig.ctx, threshold, handoffOn ? hcfg.hard : 0, noticeVariant(readBrief(path), p.agent_type)) : '';
+  const text = [warnLine, kinds.length ? subagentNoticeText(kinds, threshold, variant, info) : '', repeatNote ? subagentNoticeText(['size'], threshold, variant, info) : '', nudge ? nudge.text : '', step ? step.warn : '', longRun ? longRun.text : '', allowance || '', nearLimit || '']
     .filter(Boolean).join('\n');
   if (!text) passthrough();
   process.stdout.write(JSON.stringify({
