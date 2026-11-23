@@ -53,25 +53,30 @@ function fromGradle(dir, out) {
 const DOC_FILES = ['CLAUDE.md', 'README.md', 'CONTRIBUTING.md', 'AGENTS.md'];
 function kindOfDocCommand(c) {
   if (/^(?:npm|pnpm|yarn)\s+(?:ci|install|i)$/.test(c)) return 'install';
-  if (/^(?:npm|pnpm)\s+run\s+(?:lint|typecheck|check)\b[\w:.-]*$/.test(c) || /^(?:npx\s+)?(?:eslint|biome\s+check|tsc\s+--noEmit)\b/.test(c)) return 'lint';
+  if (/^(?:npm|pnpm)\s+run\s+(?:lint|typecheck|type-check|check)(?::[\w:.-]+)?$/.test(c) || /^(?:npx\s+)?(?:eslint|biome\s+check|tsc\s+--noEmit)(?:\s|$)/.test(c)) return 'lint';
   if (/^(?:npm|pnpm)\s+run\s+build\b[\w:.-]*$/.test(c)) return 'build';
   if (/\{file\}$/.test(c) && /(?:vitest|jest|node\s+(?:--[\w-]+\s+)*--test|pytest)/.test(c)) return 'testFile';
   if (/^(?:npm|pnpm|yarn)\s+(?:run\s+)?test(?::unit|:ci)?$/.test(c) || /^npx\s+vitest\s+run$/.test(c)) return 'suite';
   return null;
 }
+// Top-level docs override the files above; docs/*.md only fill a kind nothing else gave.
 function fromDocs(dir, out) {
-  const files = DOC_FILES.map((f) => join(dir, f));
+  scanDocs(dir, DOC_FILES.map((f) => join(dir, f)), out, 'docs');
+  const files = [];
   try {
     const d = join(dir, 'docs');
     if (existsSync(d)) for (const f of readdirSync(d).filter((x) => x.endsWith('.md')).slice(0, 20)) files.push(join(d, f));
   } catch { /* no docs folder */ }
+  scanDocs(dir, files, out, 'docs2');
+}
+function scanDocs(dir, files, out, prefix) {
   for (const f of files) {
     if (!isFile(f)) continue;
     const txt = read(f) ?? '';
     for (const m of txt.matchAll(/`([^`\n]{3,120})`/g)) {
       const c = m[1].trim().replace(/<(?:file|path|spec)>/g, '{file}');
       const kind = kindOfDocCommand(c);
-      if (kind && !out[`docs:${kind}`]) out[`docs:${kind}`] = { command: c, source: f.slice(dir.length + 1).replace(/\\/g, '/') };
+      if (kind && !out[`${prefix}:${kind}`]) out[`${prefix}:${kind}`] = { command: c, source: f.slice(dir.length + 1).replace(/\\/g, '/') };
     }
   }
 }
@@ -86,7 +91,7 @@ export function deriveCommands(dir) {
   const entries = {};
   const dropped = [];
   for (const kind of COMMAND_KINDS) {
-    for (const cand of [out[`docs:${kind}`], out[kind]]) {
+    for (const cand of [out[`docs:${kind}`], out[kind], out[`docs2:${kind}`]]) {
       if (!cand) continue;
       const bad = checkCommand(kind, cand.command);
       if (bad) { dropped.push(`${kind} "${cand.command}" (${cand.source}) ${bad}`); continue; }
