@@ -35,6 +35,8 @@ import { interruptedNotices } from './lib/interrupted-workers.mjs';
 import { checkSessionBudget, SESSION_BUDGET_DEFAULT_UNITS } from './lib/session-budget.mjs';
 
 const EVENTS = new Set(['UserPromptSubmit', 'PostToolUse']);
+// Text the harness injects as a prompt. A reply that merely starts with "[" or "<" is not in this list and still gets checked.
+const AUTOMATED_MARKER_RE = /^\s*<(task-notification|teammate-message|bus-message|system-reminder|scheduled-task|local-command-(stdout|stderr|caveat)|command-(name|message))\b/i;
 
 try {
   const p = readStdin();
@@ -61,7 +63,8 @@ try {
           watch = '[agent-companion] The release hold is lifted on the operator\'s word: new agents, heavy jobs and running workers carry on.';
         } else {
           confirmCandidates({ at });                      // a candidate from an earlier turn of any session
-          if (wantsClear || !/^\s*[<[]/.test(prompt)) {   // cheap pre-filter: skip system-looking text
+          // Skip only exact automated markers with no human origin in the payload; the origin or transcript check is the real gate.
+          if (wantsClear || (p.origin && p.origin.kind === 'human') || !AUTOMATED_MARKER_RE.test(prompt)) {
             noteCandidate({ sessionId: p.session_id, transcriptPath: p.transcript_path, prompt, payloadOrigin: p.origin, at });
           }
           watch = releaseWatchLine();
