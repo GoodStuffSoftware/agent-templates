@@ -133,6 +133,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `classify-by-the-import-graph-and-fail-closed-on-unknown-shapes` — A path-based "ops only, skip the heavy gate" classifier must follow the import graph, diff without rename detection, and fail closed on shapes it cannot read — [universal] — active
 - `clean-clone-cross-os-build-truth` — A repo only ever built in place on its authoring OS hides clean-clone and permission-bit breakage — build it from a fresh clone on the target OS — [universal, stack:git] — active
 - `clean-conflict-map-not-safe-ordering` — A clean conflict map bounds textual risk only — it says nothing about whether landing A before B causes harm — [universal] — active
+- `codes-people-read-avoid-look-alike-characters` — A code a person reads or types must avoid look-alike characters, or be set in a font that tells them apart — [universal] — active
 - `commit-before-you-mutate-to-test` — Commit first, mutate after — never revert a deliberate mutation with a checkout on a file that carries uncommitted work — [universal, stack:git] — active
 - `compare-siblings-outlier-is-the-fault` — Measure identical peers from one vantage in one window — the outlier names the fault — [universal] — active
 - `content-guard-honors-gitignore` — A repo content-guard must scan the committable set, not the raw working tree — [universal, stack:git] — active
@@ -213,9 +214,11 @@ One line per lesson: `id — title — [scope] — status`.
 - `never-aggregate-over-an-unpaginated-fetch` — Never aggregate over an unpaginated fetch — a truncated ordered page looks exactly like a complete small result — [universal] — active
 - `never-kill-processes-by-image-name-on-a-shared-machine` — On a shared machine, kill only the PIDs you spawned — never by image name — [universal] — active
 - `never-put-user-config-under-a-wipeable-dir` — Never put user-authored config under a directory you have told people is safe to delete — [universal] — active
+- `never-search-from-a-filesystem-root` — Refuse recursive searches from a filesystem or drive root - an orphaned one runs for hours and starves the box — [universal] — active
 - `never-test-in-a-live-deployment-tree` — A deployment directory that is also a checkout is production, not a workspace — [universal] — active
 - `no-avoidable-slow-work-on-a-launchs-critical-path` — A pre-launch wrapper must never do avoidable slow work on the critical path of the one action someone is waiting on — [universal] — active
 - `no-field-in-a-last-write-wins-record-is-history` — In a last-write-wins record, no field is evidence about the past except the counter — read the write statement before inferring history — [universal] — active
+- `no-install-through-a-shared-node-modules-link` — Never install into, or remove a worktree holding, a dependency directory that links to another checkout's install — [universal] — active
 - `no-route-response-means-not-delivered-switch-channels` — "Queued durably" is not delivery — treat the first no-route send as a signal to switch channels — [agent-process] — active
 - `no-self-waking-bus-poller` — Never arm a self-waking timer to poll a coordination bus — drain a durable inbox and let a token-free daemon hold the watch — [agent-process] — active
 - `no-stall-decision-protocol` — On an unanswered user-decision point, take the best reversible default, log it durably, and continue — [agent-process] — active
@@ -235,6 +238,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `peer-to-peer-review-routing` — Writers and reviewers communicate directly; the lead receives only a one-line rolled-up verdict — [agent-process] — active
 - `persist-the-secret-before-the-artifact` — Write the secret to the vault and read it back BEFORE creating the artifact it protects — [universal] — active
 - `pin-ipv4-loopback-not-localhost` — Pin local service hosts to the IPv4 loopback literal, not the name `localhost` — [universal] — active
+- `pin-spawned-test-credentials-away` — A unit test that spawns a repo script must hand the child no credentials, no home directory and an empty cwd — [universal] — active
 - `pin-the-deploy-to-a-ref-not-a-working-tree` — A deploy that builds a shared machine's working tree ships whatever is checked out there — [universal, stack:ci] — active
 - `post-deploy-checks-need-their-own-harness` — A post-deploy check needs its own harness — a flag on the local suite verifies localhost and calls the release green — [universal] — active
 - `powershell-pipe-bom-breaks-json` — Windows PowerShell 5.1 puts a BOM on both ends — it breaks JSON.parse on the way in and byte-zero parsers on the way out — [env:windows] — active
@@ -257,6 +261,7 @@ One line per lesson: `id — title — [scope] — status`.
 - `recovery-from-silent-teammates` — Recover from a silent teammate by probing state before respawning — [agent-process] — active
 - `recursive-delete-follows-a-reparse-point` — A recursive delete through a POSIX-emulation shell can descend INTO a Windows junction and empty its target — [env:windows] — active
 - `registry-identity-and-liveness-honesty` — Never advertise an identity or a reachability on a shared registry that you cannot honor — [agent-process] — active
+- `reload-connector-tools-by-toggling` — A running session keeps a connector's old tool list - toggle the connector off and on, do not ask for a refresh — [agent-process, vendor:anthropic] — active
 - `relocate-a-gate-that-cannot-run-here` — A gate that structurally cannot run on this host is not a gate — relocate it and name the enforcing one — [universal] — active
 - `resolve-the-reply-to-address` — Resolve a brief's reply-to address — and for a sub-agent reporting to its spawner, remove it entirely — [agent-process] — active
 - `resume-the-same-worker-across-follow-up-rounds` — Resume the same worker across follow-up rounds — a report is a checkpoint, not task end — and stop it between rounds rather than keeping it idle — [agent-process] — active

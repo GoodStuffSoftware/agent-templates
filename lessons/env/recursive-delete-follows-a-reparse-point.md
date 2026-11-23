@@ -6,7 +6,7 @@ requires: {}
 status: active
 since: 2026-08-31
 provenance: [contrib-2]
-corroborated: 1
+corroborated: 2
 ---
 Windows directory junctions and directory symlinks are reparse points. Native Windows tooling generally treats them as links and removes the link. A POSIX-emulation shell on Windows can treat one as an ordinary directory instead — so a recursive force-delete descends into it and deletes the contents of the TARGET, which usually lives somewhere else entirely and is not the thing you were cleaning.
 
@@ -19,3 +19,4 @@ The common shape: a dependency directory (`{{DEPS_DIR}}`) is a junction pointing
 - Detect them before deleting anything recursive in a workspace you did not create: list the directory with the attribute that reveals reparse points and check for `<JUNCTION>` / `<SYMLINKD>` entries.
 - Prefer the native shell's recursive remove for Windows paths — it removes the link rather than its target — over the emulation shell's, whose semantics depend on how the layer was compiled ([[bash-tool-routes-to-wsl]] is the neighbouring hazard: which shell you actually got is not always the one you asked for).
 - In automation, never recursive-delete a path supplied by configuration without asserting it is a real directory on the expected volume.
+- Corroborated by a second shape: removing a worktree whose dependency directory is a link ([[no-install-through-a-shared-node-modules-link]]).
