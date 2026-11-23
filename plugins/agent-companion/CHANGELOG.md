@@ -2,6 +2,10 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.64 — unreleased
+
+- **The resource gate rewrites `cd <dir>; <heavy>`, `cd <dir>` newline `<heavy>` and `cd -- <dir> && <heavy>` too.** Only `cd <dir> && ...` was hoisted before; the other forms were denied with "changes directory after its first step" and workers re-ran them by hand. The cd stays outside the queue (same directory, same exit code, same output), the rewrite is silent (`updatedInput`) and writes the usual `rewritten` row in `resource-gate.jsonl`. Several cds, `cd -P`, extra words, an expansion in the cd and groups are still denied.
+
 ## 0.31.63 — 2026-11-22
 
 - **The spawn guard routes reviews to the API credits (options `api_review_route` off|writers|all, `api_review_high` plan|api).** A review spawn (a parity TYPE) with a diff range in its brief is decided by the credit governor inside the guard and, on `api`, rewritten into an `ac-haiku` run of `api-review.mjs` (the original brief kept in `state/review-briefs/`); RISK high, an Opus review, `API: no`, no or two competing diff ranges, a brief whose API run failed in the last 30 minutes, a reviewer's own spawn and any error pass through as written. `decide --peek` answers without advancing the alternation counter; review-verdicts rows carry `route` and `route_reason`, `api-review.mjs` writes one `route: api` row per API review, and `api-credits.mjs status` prints the API share of all reviews for today and 7 days. Default off; this environment's values are in `docs/DEFAULTS-ENVIRONMENT.md`.
