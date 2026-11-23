@@ -730,7 +730,8 @@ export function status(at = S.now(), { all = false, json = false } = {}) {
       const s = r.sample || {}; const u = r.usage;
       const us = u ? `  usage ${f1(u.pctPerHour.since)} %/h (base ${f1(u.pctPerHour.base)}), ${(+u.pctWindow).toFixed(2)} % window` : '';
       lines.push(`  ${r.label || `+${CHECK_HOURS[r.check - 1] ?? '?'}h`}  ${hhmm(Date.parse(r.at))}  ${verdictWord(r).padEnd(12)} spawns ${s.spawns ?? '-'}  workers ${s.workers ?? '-'}  bash ${s.bash ?? '-'}${us}${r.late ? '  (late)' : ''}`);
-      for (const x of (r.metrics || []).filter((y) => all || y.status !== 'ok' || y.events > 0)) lines.push(metricLine(x));
+      // A v1 check row carries `metrics` as the old analysis object, not the v2 metric rows: it has no rows to print.
+      for (const x of (Array.isArray(r.metrics) ? r.metrics : []).filter((y) => all || y.status !== 'ok' || y.events > 0)) lines.push(metricLine(x));
       for (const [v, b] of Object.entries(r.byVersion || {})) {
         const sig = (b.metrics || []).filter((y) => y.status === 'flag');
         lines.push(`     ${v}: ${String(b.verdict).toUpperCase()}${sig.length ? ' ' + sig.map((y) => `${y.name}=${f1(y.value)}`).join(', ') : ''}`);

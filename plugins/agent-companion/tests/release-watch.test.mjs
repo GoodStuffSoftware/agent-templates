@@ -677,6 +677,14 @@ test('status-lines', () => {
   assert.match(out, /queue-denied/);
 });
 
+test('status-lines: a v1 check row (metrics is the old analysis object) prints without throwing', () => {
+  const old = { version: '1.2.3', T, due: W.CHECK_HOURS.map((h) => T + h * HOUR), done: [0], lastAt: T + HOUR, lastConclusiveAt: T + HOUR, closed: false };
+  writeFileSync(file('release-watch-run.json'), JSON.stringify(old));
+  S.appendRow({ at: iso(T + HOUR), event: 'check', T: iso(T), version: '1.2.3', check: 1, flags: [], metrics: { spawns: { since: 26, base: 2116 } } });
+  const out = W.status(T + 2 * HOUR);
+  assert.match(out, /release 1\.2\.3/); assert.match(out, /no open flag/);
+});
+
 // ---- stage 2: chain of releases, finish and extension, flag migration, standing health ----
 const none = () => null;
 const instV = (version, at) => ({ plugins: { 'agent-companion@x': [{ version, lastUpdated: iso(at) }] } });
