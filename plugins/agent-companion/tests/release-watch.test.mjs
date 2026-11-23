@@ -1275,3 +1275,41 @@ test('wording: a lead is told to arm one 20-minute cron on status; a subagent on
   assert.match(sub, /Write your handoff and stop/); assert.doesNotMatch(sub, /CronCreate/);
   assert.equal(S.heldSessions().length, 2, 'the denials were recorded too');
 });
+
+// ---- 0.31.66 counting fixes ----
+test('count-once: a tool_result repeated in an api-request-blob record counts once', () => {
+  const sd = join(claude, 'projects', 'C--pdup', 'sess', 'subagents'); mkdirSync(sd, { recursive: true });
+  const ts = new Date(T + HOUR).toISOString();
+  const res = { type: 'tool_result', tool_use_id: 'dup-1', is_error: true, content: 'PreToolUse:Bash hook error: invented boom' };
+  const L = [
+    { type: 'user', timestamp: ts, message: { role: 'user', content: 'Do the invented task.' } },
+    { type: 'user', timestamp: ts, message: { role: 'user', content: [res] } },
+    { type: 'api-request-blob', timestamp: ts, message: { role: 'user', content: [res] } },
+    { type: 'api-request-blob', timestamp: ts, message: { role: 'user', content: [res] } },
+  ];
+  writeFileSync(join(sd, 'agent-dup.jsonl'), L.map((l) => JSON.stringify(l)).join('\n'));
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(m.hookSignatures.since['PreToolUse:Bash invented boom'], 1);
+});
+
+test('count-once: two hard denials from one worker are one worker, and the row count stays in the detail', () => {
+  putRows('handoff-limit.jsonl', [{ at: T + HOUR, limit: 'hard', action: 'deny', agent_id: 'wA', session_id: 's1' }, { at: T + 2 * HOUR, limit: 'hard', action: 'deny', agent_id: 'wA', session_id: 's1' },
+    { at: T + 2 * HOUR, limit: 'hard', action: 'deny', session_id: 's2' }]);
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(m.telemetry['handoff:hard/deny'].since, 3);
+  assert.equal(m.handoffHardWorkers.since, 2);
+  const x = W.evaluate(metrics({ handoffHardWorkers: { since: 1, base: 0 }, telemetry: { 'handoff:hard/deny': t(3, 0, 3, 0) } })).metrics.find((y) => y.name === 'handoff-hard-deny');
+  assert.equal(x.events, 1);
+});
+
+test('status: an install newer than the armed releases is reported as not armed yet, and status writes nothing', () => {
+  W.tick({ at: T + HOUR, installed: installed(), run: () => metrics(), holdMinutes: 30 });
+  const T2 = T + 2 * HOUR + 3 * 60e3;
+  const before = readFileSync(file('release-watch-run.json'), 'utf8');
+  const inst2 = { plugins: { 'agent-companion@x': [{ version: '9.9.9', lastUpdated: iso(T2) }] } };
+  const out = W.status(T2 + 60e3, { installed: inst2 });
+  assert.match(out, /release 9\.9\.9 installed .*: not armed yet; the 10-minute job arms it by \d\d:\d0Z/);
+  assert.equal(JSON.parse(W.status(T2 + 60e3, { json: true, installed: inst2 })).pending.version, '9.9.9');
+  assert.doesNotMatch(W.status(T2, { installed: installed() }), /not armed yet/);
+  assert.equal(readFileSync(file('release-watch-run.json'), 'utf8'), before);
+});
