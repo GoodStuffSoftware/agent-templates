@@ -342,6 +342,11 @@ function putWorkers(from, to, everyMs, units = { input_tokens: 40000, output_tok
     writeFileSync(join(sd, `agent-w${n}.jsonl`), JSON.stringify({ type: 'assistant', timestamp: new Date(at).toISOString(), requestId: `rq${n}`, message: { model: 'claude-sonnet', usage: units, content: [{ type: 'text', text: 'STATUS: done' }] } }) + '\n');
   }
 }
+// Routine data for the inconclusive-heavy replay (5 spawns/h, small workers: most windows stay under the evidence floors).
+// The demo-guard denial rate is 1 per 12 h, the same as its baseline (20 in 7 days over 1176 spawns = 1.7 per 100 spawns). It was first 1 per 2 h
+// (`upTo / HOUR / 2`): 10 per 100 spawns at 5 spawns/h, about 5.9x the 1.70 per 100 baseline. v1 passed that only because its windows were per check
+// and never reached 10 events; v2 rolls the window until a check is conclusive, so it legitimately flags a 6x rate. The rate was lowered to
+// the baseline rate on purpose, not to hide a v2 flag. A rate at the baseline is replayed conclusively in the 12-spawns-per-hour test below.
 function seedRoutine(upTo, extraDenials = []) {
   putWorkers(T - 7 * DAY, T, 6 * HOUR); putWorkers(T, T + upTo, HOUR / 2);
   putRows('spawns.jsonl', [...spread(1176, T - 7 * DAY, T, (at) => ({ at })), ...spread(Math.round(5 * upTo / HOUR), T, T + upTo, (at) => ({ at }))]);
@@ -377,6 +382,39 @@ test('replay: a real spike in the same replay still flags and holds', () => {
   assert.equal(r.held, false);
   assert.equal(W.tick({ at: T + 8 * HOUR + 31 * 60e3, installed: installed(), holdMinutes: 30 }).held, true);
   assert.equal(S.isHoldActive(), true);
+});
+
+// A routine week with enough activity to be conclusive: 12 spawns/h, 6 workers/h each running 15 Bash calls (none fail), denials at the baseline rate (1 per 5 h).
+let bseq = 0;
+function putBashWorkers(from, to, everyMs, bashPer = 15) {
+  const sd = join(claude, 'projects', 'C--proj', 'sess', 'subagents'); mkdirSync(sd, { recursive: true });
+  for (let at = from; at < to; at += everyMs) {
+    const n = bseq++;
+    const calls = Array.from({ length: bashPer }, (_, i) => ({ type: 'tool_use', id: `tu${n}-${i}`, name: 'Bash', input: { command: 'true' } }));
+    writeFileSync(join(sd, `agent-b${n}.jsonl`), JSON.stringify({ type: 'assistant', timestamp: iso(at), requestId: `rb${n}`, message: { model: 'claude-sonnet', usage: { input_tokens: 40000, output_tokens: 2000 }, content: [...calls, { type: 'text', text: 'STATUS: done' }] } }) + '\n');
+  }
+}
+function seedConclusive(upTo) {
+  putBashWorkers(T - 7 * DAY, T, HOUR / 6); putBashWorkers(T, T + upTo, HOUR / 6);
+  putRows('spawns.jsonl', [...spread(12 * 168, T - 7 * DAY, T, (at) => ({ at })), ...spread(12 * upTo / HOUR, T, T + upTo, (at) => ({ at }))]);
+  putRows('denials.jsonl', [...spread(Math.round(168 / 5), T - 7 * DAY, T, (at) => ({ at, guard: 'demo-guard', outcome: 'deny' })), ...spread(Math.round(upTo / HOUR / 5), T, T + upTo, (at) => ({ at, guard: 'demo-guard', outcome: 'deny' }))]);
+}
+
+test('replay: a routine week at 12 spawns per hour is conclusive from +4h, flags nothing, never holds and finishes by +24h', () => {
+  seedConclusive(24 * HOUR);
+  const verdicts = {};
+  for (const h of CHECKS) {
+    const r = W.tick({ at: T + h * HOUR, installed: installed(), holdMinutes: 30, standingRun: none });
+    verdicts[h] = r.verdict;
+    assert.deepEqual(r.flagged, [], `+${h}h flags: ${r.flagged}`);
+    assert.equal(r.held, false);
+    assert.equal(W.tick({ at: T + h * HOUR + 31 * 60e3, installed: installed(), holdMinutes: 30, standingRun: none }).held, false);
+  }
+  assert.equal(verdicts[1], 'inconclusive'); assert.equal(verdicts[2], 'inconclusive');
+  for (const h of [4, 8, 12, 16, 20, 24]) assert.equal(verdicts[h], 'clean', `+${h}h: ${verdicts[h]}`);
+  assert.equal(S.isHoldActive(), false); assert.equal(S.flagIsOpen(), false);
+  assert.equal(runFile().status, 'finished'); assert.equal(runFile().everFlagged, false);
+  assert.equal(allRows().filter((x) => x.event === 'finished').length, 1);
 });
 
 // ---- 0.31.63 usage metric: a scratch state dir must not hide the telemetry ----
