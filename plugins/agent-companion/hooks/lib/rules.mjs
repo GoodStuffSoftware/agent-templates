@@ -246,7 +246,7 @@ function builtinRules() {
       builtin: true,
       scope: 'session-start',
       when: null,
-      then: 'You are an orchestrator: reads, searches, shell, tests and self-contained edits go to subagents; you plan and decide. Max three execution calls in a row. Set each spawn\'s model.',
+      then: 'You are an orchestrator: reads, searches, shell, tests and self-contained edits go to subagents; you plan and decide. Max three execution calls in a row. Set each spawn\'s model. A writer brief names the files and the functions or line ranges to change when you know them.',
       gate: null,
       note: "Origin: one operator's experience that a lead doing its own reads and edits is the costly path; date not recorded.",
     },
