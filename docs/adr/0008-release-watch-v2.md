@@ -60,6 +60,8 @@ Every metric has a minimum event count (numerator) and a minimum denominator. Be
 **inconclusive**; above it but below the event floor it is **ok**. Release-window floors: 30 spawns for spawn-rate
 metrics, 20 worker transcripts for worker-share metrics, 200 worker Bash calls for Bash metrics; event floors 3 to 10
 by metric (spec table). Queue denials are judged against max(20, 2x the 7-day rate) per 100 spawns, not a fixed 20.
+`runaway` is the one metric with no floor, on purpose: a runaway session is a real fault even once, so a single
+`runaway:fired` event in the window flags it.
 
 ### 3. Harness refusals are their own metric
 
@@ -87,8 +89,15 @@ the harness, not the release.
   `inconclusive`. An inconclusive window rolls into the next check's window.
 - A chain finishes only when, at or after its newest release's +24h, the activity since that release meets the finish
   floors (100 spawns, 60 worker transcripts, 600 worker Bash calls, 6 active hours) and the latest check is clean with
-  no open flag. Otherwise the watch extends in 4h steps up to +72h after the newest release, then ends as
-  `insufficient-data` and tells the operator once that it could not get enough data. That notice never holds.
+  no unanswered open flag. Otherwise the watch extends in 4h steps up to +72h after the newest release, then ends as
+  `insufficient-data` and tells the operator once that it could not get enough data. That notice never holds. The notice
+  names the real reason (floors not reached, an unanswered flag still open, or the last check not clean); it never blames the
+  floors when they were reached.
+- An answered flag does not block a finish. A flag the operator answered (a typed reply, section 1) is cleared by the next
+  conclusive clean check ("clean after ack"): the release has measured clean since the answer, so the flag closes with
+  `clearedReason: clean after ack` and a `flag-cleared` row. An unanswered open flag is never cleared by a clean check; it
+  blocks the finish, and a chain that runs to the cap with it still open ends as `insufficient-data` for that reason. A hold,
+  if one is on, is lifted only by the operator's clear, never by a clean check.
 
 ### 6. Standing health
 
