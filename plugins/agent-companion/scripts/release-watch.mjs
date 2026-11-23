@@ -142,7 +142,7 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
   for (const fp of pick) {
     let L; try { L = readFileSync(fp, 'utf8').split('\n'); } catch { continue; }
     let first = null; let u = 0; let peak = 0; let hook = 0; let terr = 0; let api = null; let txt = ''; let stLine = null; let probe = false; let seenUser = false;
-    const bashIds = new Set(); let bash = 0; let refusal = 0; let bashFail = 0; const sigs = [];
+    const bashIds = new Set(); const resIds = new Set(); let bash = 0; let refusal = 0; let bashFail = 0; const sigs = [];
     for (const l of L) {
       if (!l) continue; let o; try { o = JSON.parse(l); } catch { continue; }
       if (o.timestamp && !first) first = Date.parse(o.timestamp);
@@ -157,6 +157,8 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
       }
       if (o.isApiErrorMessage) api = o.apiError || 'api';
       if (Array.isArray(c)) for (const b of c) {
+        // Transcripts repeat a tool_result inside api-request-blob records: one tool_use_id counts once, for every signature below.
+        if (b && b.type === 'tool_result' && b.tool_use_id) { if (resIds.has(b.tool_use_id)) continue; resIds.add(b.tool_use_id); }
         if (b.type === 'tool_use' && b.name === 'Bash' && o.type === 'assistant' && b.id && !bashIds.has(b.id)) { bashIds.add(b.id); if (!inHold(Date.parse(o.timestamp))) bash++; }
         if (b.type === 'tool_result' && b.is_error && bashIds.has(b.tool_use_id) && !inHold(Date.parse(o.timestamp))) {
           const t = typeof b.content === 'string' ? b.content : JSON.stringify(b.content);
@@ -199,6 +201,12 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
     };
     add('denial', count('denials', (r) => `${r.guard}/${r.outcome}`));
     add('handoff', count('handoff-limit', (r) => `${r.limit}/${r.action}`));
+    {
+      // Hard denials as distinct workers (agent id, else session id): one worker refused 8 times is one worker.
+      const hw = { since: new Set(), base: new Set() };
+      for (const r of rd('handoff-limit')) { const w = win(r, vf); if (!w || r.limit !== 'hard' || r.action !== 'deny') continue; hw[w].add(String(r.agent_id || r.session_id || 'row')); }
+      out.handoffHardWorkers = { since: hw.since.size, base: hw.base.size };
+    }
     add('ctx', count('subagent-context', (r) => `${r.kind}/${r.phase}`));
     add('gate', count('resource-gate', (r) => r.event));
     add('wait', count('worker-wait', (r) => `${r.kind}/${r.action}`, (r) => r.action === 'deny'));
@@ -362,7 +370,11 @@ export function evaluate(m, opts = {}) {
     const cd = m.queueDenied ? m.queueDenied.since.cdPrefix : 0;
     add('queue-denied', { value: per(gd, sp.since), limit: +lim.toFixed(1), base: per(gb, sp.base), n: n30, minN: FL.spawns, events: gd, minEv: TH.gateDeniedMinEv, over: per(gd, sp.since) > lim, unit: '/100', detail: `${gd} denied${cd ? `, ${cd} cd-prefix` : ''}` });
   }
-  per100(sumTel(/^handoff:hard\/deny$/), TH.handoffHardMinEv, 'handoff-hard-deny', TH.handoffHardPer100, `${sumTel(/^handoff:hard\/deny$/)} hard denials`, sumTelBase(/^handoff:hard\/deny$/));
+  {
+    // Distinct workers when the analysis carries them (older stored analyses only have rows); the row count stays in the detail.
+    const hr = sumTel(/^handoff:hard\/deny$/); const hrb = sumTelBase(/^handoff:hard\/deny$/); const hw = m.handoffHardWorkers;
+    per100(hw ? hw.since : hr, TH.handoffHardMinEv, 'handoff-hard-deny', TH.handoffHardPer100, hw ? `${hw.since} workers hit a hard denial (${hr} denials)` : `${hr} hard denials`, hw ? hw.base : hrb);
+  }
   per100(sumTel(/^handoff:.*\/end-block$/), TH.handoffEndBlockMinEv, 'handoff-end-block', TH.handoffEndBlockPer100, `${sumTel(/^handoff:.*\/end-block$/)} end-blocks`, sumTelBase(/^handoff:.*\/end-block$/));
   per100(sumTel(/^struggle:/), TH.struggleMinEv, 'struggle', TH.struggle100, `${sumTel(/^struggle:/)} fired`, sumTelBase(/^struggle:/));
   per100(sumTel(/^wait:/), TH.pollMinEv, 'polling-waste', TH.pollDeny100, `${sumTel(/^wait:/)} worker-wait denials`, sumTelBase(/^wait:/));
@@ -728,12 +740,17 @@ const metricLine = (x) => {
 const checkRows = (anchor) => S.readRows().filter((r) => r.event === 'check' && (anchor == null || Date.parse(r.chain || r.T) === anchor));
 const verdictWord = (r) => String(r.verdict || (r.flags && r.flags.length ? 'flag' : 'clean')).toUpperCase();
 
-export function status(at = S.now(), { all = false, json = false } = {}) {
-  const rs = migrateRun(S.readJson(S.paths().run)); const flag = S.readFlag(); const hold = S.readHold();
+export function status(at = S.now(), { all = false, json = false, installed = null } = {}) {
+  const rs = migrateRun(S.readJson(S.paths().run));
+  // Read-only: an install the 10-minute job has not armed yet (tick is the only thing that arms).
+  const inst = newestInstall(installed || S.readJson(join(claudeDir(), 'plugins', 'installed_plugins.json')));
+  let pending = null;
+  if (inst && !(rs && rs.releases.some((r) => r.T === inst.T))) pending = { version: inst.version, T: iso(inst.T), armBy: iso(Math.floor(Math.max(at, inst.T) / 600e3) * 600e3 + 600e3) }; const flag = S.readFlag(); const hold = S.readHold();
   const rows = rs ? checkRows(rs.baseAnchor) : [];
   const standing = S.readJson(S.paths().standing);
-  if (json) return JSON.stringify({ run: rs, checks: rows.slice(-20), flag: S.flagIsOpen(flag) ? flag : null, hold: hold && !hold.clearedAt ? hold : null, standing: standing || null }, null, 1);
+  if (json) return JSON.stringify({ run: rs, checks: rows.slice(-20), flag: S.flagIsOpen(flag) ? flag : null, hold: hold && !hold.clearedAt ? hold : null, standing: standing || null, pending }, null, 1);
   const lines = [];
+  if (pending) lines.push(`release ${pending.version || '?'} installed ${pending.T}: not armed yet; the 10-minute job arms it by ${hhmm(Date.parse(pending.armBy))}`);
   if (!rs) lines.push('no watch armed (no tick has seen an install yet)');
   else {
     const lastRow = rows[rows.length - 1];
