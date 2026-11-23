@@ -477,5 +477,163 @@ test('usage-source-empty is reported but never starts a hold', () => {
   assert.equal(S.isHoldActive(), false);
 });
 
+// ---- 0.31.64 watch v2 stage 1: the 16 spec tests (docs/adr/0008-release-watch-v2.md; spec section 1.8) ----
+const MIN = 60e3;
+// A transcript user record. `over` sets origin and the system-turn markers; the text is what the candidate's sha is matched against.
+const urec = (at, text, over = {}) => JSON.stringify({ type: 'user', timestamp: iso(at), message: { content: text }, ...over });
+const HUMAN = { origin: { kind: 'human' } };
+// An open flag at T, shown to s1 at T, and a candidate typed at T+5m in s1.
+function armCandidate(text = 'looks fine') {
+  S.openFlag({ version: '1', flags: flag, at: T });
+  assert.ok(S.noteShown('s1', T));
+  assert.ok(S.noteCandidate({ sessionId: 's1', transcriptPath: 'fake', prompt: text, at: T + 5 * MIN }));
+  return text;
+}
+const tailOf = (...recs) => () => recs;
+
+test('human-record-acks', () => {
+  const text = armCandidate();
+  const ack = S.confirmCandidates({ at: T + 6 * MIN, readTail: tailOf(urec(T + 5 * MIN, text, HUMAN)) });
+  assert.ok(ack);
+  const f = S.readFlag();
+  assert.equal(f.ackedAt, iso(T + 5 * MIN)); assert.equal(f.ack.signal, 'transcript-origin-human'); assert.equal(f.ack.session, 's1');
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 31 * MIN }), null);
+  assert.equal(S.isHoldActive(), false);
+});
+
+test('scheduled-wakeup-no-ack', () => {
+  const text = armCandidate();
+  const rec = urec(T + 5 * MIN, text, { isMeta: true, promptSource: 'system', turnOrigin: 'scheduled', wakeupSource: 'schedule_wakeup' });
+  assert.equal(S.confirmCandidates({ at: T + 6 * MIN, readTail: tailOf(rec) }), null);
+  assert.equal(S.readFlag().ackedAt, null);
+  assert.ok(S.maybeHold({ holdMinutes: 30, at: T + 31 * MIN }), 'hold written at notifiedAt + 30 min');
+});
+
+for (const [name, over] of [['task-notification-no-ack', { origin: { kind: 'task-notification' } }], ['peer-message-no-ack', { origin: { kind: 'peer' }, isMeta: true }],
+  ['no-origin-no-ack', { promptSource: 'sdk' }]]) {
+  test(name, () => {
+    const text = armCandidate();
+    assert.equal(S.confirmCandidates({ at: T + 6 * MIN, readTail: tailOf(urec(T + 5 * MIN, text, over)) }), null);
+    assert.equal(S.readFlag().ackedAt, null, 'no ack from a record that is not a typed prompt');
+    assert.ok(S.maybeHold({ holdMinutes: 30, at: T + 31 * MIN }));
+  });
+}
+
+test('not-shown-no-ack', () => {
+  S.openFlag({ version: '1', flags: flag, at: T });
+  assert.ok(S.noteShown('s1', T));
+  assert.equal(S.noteCandidate({ sessionId: 's2', transcriptPath: 'fake', prompt: 'hello', at: T + 5 * MIN }), false, 's2 never saw the flag');
+  assert.deepEqual(S.readFlag().candidates || [], []);
+  assert.equal(S.confirmCandidates({ at: T + 6 * MIN, readTail: tailOf(urec(T + 5 * MIN, 'hello', HUMAN)) }), null);
+  assert.equal(S.readFlag().ackedAt, null);
+});
+
+test('same-turn-not-ack', () => {
+  S.openFlag({ version: '1', flags: flag, at: Date.now() });
+  const first = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'first', origin: { kind: 'human' }, cwd: tmp });
+  assert.match(first.stdout, /RELEASE WATCH/, 'the first typed prompt is the turn that shows the flag');
+  assert.equal(S.readFlag().ackedAt, null, 'the prompt typed before the flag was shown does not answer it');
+  assert.ok(S.readFlag().shownTo.s);
+  const next = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'second', origin: { kind: 'human' }, cwd: tmp });
+  assert.doesNotMatch(next.stdout, /RELEASE WATCH/);
+  assert.ok(S.readFlag().ackedAt, 'the next typed prompt in that session answers it');
+});
+
+test('candidate-expires', () => {
+  const text = armCandidate();
+  assert.equal(S.confirmCandidates({ at: T + 16 * MIN, readTail: tailOf(urec(T + 5 * MIN, text, { isMeta: true })) }), null, 'past the 10 min TTL with no matching human record');
+  assert.deepEqual(S.readFlag().candidates, []);
+  const rej = S.readRows().filter((r) => r.event === 'ack-rejected');
+  assert.equal(rej.length, 1); assert.equal(rej[0].session, 's1');
+  assert.ok(S.maybeHold({ holdMinutes: 30, at: T + 31 * MIN }), 'the hold follows');
+});
+
+test('payload-origin', () => {
+  S.openFlag({ version: '1', flags: flag, at: Date.now() });
+  hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'one', cwd: tmp });
+  assert.equal(S.readFlag().ackedAt, null);
+  hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'two', origin: { kind: 'human' }, cwd: tmp });
+  const f = S.readFlag();
+  assert.ok(f.ackedAt, 'acked at once, no transcript read'); assert.equal(f.ack.signal, 'payload-origin-human');
+});
+
+test('clear-words-need-typed', () => {
+  S.openFlag({ version: '1', flags: [{ name: 'z', value: 1 }], at: T });
+  assert.ok(S.maybeHold({ holdMinutes: 1, at: T + HOUR }));
+  assert.ok(S.noteShown('s1', T + HOUR)); // a session sees the hold line
+  assert.equal(S.noteCandidate({ sessionId: 's1', transcriptPath: 'fake', prompt: 'build is green', at: T + HOUR + MIN }), false, 'during a hold only the clear words are recorded');
+  assert.ok(S.noteCandidate({ sessionId: 's1', transcriptPath: 'fake', prompt: 'clear hold', at: T + HOUR + 2 * MIN }));
+  const sched = urec(T + HOUR + 2 * MIN, 'clear hold', { isMeta: true, promptSource: 'system', turnOrigin: 'scheduled' });
+  assert.equal(S.confirmCandidates({ at: T + HOUR + 3 * MIN, readTail: tailOf(sched) }), null);
+  assert.equal(S.isHoldActive(), true, 'the words in a scheduled record leave the hold on');
+  const r = S.confirmCandidates({ at: T + HOUR + 4 * MIN, readTail: tailOf(urec(T + HOUR + 2 * MIN, 'clear hold', HUMAN)) });
+  assert.ok(r && r.cleared);
+  assert.equal(S.isHoldActive(), false, 'typed, the words lift it');
+});
+
+test('low-sample-inconclusive', () => {
+  const m = metrics({ spawns: { since: 26, base: 700, perHour: { since: 2.6, base: 10 } }, telemetry: { 'denial:type-required/deny': t(1, 0, 3.8, 0) } });
+  const e = W.evaluate(m);
+  assert.equal(e.metrics.find((x) => x.name === 'spawn-rewrites').status, 'inconclusive');
+  assert.notEqual(e.verdict, 'flag'); assert.equal(e.verdict, 'inconclusive'); assert.deepEqual(e.flags, []);
+});
+
+test('queue-denied-relative', () => {
+  const q = (denied) => W.evaluate(metrics({ spawns: { since: 40, base: 700, perHour: { since: 4, base: 10 } }, telemetry: { 'gate:denied': t(denied, 42, denied * 2.5, 6) } })).metrics.find((x) => x.name === 'queue-denied');
+  const ok = q(8);
+  assert.equal(ok.value, 20); assert.equal(ok.limit, 20); assert.equal(ok.status, 'ok');
+  assert.equal(q(9).status, 'flag');
+});
+
+test('refusals-split', () => {
+  const b = (n, realFails, refusals) => ({ since: { n, realFails, realFailPct: +(100 * realFails / n).toFixed(1), refusals, refusalPer100: +(100 * refusals / n).toFixed(1) }, base: { n: 500, realFails: 20, realFailPct: 4, refusals: 0, refusalPer100: 0 } });
+  const e = W.evaluate(metrics({ bash: b(355, 9, 20) }));
+  const get = (x, name) => x.metrics.find((y) => y.name === name);
+  assert.equal(get(e, 'worker-bash-fail').value, 2.5); assert.equal(get(e, 'worker-bash-fail').status, 'ok');
+  assert.equal(get(e, 'harness-refusals').value, 5.6); assert.equal(get(e, 'harness-refusals').status, 'ok');
+  const f = W.evaluate(metrics({ bash: b(200, 4, 25) }));
+  assert.equal(get(f, 'harness-refusals').status, 'flag'); assert.equal(get(f, 'worker-bash-fail').status, 'ok');
+  // a refusal-only flag never starts a hold
+  const r = W.tick({ at: T + HOUR, installed: installed(), run: () => metrics({ bash: b(200, 4, 25) }), holdMinutes: 30 });
+  assert.deepEqual(r.flagged, ['harness-refusals']); assert.equal(S.flagIsOpen(), true);
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: T + HOUR + 31 * MIN }), null); assert.equal(S.isHoldActive(), false);
+});
+
+test('few-events-ok', () => {
+  const sg = (n) => W.evaluate(metrics({ spawns: { since: 40, base: 700, perHour: { since: 4, base: 10 } }, telemetry: { 'struggle:x': t(n, 0, n * 2.5, 0) } })).metrics.find((x) => x.name === 'struggle');
+  assert.equal(sg(2).status, 'ok', '5 per 100 is over the limit of 2, but 2 events are under the event floor of 3');
+  assert.equal(sg(3).status, 'flag');
+  const big = W.evaluate(metrics({ spawns: { since: 300, base: 700, perHour: { since: 30, base: 10 } }, telemetry: { 'struggle:x': t(2, 0, 0.7, 0) } }));
+  assert.equal(big.metrics.find((x) => x.name === 'struggle').status, 'ok');
+});
+
+test('inconclusive-rolls', () => {
+  const seen = []; let next = metrics();
+  const run = (o) => { seen.push(o); return next; };
+  const run1 = () => JSON.parse(readFileSync(file('release-watch-run.json'), 'utf8'));
+  W.tick({ at: T + HOUR, installed: installed(), run, holdMinutes: 30 });
+  W.tick({ at: T + 2 * HOUR, installed: installed(), run, holdMinutes: 30 });
+  assert.equal(run1().lastConclusiveAt, T + 2 * HOUR);
+  next = metrics({ spawns: { since: 2, base: 700, perHour: { since: 0.5, base: 10 } } });
+  const r3 = W.tick({ at: T + 4 * HOUR, installed: installed(), run, holdMinutes: 30 });
+  assert.equal(r3.verdict, 'inconclusive');
+  assert.equal(run1().lastConclusiveAt, T + 2 * HOUR, 'an inconclusive check leaves it unchanged');
+  next = metrics();
+  W.tick({ at: T + 8 * HOUR, installed: installed(), run, holdMinutes: 30 });
+  assert.equal(seen[3].winFrom, T + 2 * HOUR, 'check 4 measures from the last conclusive check');
+  assert.equal(run1().lastConclusiveAt, T + 8 * HOUR);
+  const rows = S.readRows().filter((r) => r.event === 'check');
+  assert.deepEqual(rows.map((r) => r.verdict), ['clean', 'clean', 'inconclusive', 'clean']);
+});
+
+test('status-lines', () => {
+  W.tick({ at: T + HOUR, installed: installed(), run: () => metrics({ telemetry: { 'gate:denied': t(25, 40, 25, 6) } }), holdMinutes: 30 });
+  W.tick({ at: T + 2 * HOUR, installed: installed(), run: () => metrics({ spawns: { since: 2, base: 700, perHour: { since: 0.5, base: 10 } } }), holdMinutes: 30 });
+  const out = W.status(T + 2 * HOUR + 1000);
+  assert.match(out, /FLAG/); assert.match(out, /INCONCLUSIVE/);
+  assert.match(out, /limit /); assert.match(out, /base /); assert.match(out, /n=\d+/); assert.match(out, /%\/h/);
+  assert.match(out, /queue-denied/);
+});
+
 test('cleanup', () => { rmSync(tmp, { recursive: true, force: true }); });
 void tel;
