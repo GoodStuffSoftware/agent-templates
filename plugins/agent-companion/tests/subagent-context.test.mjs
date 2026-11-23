@@ -20,8 +20,8 @@ import { readContextSignal, subagentNoticeText, noticeVariant, BOUNDARY_FRESH_TU
 
 const SID = 'sess-ctx';
 const AGENT = 'worker-ctx-test-1';
-const TH = { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' }; // an operator who raised the option back to the pre-0.31.54 value
-const HAND = 'commit and push any work in progress to your branch, write a handoff file <task>-handoff.md next to your detail file (done, remaining, files touched, branch and sha, the exact next step), then end with "DONE: partial, handoff at <path>".';
+const TH = { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_HIGH_TOKENS: '300000', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_WARN_TOKENS: '0' }; // an operator who raised the option back to the pre-0.31.54 value
+const HAND = 'commit and push any work in progress to your branch, write a handoff file <task>-handoff.md next to your detail file (done, remaining, files touched, branch and sha, the exact next step; keep the file under about 4,000 chars, name files and line ranges instead of pasting code, and give the exact next step), then end with "DONE: partial, handoff at <path>".';
 const NOTE = (k) => `[agent-companion] Context at ${k}K: finish the current step, ${HAND}`; // the hard limit is off in tests (helpers.mjs), so no "limit" is named
 
 // An assistant request whose context (input + cache_read + cache_write) is `ctx`.
@@ -87,7 +87,7 @@ test('0.31.54: with no option set the default 110,000 fires the hand-off notice 
     const r = runHook('hooks/subagent-context.mjs', pre(lead));
     assert.equal(ctxText(r), NOTE(118));
     assert.match(ctxText(r), /commit and push any work in progress to your branch/);
-    assert.match(ctxText(r), /<task>-handoff\.md next to your detail file \(done, remaining, files touched, branch and sha, the exact next step\)/);
+    assert.match(ctxText(r), /<task>-handoff\.md next to your detail file \(done, remaining, files touched, branch and sha, the exact next step; keep the file under about 4,000 chars[^)]*\)/);
     appendFileSync(agentFile, turn('r3', 160000));
     assert.equal(runHook('hooks/subagent-context.mjs', pre(lead)).stdout.trim(), '', 'once per worker');
     assert.equal(rows().length, 1, 'exactly one telemetry line');

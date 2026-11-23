@@ -14,7 +14,9 @@ import { gitOnly, gitCheck, isHandoffPath, handoffReturnPath, finalIsComplete, h
 
 const SID = 'sess-handoff';
 const AGENT = 'worker-handoff-test-1';
-const ON = { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_HARD_TOKENS: '150000', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_REPEAT_TOKENS: '15000', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '110000' };
+const ON = { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_HARD_TOKENS: '150000', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_REPEAT_TOKENS: '15000', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '110000', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_HIGH_TOKENS: '110000' }; // the high-rung line pinned to 110K: the older tests use ac-sonnet-high with one line
+// The shipped 0.31.65 defaults (warn 110K; handoff 110K lower rungs, 130K higher rungs; hard 150K): the options unset.
+const DEFAULTS = { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_HARD_TOKENS: '150000' };
 
 const turn = (id, ctx) => `${JSON.stringify({
   type: 'assistant', requestId: id,
@@ -64,7 +66,7 @@ test('crossing the soft limit: one notice naming both limits, then none until +1
     const { lead, agentFile } = layout(fx);
     writeFileSync(agentFile, user('go') + turn('r1', 118000));
     const first = run(lead);
-    assert.equal(text(first), '[agent-companion] Context at 118K, limit 150K: finish the current step, commit and push any work in progress to your branch, write a handoff file <task>-handoff.md next to your detail file (done, remaining, files touched, branch and sha, the exact next step), then end with "DONE: partial, handoff at <path>".');
+    assert.equal(text(first), '[agent-companion] Context at 118K, limit 150K: finish the current step, commit and push any work in progress to your branch, write a handoff file <task>-handoff.md next to your detail file (done, remaining, files touched, branch and sha, the exact next step; keep the file under about 4,000 chars, name files and line ranges instead of pasting code, and give the exact next step), then end with "DONE: partial, handoff at <path>".');
     assert.deepEqual(Object.keys(first.json), ['hookSpecificOutput'], 'advice only below the hard limit');
     writeFileSync(agentFile, user('go') + turn('r1', 118000) + turn('r2', 130000));
     assert.equal(run(lead).stdout.trim(), '', 'under +15K: silent');
@@ -454,4 +456,91 @@ test('finalIsComplete also accepts a reviewer verdict; handoffReturnPath is capp
     assert.equal(handoffReturnPath(`DONE: partial, handoff at ${dirty}`), `${d.replace(/\\/g, '/')}/ab[31m-handoff.md`, 'control characters removed');
   } finally { rmSync(d, { recursive: true, force: true }); }
   assert.equal(handoffReturnPath('DONE: partial, handoff at \u0007\u001b'), null);
+});
+
+// --- 0.31.65 three-level ceiling: warn 110K (once), handoff 110K lower rungs / 130K higher rungs, hard stop 150K ---
+const at = (lead, agentFile, ctx, agentType, env = DEFAULTS) => {
+  writeFileSync(agentFile, user('go') + turn('r1', ctx));
+  return run(lead, 'Bash', { command: 'ls' }, env, { agent_type: agentType });
+};
+
+test('0.31.65 lower rungs: no warn, the handoff notice at 110K', () => {
+  for (const agentType of ['ac-haiku', 'ac-sonnet-low', 'ac-sonnet-medium']) {
+    const fx = makeFixture();
+    try {
+      const { lead, agentFile } = layout(fx);
+      assert.equal(at(lead, agentFile, 109000, agentType).stdout.trim(), '', `${agentType} at 109K`);
+      assert.match(text(at(lead, agentFile, 111000, agentType)), /^\[agent-companion\] Context at 111K, limit 150K: finish the current step/, agentType);
+      assert.deepEqual(rows().map((x) => [x.limit, x.action]), [['soft', 'notice']], `${agentType}: no warn row`);
+    } finally { fx.cleanup(); }
+  }
+});
+
+test('0.31.65 higher rungs: one warn at 110K, silence to 130K, the handoff notice at 130K', () => {
+  for (const agentType of ['ac-sonnet-high', 'ac-sonnet-xhigh', 'ac-opus-medium', 'ac-opus-high', 'agent-companion:ac-opus-max']) {
+    const fx = makeFixture();
+    try {
+      const { lead, agentFile } = layout(fx);
+      assert.equal(at(lead, agentFile, 109000, agentType).stdout.trim(), '', `${agentType} at 109K`);
+      const w = text(at(lead, agentFile, 111000, agentType));
+      assert.match(w, /^\[agent-companion\] Context at 111K \(handoff notice at 130K, hard stop at 150K\): keep your handoff file/, agentType);
+      assert.equal(at(lead, agentFile, 112000, agentType).stdout.trim(), '', `${agentType}: the warn is once`);
+      assert.equal(at(lead, agentFile, 129000, agentType).stdout.trim(), '', `${agentType} between the lines`);
+      assert.match(text(at(lead, agentFile, 131000, agentType)), /^\[agent-companion\] Context at 131K, limit 150K: finish the current step/, agentType);
+      assert.deepEqual(rows().map((x) => [x.limit, x.action, x.tokens]), [['warn', 'warn', 111000], ['soft', 'notice', 131000]], agentType);
+    } finally { fx.cleanup(); }
+  }
+});
+
+test('0.31.65 the hard stop is at 150K for every rung', () => {
+  for (const agentType of ['ac-haiku', 'ac-sonnet-low', 'ac-sonnet-high', 'ac-opus-xhigh']) {
+    const fx = makeFixture();
+    try {
+      const { lead, agentFile } = layout(fx);
+      assert.equal(denied(at(lead, agentFile, 149000, agentType)), false, `${agentType} at 149K`);
+      assert.equal(denied(at(lead, agentFile, 151000, agentType)), true, `${agentType} at 151K`);
+    } finally { fx.cleanup(); }
+  }
+});
+
+test('0.31.65 the options override the defaults', () => {
+  const env = (o) => ({ ...DEFAULTS, ...o });
+  const HI = 'CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_HIGH_TOKENS';
+  const WARN = 'CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_WARN_TOKENS';
+  const LOW = 'CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS';
+  const fx = makeFixture();
+  try {
+    const { lead, agentFile } = layout(fx);
+    // high line moved to 120K: the handoff notice at 121K for a high rung
+    assert.match(text(at(lead, agentFile, 121000, 'ac-sonnet-high', env({ [HI]: '120000' }))), /Context at 121K, limit 150K/);
+  } finally { fx.cleanup(); }
+  const fy = makeFixture();
+  try {
+    const { lead, agentFile } = layout(fy);
+    // high 0 falls back to the lower line (110K): the handoff notice at 111K
+    assert.match(text(at(lead, agentFile, 111000, 'ac-opus-high', env({ [HI]: '0' }))), /Context at 111K, limit 150K/);
+  } finally { fy.cleanup(); }
+  const fz = makeFixture();
+  try {
+    const { lead, agentFile } = layout(fz);
+    // warn 0: no warn at 115K for a high rung
+    assert.equal(at(lead, agentFile, 115000, 'ac-sonnet-xhigh', env({ [WARN]: '0' })).stdout.trim(), '');
+  } finally { fz.cleanup(); }
+  const fw = makeFixture();
+  try {
+    const { lead, agentFile } = layout(fw);
+    // the lower line moved to 90K: a lower rung is told at 91K
+    assert.match(text(at(lead, agentFile, 91000, 'ac-sonnet-low', env({ [LOW]: '90000' }))), /Context at 91K, limit 150K/);
+  } finally { fw.cleanup(); }
+});
+
+test('0.31.65 threshold library: rung classes and lines', async () => {
+  const lib = await import('../hooks/lib/handoff-limit.mjs');
+  for (const t of ['ac-sonnet-high', 'ac-sonnet-xhigh', 'ac-opus-low', 'ac-opus-max', 'agent-companion:ac-opus-high']) assert.equal(lib.isHighRung(t), true, t);
+  for (const t of ['ac-haiku', 'ac-sonnet-low', 'ac-sonnet-medium', 'general-purpose', '', undefined]) assert.equal(lib.isHighRung(t), false, String(t));
+  assert.equal(lib.handoffThreshold('ac-sonnet-low'), 110000);
+  assert.equal(lib.handoffThreshold('ac-opus-high'), 130000);
+  assert.equal(lib.warnThreshold('ac-sonnet-low'), 0, 'warn equals the lower line: none');
+  assert.equal(lib.warnThreshold('ac-sonnet-high'), 110000);
+  assert.match(lib.warnText(111000, 130000, 150000), /Context at 111K \(handoff notice at 130K, hard stop at 150K\)/);
 });
