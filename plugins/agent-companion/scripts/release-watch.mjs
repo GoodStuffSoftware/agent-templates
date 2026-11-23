@@ -511,6 +511,58 @@ function chainChecks({ rs, P, at, analyzeFn, res }) {
   }
 }
 
+// ---------- standing health (design 2.4) ----------
+// A daily look at the last 7 days against fixed ceilings and against the 28 days before them, independent of any release. It REPORTS only:
+// it writes the standing file and a 'standing' row, never the flag, the hold or the chain. Floors are event counts (bash, refusals, denials)
+// or denominators (workers, finished workers), as the spec lists them.
+const STANDING_CEILINGS = { 'queue-denied': 5, 'worker-bash-fail': 5, 'harness-refusals': 3, 'hook-error-share': 50, 'no-final-status': 15, 'partial-share': 30, 'units-per-worker': 1.9, 'worker-usage': 25 };
+const STANDING_TREND = 1.5; const STANDING_MIN_EV = 20; const STANDING_HISTORY_DAYS = 14;
+export function standingDue(rs, at = S.now()) {
+  if (!opt('release_watch_standing', true)) return false;
+  const f = S.readJson(S.paths().standing);
+  const rl = rs && rs.standing && rs.standing.lastAt;
+  const last = Math.max(0, typeof rl === 'number' ? rl : Date.parse(rl) || 0, f && Date.parse(f.at) || 0);
+  return at - last >= nOpt('release_watch_standing_hours', 24) * HOUR;
+}
+export function standing({ at = S.now(), run = analyze } = {}) {
+  try {
+    const m = run({ T: at - D7, winFrom: at - D7, baseFrom: at - 5 * D7, nowMs: at, sample: 300 });
+    if (!m || !m.spawns || !m.workers) return null;
+    const cnt = (p, n) => Math.round((p || 0) * (n || 0) / 100);
+    const ws = m.workers.since; const wb = m.workers.base || {};
+    const bs = (m.bash && m.bash.since) || {}; const bb = (m.bash && m.bash.base) || {};
+    const qd = evaluate(m).metrics.find((x) => x.name === 'queue-denied');
+    let usage = null; try { usage = usageOf(m); } catch { /* no usage block */ }
+    const rows = [
+      { name: 'queue-denied', value: qd && qd.value, ok: qd && qd.events >= STANDING_MIN_EV, events: qd ? qd.events : 0, prior: qd && qd.base, priorEvents: qd && qd.base != null ? Math.round(qd.base * (m.spawns.base || 0) / 100) : 0, unit: '/100 spawns', detail: qd && qd.detail },
+      { name: 'worker-bash-fail', value: bs.realFailPct, ok: bs.realFails >= 50, events: bs.realFails || 0, prior: bb.realFailPct, priorEvents: bb.realFails || 0, unit: '%' },
+      { name: 'harness-refusals', value: bs.refusalPer100, ok: bs.refusals >= 50, events: bs.refusals || 0, prior: bb.refusalPer100, priorEvents: bb.refusals || 0, unit: '/100 bash' },
+      { name: 'hook-error-share', value: ws.hookErrorWorkersPct, ok: ws.n >= 30, events: cnt(ws.hookErrorWorkersPct, ws.n), prior: wb.hookErrorWorkersPct, priorEvents: cnt(wb.hookErrorWorkersPct, wb.n), unit: '%' },
+      { name: 'no-final-status', value: ws.noStatusPct, ok: ws.finished >= 30, events: cnt(ws.noStatusPct, ws.finished), prior: wb.noStatusPct, priorEvents: cnt(wb.noStatusPct, wb.finished), unit: '%' },
+      { name: 'partial-share', value: ws.partialPct, ok: ws.finished >= 30, events: cnt(ws.partialPct, ws.finished), prior: wb.partialPct, priorEvents: cnt(wb.partialPct, wb.finished), unit: '%' },
+      { name: 'units-per-worker', value: ws.unitsPerWorker && ws.unitsPerWorker.mean, ok: ws.n >= 30, events: ws.n || 0, prior: wb.unitsPerWorker && wb.unitsPerWorker.mean, priorEvents: wb.n || 0, unit: 'units' },
+      { name: 'worker-usage', value: usage && +(usage.since.pctPerHour * 24).toFixed(1), ok: ws.n >= 30, events: ws.n || 0, prior: usage && +(usage.base.pctPerHour * 24).toFixed(1), priorEvents: wb.n || 0, unit: '%/day' },
+    ];
+    const shortHistory = !(m.activeDays && m.activeDays.base >= STANDING_HISTORY_DAYS);
+    const findings = [];
+    for (const r of rows) {
+      if (typeof r.value !== 'number') continue;
+      const ceiling = STANDING_CEILINGS[r.name];
+      if (r.ok && r.value > ceiling) findings.push({ name: r.name, kind: 'ceiling', value: r.value, ceiling, events: r.events, unit: r.unit, ...(r.detail ? { detail: r.detail } : {}) });
+      else if (!shortHistory && r.events >= STANDING_MIN_EV && r.priorEvents >= STANDING_MIN_EV && typeof r.prior === 'number' && r.prior > 0 && r.value > STANDING_TREND * r.prior) {
+        findings.push({ name: r.name, kind: 'trend', value: r.value, prior: r.prior, events: r.events, unit: r.unit });
+      }
+    }
+    const trend = shortHistory ? 'inconclusive (history short)' : 'judged';
+    const verdict = findings.length ? 'findings' : shortHistory ? 'inconclusive' : 'ok';
+    const text = (x) => `${x.name} ${x.value}${x.unit ? ' ' + x.unit : ''} (${x.kind === 'ceiling' ? `ceiling ${x.ceiling}` : `was ${x.prior}`})`;
+    const out = { at: iso(at), verdict, trend, findings: findings.map((x) => ({ ...x, detail: text(x) })), shownOn: null };
+    S.writeJson(S.paths().standing, out);
+    S.appendRow({ at: out.at, event: 'standing', verdict, trend, findings: out.findings });
+    return out;
+  } catch { return null; }
+}
+
 // ---------- legacy flag migration (once, at tick start) ----------
 // A flag opened before v2 has no `v`. Each item is re-judged from its stored sample under the v2 floors (by name class): below the floor it would not
 // flag now. All items below -> the flag is closed as "superseded by v2 evidence rules" (the ack stays, no countdown). Some still flag -> those
@@ -556,12 +608,20 @@ export function migrateFlag({ at = S.now(), projectsDir } = {}) {
   } catch { return null; }
 }
 
-export function tick({ at = S.now(), installed, holdMinutes, run: analyzeFn = analyze } = {}) {
+export function tick({ at = S.now(), installed, holdMinutes, run: analyzeFn = analyze, standingRun = analyze } = {}) {
   const res = { ran: false, checks: [], flagged: [], held: false, installed: false, verdict: null };
   try {
     const P = S.paths();
     const mig = migrateFlag({ at });
     if (mig) res.migrated = mig;
+    // Standing health: independent of any install, reports only (never the flag, the hold or the chain).
+    try {
+      const rs0 = migrateRun(S.readJson(P.run));
+      if (standingDue(rs0, at)) {
+        const st = standing({ at, run: standingRun });
+        if (st) { res.standing = st.verdict; if (rs0) S.writeJson(P.run, { ...rs0, standing: { lastAt: at } }); }
+      }
+    } catch { /* reporting only */ }
     if (!installed) installed = S.readJson(join(claudeDir(), 'plugins', 'installed_plugins.json'));
     const inst = newestInstall(installed);
     if (!inst) return res;

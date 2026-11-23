@@ -363,6 +363,20 @@ export function clear({ by = 'operator', at = now() } = {}) {
   return out;
 }
 
+// ---- standing health line ----
+// One line per day, only when the daily standing look has findings; the day it was shown is stored in the standing file (shownOn).
+// The caller asks only when the session is attended. Reports only: no flag, no hold.
+export function standingLine({ at = now() } = {}) {
+  try {
+    const f = readJson(paths().standing);
+    if (!f || f.verdict !== 'findings' || !Array.isArray(f.findings) || !f.findings.length) return null;
+    const day = iso(at).slice(0, 10);
+    if (f.shownOn === day) return null;
+    writeJson(paths().standing, { ...f, shownOn: day });
+    return `[agent-companion] Standing health ${day}: ${f.findings.length} finding(s): ${f.findings.map((x) => x.detail || x.name).join('; ')}. Reported only; it starts no hold. Details: release-watch.mjs status.`;
+  } catch { return null; }
+}
+
 // ---- the line shown to lead sessions ----
 // Open and unanswered flag: tell the lead to push-notify the operator at once and relay the answer.
 // Held: say so and how to lift it. Open and answered: silence. Returns null when there is nothing to say.

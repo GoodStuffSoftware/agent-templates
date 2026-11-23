@@ -61,7 +61,7 @@ test('tick: nothing due is a quiet no-op; catch-up covers all due checks once', 
   const fin = JSON.parse(readFileSync(file('release-watch-run.json'), 'utf8'));
   assert.equal(fin.v, 2); assert.equal(fin.status, 'finished'); assert.equal(fin.releases[0].status, 'finished');
   const rows = readFileSync(file('release-watch-checks.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
-  assert.equal(rows[0].late, true);
+  assert.equal(rows.find((r) => r.event === 'check').late, true);
 });
 
 test('tick: an install while the chain is watched joins it and keeps the first install as the baseline anchor', () => {
