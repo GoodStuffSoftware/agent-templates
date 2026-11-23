@@ -4,11 +4,13 @@
 //   release-watch-run.json    the schedule for the newest install: T, version, due[], done[], prevT
 //   release-watch-flag.json   the open flag: flags[], notifiedAt, ackedAt, clearedAt, cooldown{}
 //   release-hold.json         the hold: { since, version, reason, flags, workers, clearedAt }
+//   release-hold-sessions.json  sessions shown the hold notice or refused by it: { holdSince, sessions[], clearedAt, noticed{} }
 //   release-watch-checks.jsonl  one row per check and per clear
 // AGENT_COMPANION_FAKE_NOW moves the clock for tests. Nothing here throws.
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync, renameSync, mkdirSync, openSync, fstatSync, readSync, closeSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { stateDir, opt } from './context.mjs';
 
@@ -29,6 +31,7 @@ export const paths = () => {
     hold: join(d, 'release-hold.json'),
     checks: join(d, 'release-watch-checks.jsonl'),
     standing: join(d, 'release-watch-standing.json'),
+    heldSessions: join(d, 'release-hold-sessions.json'),
   };
 };
 
@@ -364,8 +367,9 @@ export function maybeHold({ holdMinutes, at = now() } = {}) {
 // Writes the cleared state first (atomic temp + rename) and checks it by reading it back; the file delete is best effort.
 // The hold reader honours clearedAt, so a failed delete cannot leave the hold stuck or bring it back.
 export function clear({ by = 'operator', at = now() } = {}) {
-  const out = { flagCleared: false, holdCleared: false };
+  const out = { flagCleared: false, holdCleared: false, heldSessions: [] };
   try {
+    out.heldSessions = heldSessions();
     const f = readFlag();
     if (f && !f.clearedAt) {
       writeJson(paths().flag, { ...f, clearedAt: iso(at), clearedBy: by, cooldown: answerLevels(f, at, f.cooldown) });
@@ -381,10 +385,91 @@ export function clear({ by = 'operator', at = now() } = {}) {
     } else if (existsSync(paths().hold)) {
       try { unlinkSync(paths().hold); } catch { /* fail open */ }
     }
-    if (out.flagCleared || out.holdCleared) appendRow({ at: iso(at), event: 'clear', by, ...out });
+    if (out.holdCleared) markHoldCleared(at, by);
+    if (out.flagCleared || out.holdCleared) appendRow({ at: iso(at), event: 'clear', by, flagCleared: out.flagCleared, holdCleared: out.holdCleared, ...(out.holdCleared ? { clearedAt: iso(at), heldSessions: out.heldSessions } : {}) });
   } catch { /* fail open */ }
   return out;
 }
+
+// ---- sessions held by the hold ----
+// Every session shown the hold notice or refused by the hold is recorded (a lead by session id; a subagent by session id and agent id),
+// so the operator can message each one after the clear and each lead gets a one-time "cleared" notice on its next prompt.
+export const HELD_CAP = 200;
+const pluginRoot = () => process.env.CLAUDE_PLUGIN_ROOT || join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const sessionKey = (x) => `${x.sessionId}|${x.agentId || ''}`;
+const readHeld = () => { const f = readJson(paths().heldSessions); return f && Array.isArray(f.sessions) ? f : null; };
+
+// p: the hook payload (session_id, cwd, transcript_path, agent_id). Fails open; false when not held or nothing to record.
+export function noteHeld(p, at = now()) {
+  try {
+    if (!p || !p.session_id || !isHoldActive()) return false;
+    const h = readHold();
+    let f = readHeld();
+    if (!f || f.holdSince !== h.since || f.clearedAt) f = { holdSince: h.since, sessions: [], clearedAt: null, noticed: {} };
+    const rec = { sessionId: String(p.session_id), agentId: p.agent_id ? String(p.agent_id) : null, cwd: p.cwd || null, transcriptPath: p.transcript_path || null, firstSeen: iso(at), lastSeen: iso(at) };
+    const i = f.sessions.findIndex((x) => sessionKey(x) === sessionKey(rec));
+    if (i >= 0) f.sessions[i] = { ...f.sessions[i], cwd: rec.cwd || f.sessions[i].cwd, transcriptPath: rec.transcriptPath || f.sessions[i].transcriptPath, lastSeen: rec.lastSeen };
+    else f.sessions.push(rec);
+    if (f.sessions.length > HELD_CAP) f.sessions = f.sessions.sort((a, b) => Date.parse(a.lastSeen) - Date.parse(b.lastSeen)).slice(-HELD_CAP);
+    return writeJson(paths().heldSessions, f);
+  } catch { return false; }
+}
+
+// The sessions recorded for the hold now on ([] when none).
+export function heldSessions() {
+  try {
+    if (!isHoldActive()) return [];
+    const f = readHeld(); const h = readHold();
+    return f && f.holdSince === h.since && !f.clearedAt ? f.sessions : [];
+  } catch { return []; }
+}
+
+// One text for `held` and `clear`: counts, then one line per session, then "message each: <lead ids>".
+export function heldText(list) {
+  if (!list.length) return 'held sessions: none recorded';
+  const leads = list.filter((x) => !x.agentId); const subs = list.filter((x) => x.agentId);
+  const lines = [`held sessions: ${leads.length} lead, ${subs.length} subagent`];
+  for (const x of leads) lines.push(`lead ${x.sessionId}  cwd ${x.cwd || '?'}  seen ${x.firstSeen} .. ${x.lastSeen}`);
+  if (leads.length) lines.push(`message each: ${leads.map((x) => x.sessionId).join(' ')}`);
+  return lines.join('\n');
+}
+
+function markHoldCleared(at, by) {
+  const f = readHeld();
+  if (f && !f.clearedAt) writeJson(paths().heldSessions, { ...f, clearedAt: iso(at), clearedBy: by });
+}
+
+// Mark a session as already told (the one whose prompt lifted the hold sees the lift line instead).
+export function markNoticed(sessionId, at = now()) {
+  try {
+    const f = readHeld();
+    if (!f || !f.clearedAt || !sessionId) return false;
+    return writeJson(paths().heldSessions, { ...f, noticed: { ...(f.noticed || {}), [sessionId]: iso(at) } });
+  } catch { return false; }
+}
+
+// After a clear: once per recorded lead session, the line telling it to resume. null for any other session, a second call, or while held.
+export function clearedNotice(sessionId, at = now()) {
+  try {
+    if (!sessionId || isHoldActive()) return null;
+    const f = readHeld();
+    if (!f || !f.clearedAt) return null;
+    if (!f.sessions.some((x) => x.sessionId === sessionId && !x.agentId)) return null;
+    if (f.noticed && f.noticed[sessionId]) return null;
+    if (!markNoticed(sessionId, at)) return null; // not marked: never repeat
+    return `[agent-companion] The post-release hold was cleared at ${f.clearedAt} by the operator. Resume from your handoff or where you stopped.`;
+  } catch { return null; }
+}
+
+// What a held session is told to do. lead: one recurring cron polls status; subagent: write the handoff and stop; unknown caller: nothing extra.
+export function holdWaitText(kind) {
+  if (kind === 'lead') {
+    return ` Arm one recurring CronCreate every 20 minutes that runs \`node ${pluginRoot().replace(/\\/g, '/')}/scripts/release-watch.mjs status\`; while it shows a hold, end that turn with no output; once it shows none, delete the cron and resume.`;
+  }
+  if (kind === 'subagent') return ' Write your handoff and stop; your lead resumes you after the clear.';
+  return '';
+}
+const kindOf = (p) => (p && typeof p === 'object' ? (p.agent_id ? 'subagent' : 'lead') : null);
 
 // ---- standing health line ----
 // One line per day, only when the daily standing look has findings; the day it was shown is stored in the standing file (shownOn).
@@ -411,7 +496,7 @@ export function flagLine({ at = now() } = {}) {
       const ff = readFlag();
       const later = flagIsOpen(ff) ? ff.flags.filter((x) => x && x.name && !held.has(x.name)) : [];
       const laterTxt = later.length ? ` Later checks also flagged: ${later.map((x) => x.name + (x.detail ? ` (${x.detail})` : '')).join('; ')}.` : '';
-      return `[agent-companion] RELEASE HOLD since ${h.since}: ${h.reason}. New agents and heavy jobs are blocked and running workers hand off. Tell the operator now.${laterTxt} Only the operator lifts it, by saying "clear hold"; run \`node <plugin>/scripts/release-watch.mjs clear --by operator\` only after they have said so.`;
+      return `[agent-companion] RELEASE HOLD since ${h.since}: ${h.reason}. New agents and heavy jobs are blocked and running workers hand off. Tell the operator now.${laterTxt} Only the operator lifts it, by saying "clear hold"; run \`node <plugin>/scripts/release-watch.mjs clear --by operator\` only after they have said so.${holdWaitText('lead')}`;
     }
     const f = readFlag();
     if (!flagIsOpen(f) || f.ackedAt) return null;
@@ -431,12 +516,14 @@ export function flagLine({ at = now() } = {}) {
 
 // ---- the hold as seen by the guards ----
 // One message for every guard that refuses work while held. null when no hold (or on any read error: fail open).
-export function holdDenyMessage(what = 'new work') {
+export function holdDenyMessage(what = 'new work', p = null) {
   try {
     if (!isHoldActive()) return null;
+    noteHeld(p);
     const h = readHold() || {};
     const names = Array.isArray(h.flags) && h.flags.length ? h.flags.map((x) => x && x.name).filter(Boolean).join(', ') : 'unspecified';
     return `[agent-companion] A post-release hold is on since ${h.since || '?'} (release ${h.version || '?'}; flags: ${names}), so ${what} is refused. `
-      + 'Tell the operator at once. Only the operator lifts it, by saying "clear hold"; do not try to lift it yourself. The lead may still answer the operator; leases already granted keep running.';
+      + 'Tell the operator at once. Only the operator lifts it, by saying "clear hold"; do not try to lift it yourself. The lead may still answer the operator; leases already granted keep running.'
+      + holdWaitText(kindOf(p));
   } catch { return null; }
 }

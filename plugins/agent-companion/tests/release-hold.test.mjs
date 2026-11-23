@@ -4,7 +4,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -30,7 +30,7 @@ test('spawn-guard: held -> deny naming the hold and the way to clear it', () => 
   const r = runHook('hooks/spawn-guard.mjs', spawnPayload);
   assert.equal(decisionOf(r.json), 'deny');
   assert.match(reason(r), /post-release hold/);
-  assert.doesNotMatch(reason(r), /release-watch\.mjs/, 'agents are not given the clear command');
+  assert.doesNotMatch(reason(r), /release-watch\.mjs clear/, 'agents are not given the clear command');
   assert.match(reason(r), /clear hold/);
   assert.match(reason(r), /guard:demo\/deny/);
 }));
@@ -320,4 +320,39 @@ test('findHumanRecordNear: a slow hook (up to 30 s) still finds the typed record
   assert.equal(find({ sha: S.promptSha('ok go') })?.promptAt, t0, 'the hash of the text matches');
   assert.equal(find({ sha: S.promptSha('something else') }), null, 'a different text is not the reply');
   assert.equal(find({ near: t0 + 1000 })?.promptAt, t0, 'only typed records count, never the scheduled one');
+}));
+
+// ---- held sessions through the hooks (0.31.66)
+const heldFile = () => join(process.env.AGENT_COMPANION_STATE_DIR, 'state', 'release-hold-sessions.json');
+const sessionsOf = () => JSON.parse(readFileSync(heldFile(), 'utf8')).sessions;
+const promptAs = (sid, text, origin = { kind: 'human' }) => runHook('hooks/runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: sid, prompt: text, cwd: '/w/demo', transcript_path: '/t/demo.jsonl', ...(origin ? { origin } : {}) }, { env: { CLAUDE_CODE_SESSION_ATTENDED: '1' } });
+
+test('hold notice records the lead session; after the clear each recorded lead gets the cleared notice once, others never', () => withFx(() => {
+  putHold(HOLD);
+  const shown = promptAs('lead-a', 'status?');
+  assert.match(ctxOf(shown), /CronCreate every 20 minutes/);
+  assert.match(ctxOf(shown), /release-watch\.mjs status/);
+  promptAs('lead-a', 'and now?');
+  promptAs('lead-b', 'hello');
+  const l = sessionsOf();
+  assert.equal(l.length, 2, 'deduped by session');
+  assert.equal(l.find((x) => x.sessionId === 'lead-a').cwd, '/w/demo');
+  assert.equal(l.find((x) => x.sessionId === 'lead-a').transcriptPath, '/t/demo.jsonl');
+  const ok = promptAs('lead-b', 'clear hold');
+  assert.match(ctxOf(ok), /hold is lifted/);
+  assert.doesNotMatch(ctxOf(promptAs('lead-b', 'next')), /was cleared at/, 'the session that lifted it was told already');
+  const n = promptAs('lead-a', 'continue');
+  assert.match(ctxOf(n), /post-release hold was cleared at .* by the operator\. Resume from your handoff or where you stopped\./);
+  assert.doesNotMatch(ctxOf(promptAs('lead-a', 'again')), /was cleared at/, 'once');
+  assert.doesNotMatch(ctxOf(promptAs('lead-z', 'hi')), /was cleared at/, 'never held, never told');
+}));
+
+test('subagent denied by the hold: handoff-and-stop wording only, no cron; the denial is recorded as a subagent', () => withFx((fx) => {
+  const lead = agentLayout(fx);
+  putHold(HOLD);
+  const denied = sub(lead, 'Bash', { command: 'ls' });
+  assert.equal(decisionOf(denied.json), 'deny');
+  assert.match(reason(denied), /Write your handoff and stop/);
+  assert.doesNotMatch(reason(denied), /CronCreate/);
+  assert.ok(sessionsOf().some((x) => x.agentId), 'recorded with its agent id');
 }));

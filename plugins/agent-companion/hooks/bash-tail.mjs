@@ -176,6 +176,7 @@ try {
         // tell. Unless the option is on, a PowerShell rewrite becomes a deny that carries the queued command.
         && (!isPs || opt('resource_gate_powershell_rewrite', false) === true);
       const d = await gateDecision(input.command, {
+        payload: p,
         cwd: typeof p.cwd === 'string' && p.cwd ? p.cwd : process.cwd(),
         mode,
         shell: isPs ? 'powershell' : 'bash',

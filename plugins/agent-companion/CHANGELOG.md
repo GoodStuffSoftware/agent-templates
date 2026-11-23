@@ -2,6 +2,10 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.66 (unreleased)
+
+- **Hold clear reaches the sessions that stood down.** Every session shown the post-release hold notice or refused by it is recorded (session id, cwd, transcript path, agent id for a subagent, first and last seen; deduped, capped at 200) in `release-hold-sessions.json`. New `release-watch.mjs held [--json]` lists them; `clear` prints the same list ("message each: <ids>") and stores it with `clearedAt` in the clear row of the history. After a clear, each recorded lead session gets a one-time notice on its next prompt: the hold was cleared at <time> by the operator, resume from your handoff or where you stopped. The hold notice and deny texts now tell a lead to arm one recurring 20-minute CronCreate that runs `release-watch.mjs status` (end the turn silently while a hold shows; delete the cron and resume once clear), and a subagent only to write its handoff and stop (its lead resumes it).
+
 ## 0.31.65 — 2026-11-23
 
 - **Standing worker metrics read the whole week.** The release watch's worker metrics (no-final-status, partial-share, blocked-share, worker-bash-fail, harness-refusals) now pick transcripts by file mtime inside the window instead of the first 2000 in directory order, which dropped about 65% of a week and whole projects. A worker's STATUS is also read from its `SubagentHandback` call. Agent types off the reporting contract (`Explore`, `Plan`, `web-fetch`, `claude-code-guide`, `statusline-setup`) and hook-verification probes are excluded from those metrics and counted under `workers.excluded`. The blocked-share event floor is 5 (was 3), so three blocked workers from other projects' brief problems no longer start a hold. Details: ADR 0008.

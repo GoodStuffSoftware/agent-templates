@@ -37,7 +37,7 @@ import { pendingLine, markFlagsSurfaced } from '../scripts/lib/decision-register
 import {
   readState as readHandoffState, readAcks, evaluate as evaluateHandoff, triageLine, parseTriagePatterns, isTriageCwd, ackCommandFor, paths as handoffPaths, DEFAULT_REPEAT_DAYS,
 } from '../scripts/lib/scout-handoff.mjs';
-import { flagLine as releaseWatchLine, standingLine, noteShown } from './lib/release-watch-state.mjs';
+import { flagLine as releaseWatchLine, standingLine, noteShown, noteHeld } from './lib/release-watch-state.mjs';
 import { pendingUsageSummary, markUsageSurfaced, unattendedReason } from '../scripts/lib/usage/surface.mjs';
 
 const MAX_AGE_DAYS = 7;
@@ -310,7 +310,7 @@ try {
   if (usagePiece) { try { markUsageSurfaced(stateRootPath(), usagePiece); } catch { /* advisory */ } }
 
   // The flag line is in this session's context: the first reply typed here counts as the operator's answer.
-  if (watchLine) { try { noteShown(p.session_id); } catch { /* advisory */ } }
+  if (watchLine) { try { noteShown(p.session_id); noteHeld(p); } catch { /* advisory */ } }
 
   process.stdout.write(JSON.stringify({
     systemMessage: summary,

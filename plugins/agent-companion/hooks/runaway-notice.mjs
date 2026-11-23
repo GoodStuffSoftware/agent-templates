@@ -26,7 +26,7 @@
 
 import { readStdin, passthrough, callerIsSubagent, opt, stateRootPath } from './lib/context.mjs';
 import {
-  flagLine as releaseWatchLine, isHoldActive, clear as clearWatch, now as nowMs, noteShown, noteCandidate, confirmCandidates,
+  flagLine as releaseWatchLine, isHoldActive, clear as clearWatch, now as nowMs, noteShown, noteHeld, clearedNotice, markNoticed, noteCandidate, confirmCandidates,
   matchHumanPrompt, promptSha, CLEAR_WORDS_RE,
 } from './lib/release-watch-state.mjs';
 import { unattendedReason } from '../scripts/lib/usage/surface.mjs';
@@ -65,6 +65,7 @@ try {
         const wantsClear = isHoldActive() && CLEAR_WORDS_RE.test(prompt.trim());
         if (wantsClear && typedNow()) {
           clearWatch({ by: 'prompt' });
+          markNoticed(p.session_id, at);
           watch = '[agent-companion] The release hold is lifted on the operator\'s word: new agents, heavy jobs and running workers carry on.';
         } else {
           confirmCandidates({ at });                      // a candidate from an earlier turn of any session
@@ -74,6 +75,8 @@ try {
           }
           watch = releaseWatchLine({ at });
           if (watch && wantsClear) watch += ' The "clear hold" words could not be confirmed as typed by the operator yet: ask the operator to repeat "clear hold", or run the clear command after the operator says so.';
+          if (watch && isHoldActive()) noteHeld(p, at);
+          if (!watch) watch = clearedNotice(p.session_id, at);
           if (watch) noteShown(p.session_id, at);         // after the candidate: this turn's prompt was typed before the line was shown
         }
       }

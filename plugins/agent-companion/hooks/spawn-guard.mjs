@@ -43,7 +43,7 @@
 
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { passthrough, deny } from './lib/context.mjs';
+import { passthrough, deny, readStdin } from './lib/context.mjs';
 import { holdDenyMessage } from './lib/release-watch-state.mjs';
 
 import { readSpawnBrief } from './lib/sg-brief.mjs';
@@ -70,7 +70,7 @@ const RECOMMEND_CMD = (() => {
 })();
 
 try {
-  { const held = holdDenyMessage('starting a new agent'); if (held) deny(held); } // post-release hold (lib/release-watch-state.mjs)
+  { const held = holdDenyMessage('starting a new agent'); if (held) deny(holdDenyMessage('starting a new agent', readStdin()) || held); } // post-release hold (lib/release-watch-state.mjs)
   const readSpawnBriefOut = readSpawnBrief();
   const {
     p, input, sid, opusRw, declared, isLadderSpawn, fromDef, trulyInherited, pin, pinned, pinModelOverridden,

@@ -246,7 +246,7 @@ test('clear lifts the hold, logs a row, and the cooldown suppresses the same fla
   S.noteShown('s1', T);
   S.maybeHold({ holdMinutes: 30, at: T + HOUR });
   const r = S.clear({ by: 'test', at: T + 2 * HOUR });
-  assert.deepEqual(r, { flagCleared: true, holdCleared: true });
+  assert.deepEqual(r, { flagCleared: true, holdCleared: true, heldSessions: [] });
   assert.equal(S.isHoldActive(), false); assert.equal(existsSync(file('release-hold.json')), false);
   assert.equal(S.flagLine(), null);
   assert.equal(S.openFlag({ version: '1', flags: [{ name: 'queue-clears', value: 4 }], at: T + 3 * HOUR }), null, 'inside the 4 h cooldown, same size');
@@ -1198,3 +1198,80 @@ test('legacy-ack-kept: a legacy ack with a typed record at its time stays, as an
 
 test('cleanup', () => { rmSync(tmp, { recursive: true, force: true }); });
 void tel;
+
+// ---- held sessions: record, list, clear, one-time cleared notice ----
+const startHold = () => { S.openFlag({ version: '1', flags: flag, at: T }); S.noteShown('s0', T); return S.maybeHold({ holdMinutes: 30, at: T + HOUR }); };
+const cli = (...a) => spawnSync(process.execPath, [SCRIPT, ...a], { env: env(), encoding: 'utf8', windowsHide: true });
+
+test('held sessions: recorded once per session (a subagent apart), updated on repeat, capped, nothing recorded when not held', () => {
+  assert.equal(S.noteHeld({ session_id: 'lead-a' }, T), false, 'not held: nothing recorded');
+  startHold();
+  assert.ok(S.noteHeld({ session_id: 'lead-a', cwd: '/w/demo', transcript_path: '/t/a.jsonl' }, T + 2 * HOUR));
+  S.noteHeld({ session_id: 'lead-a', cwd: '/w/demo' }, T + 3 * HOUR);
+  S.noteHeld({ session_id: 'lead-a', agent_id: 'sub-1', cwd: '/w/demo' }, T + 3 * HOUR);
+  const l = S.heldSessions();
+  assert.equal(l.length, 2, 'one lead entry, one subagent entry');
+  const lead = l.find((x) => !x.agentId);
+  assert.deepEqual([lead.sessionId, lead.cwd, lead.transcriptPath, lead.firstSeen, lead.lastSeen], ['lead-a', '/w/demo', '/t/a.jsonl', iso(T + 2 * HOUR), iso(T + 3 * HOUR)]);
+  assert.equal(l.find((x) => x.agentId).agentId, 'sub-1');
+  for (let i = 0; i < S.HELD_CAP + 20; i++) S.noteHeld({ session_id: `bulk-${i}` }, T + 4 * HOUR + i);
+  assert.equal(S.heldSessions().length, S.HELD_CAP);
+});
+
+test('held: the CLI lists the held sessions as text and JSON; none recorded says so', () => {
+  assert.match(cli('held').stdout, /none recorded/);
+  startHold();
+  S.noteHeld({ session_id: 'lead-a', cwd: '/w/demo' }, T + 2 * HOUR);
+  S.noteHeld({ session_id: 'lead-b', cwd: '/w/other' }, T + 2 * HOUR);
+  S.noteHeld({ session_id: 'lead-a', agent_id: 'sub-1' }, T + 2 * HOUR);
+  const t = cli('held').stdout;
+  assert.match(t, /2 lead, 1 subagent/);
+  assert.match(t, /message each: lead-a lead-b/);
+  const j = JSON.parse(cli('held', '--json').stdout);
+  assert.equal(j.held, true); assert.equal(j.sessions.length, 3);
+});
+
+test('clear: prints the held list, stores it with clearedAt in the history row; a cleared notice reaches each lead once', () => {
+  startHold();
+  S.noteHeld({ session_id: 'lead-a', cwd: '/w/demo' }, T + 2 * HOUR);
+  S.noteHeld({ session_id: 'lead-b', cwd: '/w/other' }, T + 2 * HOUR);
+  S.noteHeld({ session_id: 'lead-a', agent_id: 'sub-1' }, T + 2 * HOUR);
+  const out = cli('clear', '--by', 'operator').stdout;
+  assert.match(out, /cleared \(flag true, hold true\)/);
+  assert.match(out, /lead lead-a/); assert.match(out, /lead lead-b/);
+  assert.match(out, /message each: lead-a lead-b/);
+  const row = readFileSync(file('release-watch-checks.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.event === 'clear').pop();
+  assert.ok(row.clearedAt); assert.equal(row.heldSessions.length, 3);
+  assert.equal(S.heldSessions().length, 0, 'no hold now');
+  const n = S.clearedNotice('lead-a', T + 5 * HOUR);
+  assert.match(n, /post-release hold was cleared at .* by the operator\. Resume from your handoff or where you stopped\./);
+  assert.equal(S.clearedNotice('lead-a', T + 6 * HOUR), null, 'once per session');
+  assert.equal(S.clearedNotice('stranger', T + 6 * HOUR), null, 'a session that was never held');
+  assert.equal(S.clearedNotice('sub-1', T + 6 * HOUR), null, 'a subagent id is not a lead');
+  assert.match(S.clearedNotice('lead-b', T + 6 * HOUR), /cleared/);
+  assert.match(cli('held').stdout, /none recorded/);
+});
+
+test('a new hold starts a new list, and a stale cleared notice is not shown during it', () => {
+  startHold();
+  S.noteHeld({ session_id: 'lead-a' }, T + 2 * HOUR);
+  S.clear({ at: T + 3 * HOUR });
+  S.openFlag({ version: '2', flags: [{ name: 'other', value: 1 }], at: T + 10 * HOUR });
+  S.noteShown('s9', T + 10 * HOUR);
+  S.maybeHold({ holdMinutes: 30, at: T + 12 * HOUR });
+  assert.equal(S.clearedNotice('lead-a', T + 12 * HOUR), null, 'held again: no cleared notice');
+  S.noteHeld({ session_id: 'lead-c' }, T + 13 * HOUR);
+  assert.deepEqual(S.heldSessions().map((x) => x.sessionId), ['lead-c']);
+});
+
+test('wording: a lead is told to arm one 20-minute cron on status; a subagent only to write its handoff and stop', () => {
+  startHold();
+  const lead = S.flagLine({ at: T + 2 * HOUR });
+  assert.match(lead, /CronCreate every 20 minutes/); assert.match(lead, /release-watch\.mjs status/);
+  assert.match(lead, /delete the cron and resume/);
+  assert.doesNotMatch(lead, /<plugin root>/);
+  assert.match(S.holdDenyMessage('starting a new agent', { session_id: 'lead-a' }), /CronCreate every 20 minutes/);
+  const sub = S.holdDenyMessage('resuming a worker', { session_id: 'lead-a', agent_id: 'sub-1' });
+  assert.match(sub, /Write your handoff and stop/); assert.doesNotMatch(sub, /CronCreate/);
+  assert.equal(S.heldSessions().length, 2, 'the denials were recorded too');
+});

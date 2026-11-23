@@ -43,6 +43,7 @@
 // reads at SubagentStop to tell the lead.
 
 import { readStdin, opt, passthrough, deny, recordDenial, callerIsSubagent, appendLog } from './lib/context.mjs';
+import { noteHeld } from './lib/release-watch-state.mjs';
 import { resolveAgentTranscript } from './lib/runaway.mjs';
 import {
   readContextSignal, claimSignals, claimOnce, recordEvent, subagentNoticeText, noticeVariant, pruneContextState,
@@ -97,6 +98,7 @@ try {
   const hard = hardCheck(p, sig, { ...hcfg, on: handoffOn });
   if (hard) {
     appendLog(HANDOFF_LOG, hard.row);
+    if (hard.held) { try { noteHeld(p); } catch { /* advisory */ } }
     recordDenial('handoff-hard-limit', p, hard.held ? `${p.tool_name} while the release hold is on` : `${p.tool_name} at ${sig.ctx} tokens, limit ${hcfg.hard}`);
     deny(streakPrefix(noteDeny(p.agent_id)) + denyText(sig ? sig.ctx : 0, hcfg.hard, noticeVariant(readBrief(path), p.agent_type), hard.why, hard.held));
   }

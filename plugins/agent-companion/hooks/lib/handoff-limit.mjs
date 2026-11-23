@@ -19,7 +19,7 @@
 // longest workers ran 135-206 calls up to 209-217K context before the auto-compaction).
 // Every notice and every deny is one row in telemetry handoff-limit.jsonl; the daily usage report's Efficiency block counts them.
 
-import { isHoldActive } from './release-watch-state.mjs';
+import { isHoldActive, holdWaitText } from './release-watch-state.mjs';
 import { openSync, fstatSync, readSync, closeSync, existsSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { opt } from './context.mjs';
@@ -119,6 +119,7 @@ export const streakPrefix = (n) => (n >= DENY_STREAK_TEXT ? `${n} calls refused:
 export function denyText(ctx, hard, variant = 'writer', why = null, held = false) {
   const head = held
     ? '[agent-companion] A post-release hold is on: work is paused and this call is blocked, and so is every call except the handoff. '
+      + holdWaitText('subagent')
       + (why ? `Bash and PowerShell allow only plain git add/commit/push/status/diff/log; this command was refused: ${why}. ` : '')
     : `[agent-companion] Context at ${kTokens(ctx)} is past the hard limit of ${kTokens(hard)}: this call is blocked, and so is every call except the handoff. `
     + (why ? `Bash and PowerShell allow only plain git add/commit/push/status/diff/log (no pipe, redirect, backtick, $(...) or other command, and only the listed options); this command was refused: ${why}. ` : '');

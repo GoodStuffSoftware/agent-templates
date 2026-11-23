@@ -4,7 +4,8 @@
 //   release-watch.mjs tick                    run the checks that are due (a local-services job runs this every 10 min);
 //                                             also writes the hold when a flag went unanswered. Exits 0 always.
 //   release-watch.mjs status [--all] [--json]  print the schedule, each check's verdict and metrics, the flag and the hold
-//   release-watch.mjs clear [--by <who>]      clear the flag and lift the hold
+//   release-watch.mjs clear [--by <who>] [--json]  clear the flag and lift the hold; prints the sessions the hold held (message each)
+//   release-watch.mjs held [--json]          list the sessions shown the hold notice or refused by it
 //   release-watch.mjs check --since <ISO> [--base-from <ISO>] [--days 7] [--sample 500]   one-shot, prints JSON + flags
 //
 // Schedule: +1, +2, +4, +8, +12, +16, +20, +24 h after the install time (installed_plugins.json lastUpdated) of the
@@ -778,7 +779,13 @@ export function main(A = process.argv.slice(2)) {
   try {
     if (cmd === 'tick') { const r = tick(); if (A.includes('--json')) console.log(JSON.stringify(r)); return 0; }
     if (cmd === 'status') { console.log(status(S.now(), { all: A.includes('--all'), json: A.includes('--json') })); return 0; }
-    if (cmd === 'clear') { const r = S.clear({ by: argOf(A, '--by') || 'operator' }); console.log(r.flagCleared || r.holdCleared ? `cleared (flag ${r.flagCleared}, hold ${r.holdCleared})` : 'nothing to clear'); return 0; }
+    if (cmd === 'held') { const l = S.heldSessions(); console.log(A.includes('--json') ? JSON.stringify({ held: S.isHoldActive(), sessions: l }, null, 1) : S.heldText(l)); return 0; }
+    if (cmd === 'clear') {
+      const r = S.clear({ by: argOf(A, '--by') || 'operator' });
+      const head = r.flagCleared || r.holdCleared ? `cleared (flag ${r.flagCleared}, hold ${r.holdCleared})` : 'nothing to clear';
+      console.log(A.includes('--json') ? JSON.stringify({ flagCleared: r.flagCleared, holdCleared: r.holdCleared, heldSessions: r.heldSessions }, null, 1) : r.holdCleared ? `${head}\n${S.heldText(r.heldSessions)}` : head);
+      return 0;
+    }
     if (cmd === 'check') {
       const T = Date.parse(argOf(A, '--since')); if (!(T > 0)) { console.error('check needs --since <ISO>'); return 2; }
       const bf = argOf(A, '--base-from');
@@ -787,7 +794,7 @@ export function main(A = process.argv.slice(2)) {
       const verdict = e.verdict === 'flag' ? `FLAG ${e.flags.map((x) => x.name).join(', ')}` : e.verdict;
       console.log(JSON.stringify({ ...m, verdict, flags: e.flags, metrics: e.metrics }, null, 1)); return 0;
     }
-    console.error('usage: release-watch.mjs tick | status [--all] [--json] | clear [--by <who>] | check --since <ISO> [--base-from <ISO>] [--days N] [--sample N]');
+    console.error('usage: release-watch.mjs tick | status [--all] [--json] | clear [--by <who>] [--json] | held [--json] | check --since <ISO> [--base-from <ISO>] [--days N] [--sample N]');
     return 2;
   } catch (e) { console.error(String(e && e.message || e)); return cmd === 'tick' ? 0 : 1; }
 }
