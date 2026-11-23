@@ -100,7 +100,8 @@ export function openFlag({ version, T, check, flags, at = now() } = {}) {
       check: check ?? old?.check ?? null,
       flags: merged,
       openedAt: open ? old.openedAt : iso(at),
-      notifiedAt: renotify ? iso(at) : old.notifiedAt,
+      // notifiedAt stays null until a session actually shows the flag (noteShown): the hold countdown starts at that first showing, not at the tick.
+      notifiedAt: renotify ? null : (old.notifiedAt ?? null),
       ackedAt: renotify ? null : old.ackedAt ?? null,
       shownTo: (open && !renotify && old.shownTo) || {},
       candidates: (open && !renotify && Array.isArray(old.candidates)) ? old.candidates : [],
@@ -226,9 +227,10 @@ export function noteShown(sessionId, at = now()) {
     const f = readFlag();
     if (!flagIsOpen(f) || f.ackedAt) return false;
     const shownTo = { ...(f.shownTo || {}) };
-    if (shownTo[sessionId]) return false;
-    shownTo[sessionId] = iso(at);
-    return writeJson(paths().flag, { ...f, shownTo });
+    const first = !f.notifiedAt; // the first real showing of this notification starts the hold countdown
+    if (shownTo[sessionId] && !first) return false;
+    if (!shownTo[sessionId]) shownTo[sessionId] = iso(at);
+    return writeJson(paths().flag, { ...f, shownTo, notifiedAt: f.notifiedAt || iso(at) });
   } catch { return false; }
 }
 
@@ -401,7 +403,7 @@ export function standingLine({ at = now() } = {}) {
 // ---- the line shown to lead sessions ----
 // Open and unanswered flag: tell the lead to push-notify the operator at once and relay the answer.
 // Held: say so and how to lift it. Open and answered: silence. Returns null when there is nothing to say.
-export function flagLine() {
+export function flagLine({ at = now() } = {}) {
   try {
     if (isHoldActive()) {
       const h = readHold();
@@ -414,7 +416,16 @@ export function flagLine() {
     const f = readFlag();
     if (!flagIsOpen(f) || f.ackedAt) return null;
     const names = f.flags.map((x) => x.name + (x.detail ? ` (${x.detail})` : '')).join('; ');
-    return `[agent-companion] RELEASE WATCH ${f.version || ''} check ${f.check ?? '?'}: ${names}. Push-notify the operator at once (PushNotification) and relay their answer. ${holdable(f.flags).length ? 'Unanswered, new agents and heavy jobs are held after the delay (option release_watch_hold_minutes); ' : 'This flag never starts a hold; '}run \`node <plugin>/scripts/release-watch.mjs status\` for detail.`;
+    let when = '';
+    if (holdable(f.flags).length) {
+      const d = Number(opt('release_watch_hold_minutes', 30));
+      if (d > 0) {
+        const n = Date.parse(f.notifiedAt); const start = n > 0 ? n : at; // never shown yet: this showing starts the countdown
+        const left = Math.max(0, Math.ceil((start + d * 60e3 - at) / 60e3));
+        when = `Hold countdown: ${left} min left; unanswered, new agents and heavy jobs are held at ${iso(start + d * 60e3)} (option release_watch_hold_minutes). `;
+      }
+    }
+    return `[agent-companion] RELEASE WATCH ${f.version || ''} check ${f.check ?? '?'}: ${names}. Push-notify the operator at once (PushNotification) and relay their answer. ${when || (holdable(f.flags).length ? 'Unanswered, new agents and heavy jobs are held after the delay (option release_watch_hold_minutes); ' : 'This flag never starts a hold; ')}run \`node <plugin>/scripts/release-watch.mjs status\` for detail.`;
   } catch { return null; }
 }
 

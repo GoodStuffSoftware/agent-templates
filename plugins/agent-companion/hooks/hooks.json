@@ -397,9 +397,19 @@
             "type": "command",
             "command": "node",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/runaway-notice.mjs"
+              "${CLAUDE_PLUGIN_ROOT}/hooks/runaway-notice.mjs",
+              "--no-watch"
             ],
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/runaway-notice.mjs",
+              "--watch"
+            ],
+            "timeout": 5
           },
           {
             "type": "command",
