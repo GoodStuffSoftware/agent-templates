@@ -26,6 +26,14 @@ const S = await import('../hooks/lib/release-watch-state.mjs');
 const installed = (t = T) => ({ plugins: { 'agent-companion@x': [{ version: '1.2.3', lastUpdated: new Date(t).toISOString() }] } });
 const file = (n) => join(state, 'state', n);
 const flag = [{ name: 'queue-clears', value: 3.6, detail: 'x' }];
+const iso = (t) => new Date(t).toISOString();
+// A reply the way the hook records it: the flag was shown to the session, then a typed prompt (origin human in the transcript) is confirmed.
+const humanRec = (at, prompt) => JSON.stringify({ type: 'user', origin: { kind: 'human' }, timestamp: iso(at), message: { content: prompt } });
+const humanAck = (at, { session = 's1', prompt = 'hi' } = {}) => {
+  S.noteShown(session, at);
+  S.noteCandidate({ sessionId: session, transcriptPath: 'fake', prompt, at: at + 1000 });
+  return S.confirmCandidates({ at: at + 2000, readTail: () => [humanRec(at + 1000, prompt)] });
+};
 
 test('schedule: eight checks at the decided hours', () => {
   const s = W.buildSchedule(T, '1', null);
@@ -41,7 +49,7 @@ test('newestInstall picks the newest copy and ignores other plugins', () => {
 });
 
 test('tick: nothing due is a quiet no-op; catch-up covers all due checks once', () => {
-  let calls = 0; const run = () => { calls++; return null; };
+  let calls = 0; const run = () => { calls++; return metrics(); };
   let r = W.tick({ at: T + 10 * 60e3, installed: installed(), run, holdMinutes: 30 });
   assert.equal(r.ran, false); assert.equal(calls, 0);
   r = W.tick({ at: T + 11 * HOUR, installed: installed(), run, holdMinutes: 30 });
@@ -85,12 +93,12 @@ function metrics(over = {}) {
   const w = { n: 40, finished: 40, unitsPerWorker: { mean: 1, p50: 0.8, p90: 2 }, peakCtxP90: 100000, over110kPct: 10, over150kPct: 0, noStatusPct: 5, partialPct: 10, blockedPct: 1, hookErrorWorkersPct: 40, apiErrorWorkers: 0, apiNonUsageWorkers: 0 };
   return {
     spawns: { since: 100, base: 700, perHour: { since: 10, base: 10 } }, span: { since: 10, base: 168 },
-    telemetry: {}, bash: { since: { n: 100, failPct: 4 }, base: { n: 500, failPct: 4 } },
+    telemetry: {}, bash: { since: { n: 300, realFails: 12, realFailPct: 4, refusals: 0, refusalPer100: 0 }, base: { n: 500, realFails: 20, realFailPct: 4, refusals: 0, refusalPer100: 0 } }, bashExit: {}, activeHours: { since: 10, base: 100 },
     queueClears: { since: 0, base: 5, perHour: { since: 0, base: 0.03 } },
     workers: { since: { ...w }, base: { ...w } }, hookSignatures: { since: {}, base: {} }, ...over,
   };
 }
-const names = (m) => W.evaluate(m).map((f) => f.name);
+const names = (m) => W.evaluate(m).flags.map((f) => f.name);
 const t = (since, base, ps, pb) => ({ since, base, per100spawns: { since: ps, base: pb } });
 
 test('evaluate: a quiet release flags nothing', () => assert.deepEqual(names(metrics()), []));
@@ -108,7 +116,7 @@ test('evaluate: spawn rewrites, queue, context, status, bash, api, runaway, blee
   const m = metrics(); m.workers.since = { ...m.workers.since, over150kPct: 8, noStatusPct: 20, partialPct: 40, blockedPct: 9, hookErrorWorkersPct: 60, apiErrorWorkers: 3, apiNonUsageWorkers: 1, unitsPerWorker: { mean: 2, p50: 1, p90: 4 } };
   const n = names(m);
   for (const x of ['context-over-150k', 'no-final-status', 'partial-share', 'blocked-share', 'hook-error-share', 'api-errors', 'units-per-worker', 'units-p90']) assert.ok(n.includes(x), x);
-  assert.ok(names(metrics({ bash: { since: { n: 100, failPct: 9 }, base: { n: 1, failPct: 1 } } })).includes('worker-bash-fail'));
+  assert.ok(names(metrics({ bash: { since: { n: 300, realFails: 27, realFailPct: 9, refusals: 0, refusalPer100: 0 }, base: { n: 500, realFails: 5, realFailPct: 1, refusals: 0, refusalPer100: 0 } } })).includes('worker-bash-fail'));
   assert.ok(names(metrics({ telemetry: { 'runaway:fired': t(1, 0, 1, 0) } })).includes('runaway'));
   assert.ok(names(metrics({ hookSignatures: { since: { 'PreToolUse:Bash boom': 6 }, base: {} } })).some((x) => x.startsWith('hook-signature')));
 });
@@ -153,13 +161,13 @@ test('hold is written only after notifiedAt + delay with no reply', () => {
 
 test('a reply before the hold stops the countdown; a reply during the hold does not lift it', () => {
   S.openFlag({ version: '1', flags: flag, at: T });
-  assert.equal(S.noteReply(T + 60e3), true);
+  assert.ok(humanAck(T + 60e3));
   assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 5 * HOUR }), null);
   S.clear({ at: T + 6 * HOUR });
   S.openFlag({ version: '1', flags: [{ name: 'other', value: 1 }], at: T + 7 * HOUR });
   S.maybeHold({ holdMinutes: 30, at: T + 8 * HOUR });
   assert.equal(S.isHoldActive(), true);
-  assert.equal(S.noteReply(T + 9 * HOUR), false);
+  assert.equal(humanAck(T + 9 * HOUR), null);
   assert.equal(S.isHoldActive(), true);
 });
 
@@ -183,7 +191,7 @@ test('flag line: open unanswered flag and hold, silent when answered', () => {
   S.openFlag({ version: '1.2.3', flags: flag, at: T, check: '+4h' });
   const l = S.flagLine();
   assert.match(l, /RELEASE WATCH 1\.2\.3/); assert.match(l, /PushNotification/); assert.match(l, /queue-clears/);
-  S.noteReply(T + 1);
+  assert.ok(humanAck(T + 1));
   assert.equal(S.flagLine(), null);
   S.clear({ at: T - 1 });
   S.openFlag({ version: '1.2.3', flags: [{ name: 'z', value: 1 }], at: T });
@@ -215,8 +223,10 @@ test('hooks: lead sees the line on every prompt, a subagent never does, a prompt
   assert.equal(sub.stdout, '');
   const lead = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'hello', cwd: tmp });
   assert.match(lead.stdout, /RELEASE WATCH 9/);
-  const after = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'again', cwd: tmp });
-  assert.doesNotMatch(after.stdout, /RELEASE WATCH/, 'answered after the first genuine prompt');
+  const plain = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'again', cwd: tmp });
+  assert.match(plain.stdout, /RELEASE WATCH/, 'a prompt with no human origin proof no longer acks');
+  const after = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'typed', origin: { kind: 'human' }, cwd: tmp });
+  assert.doesNotMatch(after.stdout, /RELEASE WATCH/, 'answered by the typed prompt');
 });
 test('hooks: a task notification is not a reply', () => {
   S.openFlag({ version: '9', flags: flag, at: Date.now() });
@@ -273,7 +283,7 @@ test('B2: the hold\'s own denials and rows logged during a hold never count', ()
 
 test('B3: per-window rates; answered flag quiet unless its rate more than doubles; repeat of an unanswered flag keeps the countdown', () => {
   // tick hands each check its own window and a baseline that never moves
-  const seen = []; const run = (o) => { seen.push(o); return null; };
+  const seen = []; const run = (o) => { seen.push(o); return metrics(); };
   W.tick({ at: T + HOUR, installed: installed(), run, holdMinutes: 30 });
   W.tick({ at: T + 2 * HOUR, installed: installed(), run, holdMinutes: 30 });
   assert.equal(seen[0].winFrom, T); assert.equal(seen[1].winFrom, T + HOUR); assert.equal(seen[1].T, T);
@@ -284,7 +294,7 @@ test('B3: per-window rates; answered flag quiet unless its rate more than double
   const fl = (level) => [{ name: 'queue-clears', value: level, level, detail: 'x' }];
   const a = new Date(T).toISOString();
   assert.ok(S.openFlag({ version: '1', T: a, check: '+1h', flags: fl(3), at: T }));
-  assert.ok(S.noteReply(T + 60e3));
+  assert.ok(humanAck(T + 60e3));
   assert.equal(S.openFlag({ version: '1', T: a, check: '+2h', flags: fl(3), at: T + HOUR }), null);
   assert.equal(S.openFlag({ version: '1', T: a, check: '+4h', flags: fl(5.5), at: T + 4 * HOUR }), null);
   assert.ok(S.openFlag({ version: '1', T: a, check: '+8h', flags: fl(7), at: T + 8 * HOUR }), 'more than doubled');
@@ -331,7 +341,7 @@ function putWorkers(from, to, everyMs, units = { input_tokens: 40000, output_tok
 function seedRoutine(upTo, extraDenials = []) {
   putWorkers(T - 7 * DAY, T, 6 * HOUR); putWorkers(T, T + upTo, HOUR / 2);
   putRows('spawns.jsonl', [...spread(1176, T - 7 * DAY, T, (at) => ({ at })), ...spread(Math.round(5 * upTo / HOUR), T, T + upTo, (at) => ({ at }))]);
-  putRows('denials.jsonl', [...spread(20, T - 7 * DAY, T, (at) => ({ at, guard: 'demo-guard', outcome: 'deny' })), ...spread(Math.round(upTo / HOUR / 2), T, T + upTo, (at) => ({ at, guard: 'demo-guard', outcome: 'deny' })), ...extraDenials]);
+  putRows('denials.jsonl', [...spread(20, T - 7 * DAY, T, (at) => ({ at, guard: 'demo-guard', outcome: 'deny' })), ...spread(Math.round(upTo / HOUR / 12), T, T + upTo, (at) => ({ at, guard: 'demo-guard', outcome: 'deny' })), ...extraDenials]);
   putRows('clears.jsonl', [...spread(14, T - 7 * DAY, T, (at) => ({ at, rule: 'pid-dead', type: 'lease', label: 'build' })),
     ...spread(Math.round(upTo / HOUR), T, T + upTo, (at) => ({ at, rule: 'requester-gone', type: 'waiting' })),
     ...spread(Math.round(upTo / HOUR / 2), T, T + upTo, (at) => ({ at, rule: 'pid-dead', type: 'lease', label: 'node --test x.test.mjs' }))], 'ci-budget');
@@ -385,7 +395,7 @@ test('usage: the state-dir override moves only the watch\'s own files, never the
   assert.ok(m.workers.since.n > 0 && m.workers.base.n > 0);
   assert.ok(m.estUnitsPerHour.since > 0 && m.estUnitsPerHour.base > 0, 'a scratch state dir no longer zeroes the usage metric');
   assert.ok(m.usage.since.pctPerHour > 0 && m.usage.base.pctPerHour > 0);
-  assert.equal(m.verdict, 'clean');
+  assert.equal(m.verdict, 'inconclusive', 'too few workers and Bash calls for a verdict');
   const after = existsSync(join(scratch, 'state')) ? readdirSync(join(scratch, 'state')) : [];
   assert.deepEqual(after, before, 'check wrote none of the watch\'s own files');
 });
@@ -395,7 +405,7 @@ test('usage: an empty usage source is an error the verdict names, never a quiet 
   putRows('spawns.jsonl', [...spread(70, T - 7 * DAY, T, (at) => ({ at })), ...spread(30, T, T + 3 * HOUR, (at) => ({ at }))]);
   const m = W.analyze({ T, nowMs: T + 3 * HOUR });
   assert.equal(m.estUnitsPerHour.base, 0); assert.equal(m.usage.base.empty, true); assert.deepEqual(m.usage.base.why, ['no worker transcripts']);
-  const f = W.evaluate(m).find((x) => x.name === 'usage-source-empty');
+  const f = W.evaluate(m).flags.find((x) => x.name === 'usage-source-empty');
   assert.ok(f, 'flagged'); assert.match(f.detail, /usage source empty \(baseline: no worker transcripts\)/);
   const r = checkRun(join(tmp, 'scratch-state'), T);
   assert.match(JSON.parse(r.stdout).verdict, /^FLAG usage-source-empty/);
@@ -404,7 +414,7 @@ test('usage: an empty usage source is an error the verdict names, never a quiet 
   putWorkers(T - 7 * DAY, T + 3 * HOUR, HOUR);
   const m2 = W.analyze({ T, nowMs: T + 3 * HOUR });
   assert.deepEqual(m2.usage.base.why, ['no spawn rows in telemetry']);
-  assert.ok(W.evaluate(m2).map((x) => x.name).includes('usage-source-empty'));
+  assert.ok(W.evaluate(m2).flags.map((x) => x.name).includes('usage-source-empty'));
   // a quiet window with a healthy baseline is not an error
   assert.ok(!names(metrics({ spawns: { since: 2, base: 700, perHour: { since: 0.2, base: 10 } } })).includes('usage-source-empty'));
   assert.ok(names(metrics({ spawns: { since: 100, base: 0, perHour: { since: 10, base: 0 } } })).includes('usage-source-empty'));
@@ -436,7 +446,7 @@ test('live-check rows never count in any telemetry metric', () => {
   assert.equal(m.telemetry['gate:denied'], undefined, 'live-check denials are not counted');
   assert.equal(m.telemetry['gate:granted'].since, 3);
   assert.equal(m.telemetry['denial:spawn-guard/deny'], undefined);
-  assert.ok(!W.evaluate(m).map((x) => x.name).includes('queue-denied'));
+  assert.ok(!W.evaluate(m).flags.map((x) => x.name).includes('queue-denied'));
   assert.ok(W.SYNTHETIC_SESSIONS.has('live-check'));
 });
 
@@ -461,7 +471,7 @@ test('usage-source-empty is reported but never starts a hold', () => {
   S.clear({ by: 'operator', at: T + 6 * HOUR });
   for (const k of ['flag', 'hold']) rmSync(S.paths()[k], { force: true });
   S.openFlag({ version: '1', flags: [{ name: 'queue-denied', value: 30, level: 30 }], at: T + 7 * HOUR, check: '+8h' });
-  S.noteReply(T + 7 * HOUR + 60e3);
+  assert.ok(humanAck(T + 7 * HOUR + 60e3));
   S.openFlag({ version: '1', flags: [{ name: 'usage-source-empty', value: 0, level: 0 }], at: T + 8 * HOUR, check: '+8h' });
   assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 8 * HOUR + 31 * 60e3 }), null, 'answered queue-denied + usage-source-empty: no hold');
   assert.equal(S.isHoldActive(), false);
