@@ -342,6 +342,11 @@ function putWorkers(from, to, everyMs, units = { input_tokens: 40000, output_tok
     writeFileSync(join(sd, `agent-w${n}.jsonl`), JSON.stringify({ type: 'assistant', timestamp: new Date(at).toISOString(), requestId: `rq${n}`, message: { model: 'claude-sonnet', usage: units, content: [{ type: 'text', text: 'STATUS: done' }] } }) + '\n');
   }
 }
+// Routine data for the inconclusive-heavy replay (5 spawns/h, small workers: most windows stay under the evidence floors).
+// The demo-guard denial rate is 1 per 12 h, the same as its baseline (20 in 7 days over 1176 spawns = 1.7 per 100 spawns). It was first 1 per 2 h
+// (`upTo / HOUR / 2`): 10 per 100 spawns at 5 spawns/h, about 5.9x the 1.70 per 100 baseline. v1 passed that only because its windows were per check
+// and never reached 10 events; v2 rolls the window until a check is conclusive, so it legitimately flags a 6x rate. The rate was lowered to
+// the baseline rate on purpose, not to hide a v2 flag. A rate at the baseline is replayed conclusively in the 12-spawns-per-hour test below.
 function seedRoutine(upTo, extraDenials = []) {
   putWorkers(T - 7 * DAY, T, 6 * HOUR); putWorkers(T, T + upTo, HOUR / 2);
   putRows('spawns.jsonl', [...spread(1176, T - 7 * DAY, T, (at) => ({ at })), ...spread(Math.round(5 * upTo / HOUR), T, T + upTo, (at) => ({ at }))]);
@@ -377,6 +382,39 @@ test('replay: a real spike in the same replay still flags and holds', () => {
   assert.equal(r.held, false);
   assert.equal(W.tick({ at: T + 8 * HOUR + 31 * 60e3, installed: installed(), holdMinutes: 30 }).held, true);
   assert.equal(S.isHoldActive(), true);
+});
+
+// A routine week with enough activity to be conclusive: 12 spawns/h, 6 workers/h each running 15 Bash calls (none fail), denials at the baseline rate (1 per 5 h).
+let bseq = 0;
+function putBashWorkers(from, to, everyMs, bashPer = 15) {
+  const sd = join(claude, 'projects', 'C--proj', 'sess', 'subagents'); mkdirSync(sd, { recursive: true });
+  for (let at = from; at < to; at += everyMs) {
+    const n = bseq++;
+    const calls = Array.from({ length: bashPer }, (_, i) => ({ type: 'tool_use', id: `tu${n}-${i}`, name: 'Bash', input: { command: 'true' } }));
+    writeFileSync(join(sd, `agent-b${n}.jsonl`), JSON.stringify({ type: 'assistant', timestamp: iso(at), requestId: `rb${n}`, message: { model: 'claude-sonnet', usage: { input_tokens: 40000, output_tokens: 2000 }, content: [...calls, { type: 'text', text: 'STATUS: done' }] } }) + '\n');
+  }
+}
+function seedConclusive(upTo) {
+  putBashWorkers(T - 7 * DAY, T, HOUR / 6); putBashWorkers(T, T + upTo, HOUR / 6);
+  putRows('spawns.jsonl', [...spread(12 * 168, T - 7 * DAY, T, (at) => ({ at })), ...spread(12 * upTo / HOUR, T, T + upTo, (at) => ({ at }))]);
+  putRows('denials.jsonl', [...spread(Math.round(168 / 5), T - 7 * DAY, T, (at) => ({ at, guard: 'demo-guard', outcome: 'deny' })), ...spread(Math.round(upTo / HOUR / 5), T, T + upTo, (at) => ({ at, guard: 'demo-guard', outcome: 'deny' }))]);
+}
+
+test('replay: a routine week at 12 spawns per hour is conclusive from +4h, flags nothing, never holds and finishes by +24h', () => {
+  seedConclusive(24 * HOUR);
+  const verdicts = {};
+  for (const h of CHECKS) {
+    const r = W.tick({ at: T + h * HOUR, installed: installed(), holdMinutes: 30, standingRun: none });
+    verdicts[h] = r.verdict;
+    assert.deepEqual(r.flagged, [], `+${h}h flags: ${r.flagged}`);
+    assert.equal(r.held, false);
+    assert.equal(W.tick({ at: T + h * HOUR + 31 * 60e3, installed: installed(), holdMinutes: 30, standingRun: none }).held, false);
+  }
+  assert.equal(verdicts[1], 'inconclusive'); assert.equal(verdicts[2], 'inconclusive');
+  for (const h of [4, 8, 12, 16, 20, 24]) assert.equal(verdicts[h], 'clean', `+${h}h: ${verdicts[h]}`);
+  assert.equal(S.isHoldActive(), false); assert.equal(S.flagIsOpen(), false);
+  assert.equal(runFile().status, 'finished'); assert.equal(runFile().everFlagged, false);
+  assert.equal(allRows().filter((x) => x.event === 'finished').length, 1);
 });
 
 // ---- 0.31.63 usage metric: a scratch state dir must not hide the telemetry ----
@@ -764,6 +802,51 @@ test('finish-needs-activity: activity that reaches the floors at an extension fi
   assert.equal(allRows().filter((x) => x.event === 'finished').length, 1);
 });
 
+test('finish-clean-after-ack: an answered flag is cleared by the next conclusive clean check and the chain finishes', () => {
+  W.tick({ at: T + HOUR, installed: installed(), run: flagged, standingRun: none });
+  assert.equal(S.flagIsOpen(S.readFlag()), true);
+  assert.ok(humanAck(T + HOUR + MIN), 'the operator answered the flag');
+  assert.equal(S.flagIsOpen(S.readFlag()), true, 'answered, not yet cleared');
+  const r = W.tick({ at: T + 2 * HOUR + 1, installed: installed(), run: () => rich(), standingRun: none });
+  assert.equal(r.verdict, 'clean'); assert.equal(r.flagCleared, true);
+  let f = S.readFlag();
+  assert.equal(S.flagIsOpen(f), false);
+  assert.equal(f.clearedAt, iso(T + 2 * HOUR + 1)); assert.equal(f.clearedBy, 'v2-watch'); assert.equal(f.clearedReason, 'clean after ack');
+  const row = allRows().find((x) => x.event === 'flag-cleared');
+  assert.ok(row); assert.equal(row.reason, 'clean after ack'); assert.deepEqual(row.flags, ['queue-denied']);
+  W.tick({ at: T + 24 * HOUR, installed: installed(), run: () => rich(), standingRun: none });
+  assert.equal(runFile().status, 'finished', 'no open flag is left to block the finish');
+  assert.equal(runFile().everFlagged, true);
+  assert.equal(allRows().filter((x) => x.event === 'flag-cleared').length, 1);
+  assert.equal(allRows().filter((x) => x.event === 'finished').length, 1);
+  f = S.readFlag(); assert.equal(f.clearedReason, 'clean after ack');
+});
+
+test('finish-clean-after-ack: a clean check never clears a flag nobody answered', () => {
+  W.tick({ at: T + HOUR, installed: installed(), run: flagged, standingRun: none });
+  const r = W.tick({ at: T + 2 * HOUR + 1, installed: installed(), run: () => rich(), standingRun: none });
+  assert.equal(r.verdict, 'clean'); assert.equal(r.flagCleared, undefined);
+  assert.equal(S.flagIsOpen(S.readFlag()), true); assert.equal(allRows().filter((x) => x.event === 'flag-cleared').length, 0);
+});
+
+test('finish-open-flag-at-cap: an unanswered open flag blocks the finish to the 72 h cap, and the closing text blames the flag, not the floors', () => {
+  W.tick({ at: T + HOUR, installed: installed(), run: flagged, standingRun: none });
+  assert.equal(S.readFlag().ackedAt, null);
+  // the activity floors are reached (rich), the verdict is clean, but the flag is unanswered
+  W.tick({ at: T + 24 * HOUR, installed: installed(), run: () => rich(), standingRun: none });
+  assert.equal(runFile().status, 'watching'); assert.equal(runFile().extendedTo, T + 28 * HOUR);
+  W.tick({ at: T + 72 * HOUR, installed: installed(), run: () => rich(), standingRun: none });
+  const s = runFile();
+  assert.equal(s.status, 'insufficient-data'); assert.equal(s.insufficientBecause, 'open-flag');
+  const ins = allRows().find((x) => x.event === 'insufficient-data'); assert.ok(ins);
+  assert.ok(ins.activity.workers >= ins.floors.workers, 'the floors were reached');
+  const f = S.readFlag();
+  assert.equal(S.flagIsOpen(f), true); assert.deepEqual(f.flags.map((x) => x.name), ['queue-denied'], 'the original flag is the open one, no second insufficient-data flag');
+  const text = W.status(T + 73 * HOUR);
+  assert.doesNotMatch(text, /floors were not reached/);
+  assert.match(text, /unanswered flag was still open at the cap/);
+});
+
 // A standing-health stub: 2116 spawns and 127 queue denials in the week is 6.0 per 100, over the ceiling of 5.
 const standingStub = (over = {}) => () => metrics({ spawns: { since: 2116, base: 8000, perHour: { since: 12.6, base: 7 } }, telemetry: { 'gate:denied': t(127, 400, 6, 5) }, activeDays: { since: 7, base: 28 }, ...over });
 const standingRows = () => allRows().filter((x) => x.event === 'standing');
@@ -827,13 +910,23 @@ test('standing-daily: one standing check per day; the same day writes no second 
   assert.equal(W.standingDue(runFile(), T + 25 * HOUR + 25 * HOUR), true);
 });
 
-// A flag written by hand the way a pre-v2 build wrote it (no `v`).
-const legacyFlag = (over = {}) => ({ version: '1.2.3', T: iso(T), check: '+1h', flags: [{ name: 'queue-denied', value: 20, n: 40, level: 3, detail: 'x' }], openedAt: iso(T + HOUR), notifiedAt: iso(T + HOUR), ackedAt: null, shownTo: {}, candidates: [], ack: null, clearedAt: null, cooldown: {}, ...over });
+// A flag written by hand the way a v1 build wrote it (no `v`): items are {name, value, level, limit, detail} with NO sample size; the sample
+// size lives in the v1 check row (metrics.spawns.since, metrics.workers.since.n) and in the detail text ("per N spawns", "n=N").
+const v1Item = (name, value, limit, detail) => ({ name, value, level: value, limit, detail });
+const legacyFlag = (over = {}) => ({ version: '1.2.3', T: iso(T), check: '+1h', flags: [v1Item('queue-denied', 23.1, 20, '6 denied')], openedAt: iso(T + HOUR), notifiedAt: iso(T + HOUR), ackedAt: null, shownTo: {}, candidates: [], ack: null, clearedAt: null, cooldown: {}, ...over });
 const putFlag = (f) => writeFileSync(file('release-watch-flag.json'), JSON.stringify(f));
+// The v1 check row that raised the flag: what a v1 build appended (no `chain`; metrics a subset of the analysis).
+const putV1Check = ({ at = T + HOUR, flags, spawns = 40, workers = 25 } = {}) => {
+  S.appendRow({ at: iso(at), event: 'check', T: iso(T), version: '1.2.3', check: 1, covered: [1], late: false, flags: flags || [v1Item('queue-denied', 23.1, 20, '6 denied')],
+    metrics: { spawns: { since: spawns, base: 700, perHour: { since: spawns, base: 4 } }, workers: { since: { n: workers }, base: { n: 400 } } } });
+};
+const resetRows = () => rmSync(file('release-watch-checks.jsonl'), { force: true });
 
 test('legacy-flag-superseded: a pre-v2 flag whose sample is under the v2 floor is closed, the ack stays and nothing restarts', () => {
   const ackedAt = iso(T + 2 * HOUR);
-  putFlag(legacyFlag({ flags: [{ name: 'queue-denied', value: 20, n: 10, detail: 'x' }, { name: 'hook-error-share', value: 60, n: 8 }], ackedAt }));
+  const items = [v1Item('queue-denied', 23.1, 20, '6 denied'), v1Item('hook-error-share', 60, 50, '8 of 8 workers')];
+  putFlag(legacyFlag({ flags: items, ackedAt }));
+  putV1Check({ flags: items, spawns: 10, workers: 8 });
   const r = W.tick({ at: T + 3 * HOUR, installed: {}, standingRun: none });
   assert.deepEqual(r.migrated, { superseded: true });
   const f = S.readFlag();
@@ -850,15 +943,64 @@ test('legacy-flag-superseded: a pre-v2 flag whose sample is under the v2 floor i
 });
 
 test('legacy-flag-superseded: an item of unknown size or of a name in no class is kept', () => {
-  putFlag(legacyFlag({ flags: [{ name: 'queue-denied', value: 20, n: 10 }, { name: 'mystery', value: 1 }] }));
+  const items = [v1Item('queue-denied', 23.1, 20, '6 denied'), v1Item('mystery', 1, 1, 'x')];
+  putFlag(legacyFlag({ flags: items }));
+  putV1Check({ flags: items, spawns: 10 });
   const r = W.migrateFlag({ at: T + 3 * HOUR });
   assert.deepEqual(r.kept, ['mystery']);
   assert.deepEqual(S.readFlag().flags.map((x) => x.name), ['mystery']);
-  putFlag(legacyFlag({ flags: [{ name: 'queue-denied', value: 20 }] }));
+  // a check row without metrics and a detail without a sample size: unknown n, kept
+  resetRows();
+  putFlag(legacyFlag({ flags: [v1Item('queue-denied', 23.1, 20, '6 denied')] }));
+  S.appendRow({ at: iso(T + HOUR), event: 'check', T: iso(T), version: '1.2.3', check: 1, flags: [v1Item('queue-denied', 23.1, 20, '6 denied')] });
   assert.deepEqual(W.migrateFlag({ at: T + 3 * HOUR }).kept, ['queue-denied'], 'unknown n: kept');
+  // no check row at all: also kept
+  resetRows();
+  putFlag(legacyFlag());
+  assert.deepEqual(W.migrateFlag({ at: T + 3 * HOUR }).kept, ['queue-denied']);
+});
+
+// The live flag, copied in shape from the real state file at 2026-11-22: spawn-rewrites 1 per 26 spawns, queue-denied 6 denied, worker-bash-fail 8.2 with n=355.
+// The v1 check row recorded 26 spawns and 25 workers in the window.
+const LIVE_T = Date.parse('2026-11-22T21:14:56.581Z'); const LIVE_AT = Date.parse('2026-11-22T22:20:01Z');
+const liveItems = () => [v1Item('spawn-rewrites', 3.8, 3, '1 rewrites/denials per 26 spawns'), v1Item('queue-denied', 23.1, 20, '6 denied'), v1Item('worker-bash-fail', 8.2, 7, 'n=355, 29 real failures')];
+function putLive() {
+  resetRows();
+  putFlag(legacyFlag({ T: iso(LIVE_T), flags: liveItems(), openedAt: iso(LIVE_AT), notifiedAt: iso(LIVE_AT) }));
+  S.appendRow({ at: iso(LIVE_AT), event: 'check', T: iso(LIVE_T), version: '1.2.3', check: 1, covered: [1], late: false, flags: liveItems(),
+    metrics: { spawns: { since: 26, base: 700, perHour: { since: 20, base: 4 } }, workers: { since: { n: 25 }, base: { n: 400 } } } });
+}
+const bashOf = (realFails, realFailPct) => ({ n: 355, realFails, realFailPct, refusals: 0, refusalPer100: 0 });
+const liveRun = (bashSince, spawns = 100) => () => metrics({ spawns: { since: spawns, base: 700, perHour: { since: 10, base: 10 } }, bash: { since: bashSince, base: { n: 500, realFails: 5, realFailPct: 1, refusals: 0, refusalPer100: 0 } } });
+
+test('legacy-live-flag: the real v1 flag under v2 on the fallback shapes: only the 355-call Bash item survives', () => {
+  putLive();
+  // the default analysis finds nothing in the empty data tree: the stored shapes decide (26 spawns < 30, 355 Bash calls >= 200)
+  const r = W.migrateFlag({ at: LIVE_AT + HOUR });
+  assert.deepEqual(r, { kept: ['worker-bash-fail'] });
+  assert.deepEqual(S.readFlag().flags.map((x) => x.name), ['worker-bash-fail']);
+  assert.equal(S.readFlag().v, 2); assert.equal(S.flagIsOpen(S.readFlag()), true);
+  // the same through the tick, with a run that saw no spawns
+  putLive();
+  assert.deepEqual(W.tick({ at: LIVE_AT + HOUR, installed: {}, standingRun: none, run: liveRun(bashOf(29, 8.2), 0) }).migrated, { kept: ['worker-bash-fail'] });
+});
+
+test('legacy-live-flag: the real v1 flag under v2 on a re-run of the analysis', () => {
+  // the re-run finds the Bash failure rate under its limit: none of the three items would flag now
+  putLive();
+  assert.deepEqual(W.migrateFlag({ at: LIVE_AT + HOUR, run: liveRun(bashOf(5, 1.4)) }), { superseded: true });
+  assert.equal(S.flagIsOpen(S.readFlag()), false);
+  // the re-run still sees the Bash failure rate over its limit: that item stays, the two small-sample items go
+  putLive();
+  assert.deepEqual(W.migrateFlag({ at: LIVE_AT + HOUR, run: liveRun(bashOf(29, 8.2)) }), { kept: ['worker-bash-fail'] });
+  assert.equal(S.readFlag().flags[0].name, 'worker-bash-fail');
+  // a re-run that saw under half the recorded spawns is no answer: the stored shapes decide, with the same outcome
+  putLive();
+  assert.deepEqual(W.migrateFlag({ at: LIVE_AT + HOUR, run: liveRun(bashOf(5, 1.4), 5) }), { kept: ['worker-bash-fail'] });
 });
 
 test('legacy-flag-still-flags-revoked: a flag still over the v2 floor keeps its items, and an ack without a typed record is revoked with the countdown restarted', () => {
+  putV1Check();
   putFlag(legacyFlag({ ackedAt: iso(T + 2 * HOUR), shownTo: { s1: iso(T + HOUR) }, candidates: [{ x: 1 }] }));
   const at = T + 3 * HOUR;
   const r = W.tick({ at, installed: {}, standingRun: none });
@@ -873,6 +1015,7 @@ test('legacy-flag-still-flags-revoked: a flag still over the v2 floor keeps its 
 });
 
 test('legacy-ack-revoked: an ack written by a build without human records is revoked; an unacked flag only gets the v2 marker', () => {
+  putV1Check();
   putFlag(legacyFlag());
   assert.deepEqual(W.migrateFlag({ at: T + 3 * HOUR }), { kept: ['queue-denied'] });
   const f = S.readFlag();
@@ -883,6 +1026,7 @@ test('legacy-ack-revoked: an ack written by a build without human records is rev
 
 test('legacy-ack-kept: a legacy ack with a typed record at its time stays, as an ack object naming the session', () => {
   const ackedAt = T + 2 * HOUR;
+  putV1Check();
   putFlag(legacyFlag({ ackedAt: iso(ackedAt), shownTo: { sess1: iso(T + HOUR) } }));
   const projects = join(tmp, 'projects'); mkdirSync(join(projects, 'p'), { recursive: true });
   writeFileSync(join(projects, 'p', 'sess1.jsonl'), [urec(T, 'old'), humanRec(ackedAt + 500, 'looks fine')].join('\n') + '\n');

@@ -345,6 +345,8 @@ export function evaluate(m, opts = {}) {
   per100(sumTel(/^struggle:/), TH.struggleMinEv, 'struggle', TH.struggle100, `${sumTel(/^struggle:/)} fired`, sumTelBase(/^struggle:/));
   per100(sumTel(/^wait:/), TH.pollMinEv, 'polling-waste', TH.pollDeny100, `${sumTel(/^wait:/)} worker-wait denials`, sumTelBase(/^wait:/));
   {
+    // Deliberately no denominator or event floor (minN 0, minEv 1): a runaway session is a real fault even once, not a rate that needs a sample
+    // to be believed, and it is holdable. This is the one metric that stays a one-event trigger (docs/adr/0008-release-watch-v2.md).
     const rn = sumTel(/^runaway:/);
     add('runaway', { value: rn, limit: 0, base: sumTelBase(/^runaway:/), n: sp.since, events: rn, minEv: 1, over: rn > 0, unit: 'count', detail: `${rn} runaway row(s)`, level: +(rn / spanH).toFixed(3) });
   }
@@ -445,18 +447,34 @@ function finishStep({ rs, at, verdict, analyzeFn }) {
     act = { spawns: fm.spawns.since, workers: fm.workers.since.n, bash: fm.bash.since.n, activeHours: fm.activeHours ? fm.activeHours.since : 0 };
   } catch { /* no activity read: not enough to finish */ }
   const met = !!act && act.spawns >= FL.spawns && act.workers >= FL.workers && act.bash >= FL.bash && act.activeHours >= FL.activeHours;
-  if (met && verdict === 'clean' && !S.flagIsOpen(S.readFlag())) {
+  // An answered flag does not block a finish: a conclusive clean check clears it first (clearAnswered). An unanswered open flag does.
+  const f0 = S.readFlag(); const blocked = S.flagIsOpen(f0) && !f0.ackedAt;
+  if (met && verdict === 'clean' && !blocked) {
     for (const r of rs.releases) r.status = 'finished';
     rs.status = 'finished';
     return { event: 'finished', act, FL, N };
   }
+  // Why this check did not finish, kept for the closing text: the status must not blame the floors when they were reached.
+  const why = !met ? 'floors' : blocked ? 'open-flag' : 'not-clean';
   const hours = nOpt('release_watch_extend_hours', 4) * HOUR; const cap = N.T + nOpt('release_watch_cap_hours', 72) * HOUR;
   const lastDue = N.due[N.due.length - 1];
   const newDue = lastDue + hours <= at ? at + hours : lastDue + hours;
   if (newDue <= cap) { N.due.push(newDue); rs.extendedTo = newDue; return { event: null, extendedTo: newDue }; }
   for (const r of rs.releases) r.status = 'insufficient-data';
-  rs.status = 'insufficient-data';
-  return { event: 'insufficient-data', act, FL, N };
+  rs.status = 'insufficient-data'; rs.insufficientBecause = why;
+  return { event: 'insufficient-data', act, FL, N, why };
+}
+// A human-acknowledged flag is cleared by the next conclusive clean check ("clean after ack"): the operator answered it and the release has since
+// measured clean, so it must not hold the chain open to the cap. An unanswered flag stays open (it still blocks the finish and the hold path).
+// The hold, if one is on, is never touched here: only the operator's clear lifts it.
+function clearAnswered(P, at) {
+  try {
+    const f = S.readFlag();
+    if (!S.flagIsOpen(f) || !f.ackedAt || Date.parse(f.ackedAt) > at) return false;
+    S.writeJson(P.flag, { ...f, clearedAt: iso(at), clearedBy: 'v2-watch', clearedReason: 'clean after ack' });
+    S.appendRow({ at: iso(at), event: 'flag-cleared', version: f.version ?? null, flags: f.flags.map((x) => x.name), reason: 'clean after ack', ackedAt: f.ackedAt });
+    return true;
+  } catch { return false; }
 }
 const lackText = (act, FL) => (act
   ? [['spawns', act.spawns, FL.spawns], ['workers', act.workers, FL.workers], ['Bash calls', act.bash, FL.bash], ['active hours', act.activeHours, FL.activeHours]].map(([k, a, f]) => `${k} ${a}/${f}${a >= f ? '' : ' short'}`).join(', ')
@@ -494,6 +512,7 @@ function chainChecks({ rs, P, at, analyzeFn, res }) {
     (r.verdicts ??= []).push({ at: iso(at), check: Math.max(...idx) + 1, verdict });
   }
   rs.everFlagged = !!rs.everFlagged || flags.length > 0;
+  if (verdict === 'clean') { const c = clearAnswered(P, at); if (c) res.flagCleared = true; }
   const fin = finishStep({ rs, at, verdict, analyzeFn });
   S.writeJson(P.run, rs);
   const row = checkRow({ at, rs, newest, lead, last, due, late, verdict, flags, evald, metrics, winFrom, byVersion });
@@ -505,7 +524,7 @@ function chainChecks({ rs, P, at, analyzeFn, res }) {
     S.appendRow({ at: iso(at), event: 'finished', T: iso(fin.N.T), chain: iso(rs.baseAnchor), version: fin.N.version, releases: rs.releases.map((r) => r.version), activity: fin.act });
   } else if (fin.event === 'insufficient-data') {
     S.appendRow({ at: iso(at), event: 'insufficient-data', T: iso(fin.N.T), chain: iso(rs.baseAnchor), version: fin.N.version, activity: fin.act, floors: fin.FL });
-    const detail = `no finish by +${Math.round((at - fin.N.T) / HOUR)}h: ${lackText(fin.act, fin.FL)}`;
+    const detail = `no finish by +${Math.round((at - fin.N.T) / HOUR)}h: ${fin.why === 'floors' ? lackText(fin.act, fin.FL) : fin.why === 'open-flag' ? 'the activity floors were reached, an unanswered flag blocked the finish' : 'the activity floors were reached, the last check was not clean'}`;
     if (!S.flagIsOpen(S.readFlag())) S.openFlag({ version: newest.version, T: iso(rs.baseAnchor), check: `+${Math.round((at - fin.N.T) / HOUR)}h`, at,
       flags: [{ name: 'insufficient-data', value: 0, level: 0, limit: 0, detail, n: fin.act ? fin.act.spawns : 0, events: 1, base: null }] });
   }
@@ -564,28 +583,63 @@ export function standing({ at = S.now(), run = analyze } = {}) {
 }
 
 // ---------- legacy flag migration (once, at tick start) ----------
-// A flag opened before v2 has no `v`. Each item is re-judged from its stored sample under the v2 floors (by name class): below the floor it would not
-// flag now. All items below -> the flag is closed as "superseded by v2 evidence rules" (the ack stays, no countdown). Some still flag -> those
-// stay; a non-human ack on them is revoked and the countdown restarts, unless a typed record in the lead transcripts sits at the ack time.
+// A flag opened before v2 has no `v`. The question for each item is: would v2 have raised it? Two steps answer it.
+//  1. Re-run the v2 analysis and evaluation over the flag's own window (install time T to the check that raised it; baseline = the 7 days before T,
+//     the one v1 used). That is the exact answer, and it handles metrics whose v1 value mixed in harness refusals (worker-bash-fail). It counts only
+//     when the re-run found activity (at least half the spawns the v1 check row recorded): telemetry that has since rotated away is no answer.
+//  2. Otherwise the stored v1 shapes give the sample size n. v1 items are {name, value, level, limit, detail} with no n; v1 check rows carry
+//     metrics: {spawns: {since}, workers: {since: {n}}}. The spawns class reads metrics.spawns.since (or "per N spawns" in the detail), the
+//     workers class metrics.workers.since.n, the Bash class the "n=N" in the detail. Below the v2 floor of its class the item would not flag now.
+// All items below -> the flag is closed as "superseded by v2 evidence rules" (the ack stays, no countdown). Some still flag -> those stay; a
+// non-human ack on them is revoked and the countdown restarts, unless a typed record in the lead transcripts sits at the ack time.
 // An item whose sample size is unknown, or whose name is in no class, is kept. A hold is never touched.
 const SPAWN_CLASS = /^(guard:|spawn-rewrites$|queue-denied$|handoff-|struggle$|polling-waste$|runaway$)/;
 const WORKER_CLASS = /^(hook-error-share$|hook-signature:|context-over-150k$|api-errors$|units-|no-final-status$|partial-share$|blocked-share$)/;
 const BASH_CLASS = /^(worker-bash-fail$|harness-refusals$)/;
 const classOf = (name) => (SPAWN_CLASS.test(name) ? 'spawns' : WORKER_CLASS.test(name) ? 'workers' : BASH_CLASS.test(name) ? 'bash' : null);
+// The sample size of a v1 item, from the shapes v1 really wrote (never from an `n` on the item: v1 wrote none).
+function storedN(item, row, cls) {
+  const det = String(item && item.detail || ''); const m = row && row.metrics;
+  if (cls === 'spawns') {
+    const v = m && m.spawns && m.spawns.since; if (typeof v === 'number') return v;
+    const d = /per (\d+) spawns/.exec(det); return d ? +d[1] : null;
+  }
+  if (cls === 'workers') { const v = m && m.workers && m.workers.since && m.workers.since.n; return typeof v === 'number' ? v : null; }
+  const d = /\bn=(\d+)/.exec(det); return d ? +d[1] : null;
+}
 export function legacyStillFlags(item, row, FL = floors()) {
   const cls = classOf(String(item && item.name || ''));
   if (!cls) return true;
-  const n = typeof item.n === 'number' ? item.n : (row && row.sample && typeof row.sample[cls] === 'number' ? row.sample[cls] : null);
+  const n = storedN(item, row, cls);
   return n == null ? true : n >= FL[cls];
 }
-export function migrateFlag({ at = S.now(), projectsDir } = {}) {
+export function migrateFlag({ at = S.now(), projectsDir, run = analyze } = {}) {
   try {
     const f = S.readFlag();
     if (!S.flagIsOpen(f) || f.v != null) return null;
     const FL = floors();
-    const fT = Date.parse(f.T);
-    const row = S.readRows().filter((r) => r.event === 'check' && (Date.parse(r.chain) === fT || Date.parse(r.T) === fT) && (f.check == null || r.label === f.check || r.label == null)).pop();
-    const kept = f.flags.filter((x) => legacyStillFlags(x, row, FL));
+    const fT = Date.parse(f.T); const openedAt = Date.parse(f.openedAt) || null;
+    const checks = S.readRows().filter((r) => r.event === 'check' && (Date.parse(r.chain) === fT || Date.parse(r.T) === fT));
+    // The check row that raised an item: the latest one carrying the same name and value (items can come from different checks of one flag).
+    const rowOf = (x) => checks.filter((r) => Array.isArray(r.flags) && r.flags.some((y) => y.name === x.name && y.value === x.value)).pop()
+      || checks.filter((r) => openedAt == null || Date.parse(r.at) <= openedAt + 60e3).pop() || null;
+    const evals = new Map();
+    const reanalyzed = (x, row) => {
+      const raisedAt = row ? Date.parse(row.at) : openedAt;
+      if (!(raisedAt > fT)) return null;
+      if (!evals.has(raisedAt)) {
+        let ev = null;
+        try {
+          const m = run({ T: fT, nowMs: raisedAt, winFrom: fT, baseFrom: fT - D7, baseTo: fT });
+          const got = m && m.spawns && m.spawns.since; const had = row && row.metrics && row.metrics.spawns && row.metrics.spawns.since;
+          if (m && m.workers && typeof got === 'number' && got > 0 && !(typeof had === 'number' && got < had / 2)) ev = evaluate(m);
+        } catch { /* no re-run: the stored shapes decide */ }
+        evals.set(raisedAt, ev);
+      }
+      const ev = evals.get(raisedAt); const mt = ev && ev.metrics.find((y) => y.name === x.name);
+      return mt ? mt.status === 'flag' : null;
+    };
+    const kept = f.flags.filter((x) => { const row = rowOf(x); const re = reanalyzed(x, row); return re != null ? re : legacyStillFlags(x, row, FL); });
     if (!kept.length) {
       S.writeJson(S.paths().flag, { ...f, v: 2, clearedAt: iso(at), clearedBy: 'v2-migration', supersededReason: 'superseded by v2 evidence rules' });
       S.appendRow({ at: iso(at), event: 'flag-superseded', version: f.version ?? null, flags: f.flags.map((x) => x.name), reason: 'superseded by v2 evidence rules', ackKept: !!f.ackedAt });
@@ -612,7 +666,7 @@ export function tick({ at = S.now(), installed, holdMinutes, run: analyzeFn = an
   const res = { ran: false, checks: [], flagged: [], held: false, installed: false, verdict: null };
   try {
     const P = S.paths();
-    const mig = migrateFlag({ at });
+    const mig = migrateFlag({ at, run: analyzeFn });
     if (mig) res.migrated = mig;
     // Standing health: independent of any install, reports only (never the flag, the hold or the chain).
     try {
@@ -665,7 +719,9 @@ export function status(at = S.now(), { all = false, json = false } = {}) {
     for (const r of rs.releases) {
       const nextI = r.due.findIndex((d, i) => !r.done.includes(i));
       const state = r.status === 'finished' ? 'closed' + (rs.everFlagged ? ', flags were raised' : ', clean')
-        : r.status === 'insufficient-data' ? 'closed, insufficient data (the activity floors were not reached in time)'
+        : r.status === 'insufficient-data' ? (rs.insufficientBecause === 'open-flag' ? 'closed without finishing: an unanswered flag was still open at the cap (the activity floors were reached)'
+          : rs.insufficientBecause === 'not-clean' ? 'closed without finishing: the last check was not clean (the activity floors were reached)'
+            : 'closed, insufficient data (the activity floors were not reached in time)')
           : r.status === 'waiting-chain' ? 'checks done, waiting for the newer release of its chain to finish'
             : nextI < 0 ? 'watching (all checks done, no clean verdict yet)' : `watching (check ${nextI + 1} of ${r.due.length} next at ${iso(r.due[nextI]).slice(0, 16)}Z)`;
       lines.push(`release ${r.version || '?'} installed ${iso(r.T)}: ${state}`);
