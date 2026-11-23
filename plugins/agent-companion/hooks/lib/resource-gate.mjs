@@ -839,11 +839,14 @@ function leadingCd(s, shell = 'bash') {
   try { scanned = scanCommand(ps ? psScanText(s) : s); } catch { return null; }
   const [first, second] = scanned.segments;
   if (!first || !second || s.slice(0, first.start).trim() !== '') return null;
-  if (!(ps ? /^\s*(?:&&|;)\s*$/ : /^\s*&&\s*$/).test(s.slice(first.end, second.start))) return null;
+  // `cd d && x`, `cd d; x` and `cd d` newline `x` all keep the cd outside the queue with the same meaning.
+  if (!/^\s*(?:&&|;|\r?\n)\s*$/.test(s.slice(first.end, second.start))) return null;
   if (/<<|[`$]/.test(first.text)) return null;
   const w = wordsOf(first.text);
   if (ps ? !['cd', 'chdir', 'sl', 'set-location'].includes(String(w[0]).toLowerCase()) : w[0] !== 'cd') return null;
-  if (w.length > 2) return null;
+  // `cd -- <dir>` is `cd <dir>`; any other extra word (cd -P x, cd a b) is not verified.
+  const args = w[1] === '--' ? w.slice(2) : w.slice(1);
+  if (args.length > 1) return null;
   return { rest: second.start + second.text.match(/^\s*/)[0].length, cdEnd: first.end };
 }
 
