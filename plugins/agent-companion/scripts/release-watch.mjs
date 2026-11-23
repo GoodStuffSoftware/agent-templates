@@ -796,7 +796,13 @@ export function main(A = process.argv.slice(2)) {
   try {
     if (cmd === 'tick') { const r = tick(); if (A.includes('--json')) console.log(JSON.stringify(r)); return 0; }
     if (cmd === 'status') { console.log(status(S.now(), { all: A.includes('--all'), json: A.includes('--json') })); return 0; }
-    if (cmd === 'held') { const l = S.withLocalIds(S.heldSessions()); console.log(A.includes('--json') ? JSON.stringify({ held: S.isHoldActive(), sessions: l }, null, 1) : S.heldText(l)); return 0; }
+    if (cmd === 'held') {
+      // While held: the sessions recorded so far. After a lift nobody has claimed yet (the tick lifted it, say): the sessions still owed a message.
+      const active = S.isHoldActive();
+      const l = S.withLocalIds(active ? S.heldSessions() : S.owedSessions());
+      console.log(A.includes('--json') ? JSON.stringify({ held: active, owed: !active && l.length > 0, sessions: l }, null, 1) : (!active && l.length ? 'hold cleared; these sessions are still owed a local message:\n' : '') + S.heldText(l));
+      return 0;
+    }
     if (cmd === 'clear') {
       const r = S.clear({ by: argOf(A, '--by') || 'operator' });
       const head = r.flagCleared || r.holdCleared ? `cleared (flag ${r.flagCleared}, hold ${r.holdCleared})` : 'nothing to clear';

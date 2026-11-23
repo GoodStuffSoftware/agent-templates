@@ -47,8 +47,9 @@ export function handoffThreshold(agentType) {
   if (!(base > 0)) return 0;
   if (!isHighRung(agentType)) return base;
   let high = Number(opt('subagent_context_notice_high_tokens', HANDOFF_HIGH_DEFAULT));
-  if (!(high > 0)) return base;
+  // The opus option overrides the high one for the opus rungs even when the high option is 0 or less; with neither set the base line stands.
   if (isOpusRung(agentType)) { const o = Number(opt('subagent_context_notice_opus_tokens', HANDOFF_OPUS_DEFAULT)); if (o > 0) high = o; } // 0 or less: the high rungs' line
+  if (!(high > 0)) return base;
   // The higher rungs never hand off earlier than the lower ones (a raised base lifts them too), and a notice line at or past the hard
   // stop would never be heard (the hard deny comes first): then the base line stands.
   const t = Math.max(base, high);
@@ -363,8 +364,8 @@ export function finalIsComplete(msg) {
   return /\bDONE:(?!\s*partial\b)/i.test(t);
 }
 
-// 0.31.66: a Bash command that writes a handoff .md: a redirect (>, >>) or tee to a path matching *handoff*.md (cat > x <<EOF, echo >>, tee -a).
-export const bashWritesHandoff = (cmd) => typeof cmd === 'string' && /(?:>>?|\btee\b(?:\s+-\w+)*)\s*["']?[^\s"'|;&<>]*handoff[^\s"'|;&<>]*\.md\b/i.test(cmd);
+// 0.31.66: a Bash command that writes a handoff .md: a redirect (>, >>) or tee to a path whose FILE NAME matches *handoff*.md (cat > x <<EOF, echo >>, tee -a); a directory named handoff does not count (isHandoffPath is by file name too).
+export const bashWritesHandoff = (cmd) => typeof cmd === 'string' && /(?:>>?|\btee\b(?:\s+-\w+)*)\s*["']?(?:[^\s"'|;&<>]*[\\/])?[^\s"'|;&<>\\/]*handoff[^\s"'|;&<>\\/]*\.md\b/i.test(cmd);
 
 // Did this worker write a handoff file? Reads the last 4 MB of its transcript only. Counted: a Write, Edit or MultiEdit tool_use whose file is a
 // handoff .md (isHandoffPath), or a Bash command writing one (bashWritesHandoff) and whose tool_result is not an error (a result that is not in the tail does not count against it). A Read never counts.

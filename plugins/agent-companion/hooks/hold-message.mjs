@@ -10,7 +10,7 @@
 
 import { openSync, readSync, closeSync, fstatSync } from 'node:fs';
 import { readStdin, passthrough } from './lib/context.mjs';
-import { MESSAGE_LINE, withoutSelf, clearInstruction, notePendingMessages, readPendingMessages, settlePendingMessages } from './lib/release-watch-state.mjs';
+import { MESSAGE_LINE, withoutSelf, clearInstruction, notePendingMessages, readPendingMessages, settlePendingMessages, takeOwedMessages } from './lib/release-watch-state.mjs';
 
 export const CLEAR_CMD_RE = /release-watch\.mjs["']?\s+clear(?:\s|$)/;
 const ID_RE = /^local_[A-Za-z0-9-]+$/;
@@ -59,6 +59,7 @@ try {
     const cmd = String((p.tool_input && p.tool_input.command) || '');
     if (!CLEAR_CMD_RE.test(cmd)) passthrough();
     const ids = withoutSelf(idsFromOutput(p.tool_response), p.session_id);
+    takeOwedMessages(p.session_id); // this lead was told by the clear's output: no other lead is told again
     if (!ids.length) passthrough();
     notePendingMessages(p.session_id, p.transcript_path, ids);
     process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: clearInstruction(ids) } }));

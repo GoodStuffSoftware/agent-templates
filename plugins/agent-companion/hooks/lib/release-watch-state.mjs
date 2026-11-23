@@ -12,6 +12,12 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync, re
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { stateDir, opt } from './context.mjs';
+import { withFileLock } from './file-lock.mjs';
+
+// Every read-modify-write of release-hold-sessions.json and release-hold-message-pending.json runs under the shared lock helper
+// (lib/file-lock.mjs): a lead's noteHeld and a worker's denied-call noteHeld, or two clears, would otherwise lose one update.
+// Fails open: a lock not taken in 1.5 s runs the write unlocked.
+const locked = (file, fn) => withFileLock(`${file}.lock`, fn, { waitMs: 1500, staleMs: 5000, failOpen: true });
 
 export const COOLDOWN_MS = 4 * 3600e3;
 export const WORSEN_FACTOR = 2;
@@ -283,7 +289,8 @@ export function confirmCandidates({ at = now(), readTail = defaultTail } = {}) {
       if (held && !c.clear) { keep.push(c); continue; }
       const ct = Date.parse(c.at);
       if (matchHumanPrompt(c.transcriptPath, c.sha, ct - MATCH_BEFORE_MS, ct + MATCH_AFTER_MS, readTail)) {
-        if (held) { clear({ by: 'prompt', at }); return { signal: HUMAN_SIGNAL.transcript, cleared: true }; }
+        // The lift records the sessions to message (clear -> markHoldCleared, owed); the next lead prompt claims them (takeOwedMessages).
+        if (held) { const lifted = clear({ by: 'prompt', at }); return { signal: HUMAN_SIGNAL.transcript, cleared: true, heldSessions: lifted.heldSessions }; }
         return ackWrite(f, { session: c.session, promptAt: ct, confirmedAt: at, signal: HUMAN_SIGNAL.transcript });
       }
       if (at - ct > ttl) appendRow({ at: iso(at), event: 'ack-rejected', session: c.session, reason: 'no human record' });
@@ -385,7 +392,7 @@ export function clear({ by = 'operator', at = now() } = {}) {
     } else if (existsSync(paths().hold)) {
       try { unlinkSync(paths().hold); } catch { /* fail open */ }
     }
-    if (out.holdCleared) markHoldCleared(at, by);
+    if (out.holdCleared) markHoldCleared(at, by, out.heldSessions);
     if (out.flagCleared || out.holdCleared) appendRow({ at: iso(at), event: 'clear', by, flagCleared: out.flagCleared, holdCleared: out.holdCleared, ...(out.holdCleared ? { clearedAt: iso(at), heldSessions: out.heldSessions } : {}) });
   } catch { /* fail open */ }
   return out;
@@ -403,15 +410,27 @@ export function noteHeld(p, at = now()) {
   try {
     if (!p || !p.session_id || !isHoldActive()) return false;
     const h = readHold();
-    let f = readHeld();
-    if (!f || f.holdSince !== h.since || f.clearedAt) f = { holdSince: h.since, sessions: [], clearedAt: null, noticed: {} };
-    const rec = { sessionId: String(p.session_id), agentId: p.agent_id ? String(p.agent_id) : null, cwd: p.cwd || null, transcriptPath: p.transcript_path || null, firstSeen: iso(at), lastSeen: iso(at) };
-    const i = f.sessions.findIndex((x) => sessionKey(x) === sessionKey(rec));
-    if (i >= 0) f.sessions[i] = { ...f.sessions[i], cwd: rec.cwd || f.sessions[i].cwd, transcriptPath: rec.transcriptPath || f.sessions[i].transcriptPath, lastSeen: rec.lastSeen };
-    else f.sessions.push(rec);
-    if (f.sessions.length > HELD_CAP) f.sessions = f.sessions.sort((a, b) => Date.parse(a.lastSeen) - Date.parse(b.lastSeen)).slice(-HELD_CAP);
-    return writeJson(paths().heldSessions, f);
+    return locked(paths().heldSessions, () => {
+      let f = readHeld();
+      if (!f || f.holdSince !== h.since || f.clearedAt) f = { holdSince: h.since, sessions: [], clearedAt: null, noticed: {} };
+      const rec = { sessionId: String(p.session_id), agentId: p.agent_id ? String(p.agent_id) : null, cwd: p.cwd || null, transcriptPath: p.transcript_path || null, firstSeen: iso(at), lastSeen: iso(at) };
+      const i = f.sessions.findIndex((x) => sessionKey(x) === sessionKey(rec));
+      if (i >= 0) f.sessions[i] = { ...f.sessions[i], cwd: rec.cwd || f.sessions[i].cwd, transcriptPath: rec.transcriptPath || f.sessions[i].transcriptPath, lastSeen: rec.lastSeen };
+      else f.sessions.push(rec);
+      f.sessions = capHeld(f.sessions);
+      return writeJson(paths().heldSessions, f);
+    });
   } catch { return false; }
+}
+
+// Over the cap, subagent records go first (oldest lastSeen first): a lead that stopped is the one that needs its message.
+const byLastSeen = (a, b) => Date.parse(a.lastSeen) - Date.parse(b.lastSeen);
+export function capHeld(list, cap = HELD_CAP) {
+  if (list.length <= cap) return list;
+  const leads = list.filter((x) => !x.agentId).sort(byLastSeen).slice(-cap);
+  const room = cap - leads.length;
+  const subs = room > 0 ? list.filter((x) => x.agentId).sort(byLastSeen).slice(-room) : [];
+  return [...leads, ...subs].sort(byLastSeen);
 }
 
 // The sessions recorded for the hold now on ([] when none).
@@ -473,32 +492,82 @@ export function notePendingMessages(sessionId, transcriptPath, ids, at = now()) 
   try {
     if (!sessionId || !ids || !ids.length) return false;
     let offset = 0; try { offset = statSync(transcriptPath).size; } catch { /* no transcript: scan from 0 */ }
-    const f = readJson(paths().messagePending) || {};
-    f[sessionId] = { ids: [...new Set(ids)], offset, blocked: false, at: iso(at) };
-    return writeJson(paths().messagePending, f);
+    return locked(paths().messagePending, () => {
+      const f = readJson(paths().messagePending) || {};
+      f[sessionId] = { ids: [...new Set(ids)], offset, blocked: false, at: iso(at) };
+      return writeJson(paths().messagePending, f);
+    });
   } catch { return false; }
 }
 export const readPendingMessages = (sessionId) => { const f = readJson(paths().messagePending); return f && f[sessionId] ? f[sessionId] : null; };
 export function settlePendingMessages(sessionId, patch) {
   try {
-    const f = readJson(paths().messagePending) || {};
-    if (!f[sessionId]) return false;
-    if (patch === null) delete f[sessionId]; else f[sessionId] = { ...f[sessionId], ...patch };
-    return writeJson(paths().messagePending, f);
+    return locked(paths().messagePending, () => {
+      const f = readJson(paths().messagePending) || {};
+      if (!f[sessionId]) return false;
+      if (patch === null) delete f[sessionId]; else f[sessionId] = { ...f[sessionId], ...patch };
+      return writeJson(paths().messagePending, f);
+    });
   } catch { return false; }
 }
 
-function markHoldCleared(at, by) {
-  const f = readHeld();
-  if (f && !f.clearedAt) writeJson(paths().heldSessions, { ...f, clearedAt: iso(at), clearedBy: by });
+// The lift records who is owed a message (owed: ids = desktop ids of the leads, unmapped = leads with no desktop id, claimedBy = the lead that
+// was told to send them). Every path that lifts a hold goes through clear(), so the tick and a confirmed prompt record it like the CLI does.
+function markHoldCleared(at, by, list = []) {
+  locked(paths().heldSessions, () => {
+    const f = readHeld();
+    if (!f || f.clearedAt) return;
+    const leads = list.filter((x) => !x.agentId);
+    const owed = { ids: localIdsOf(list), unmapped: leads.filter((x) => !x.localSessionId).map((x) => ({ sessionId: x.sessionId, cwd: x.cwd || null })), claimedBy: null };
+    writeJson(paths().heldSessions, { ...f, clearedAt: iso(at), clearedBy: by, owed });
+  });
+}
+
+// The lead that claims the owed messages (a lead's next prompt, or the Bash hook that saw the CLI clear) is told to send them. Once only.
+// Returns { ids (minus the claimant's own), unmapped } or null (nothing owed, already claimed, still held, or older than OWED_TTL_MS).
+export const OWED_TTL_MS = 12 * 3600e3;
+export function takeOwedMessages(sessionId, at = now()) {
+  try {
+    if (!sessionId || isHoldActive()) return null;
+    return locked(paths().heldSessions, () => {
+      const f = readHeld();
+      const o = f && f.clearedAt && f.owed;
+      if (!o || o.claimedBy) return null;
+      if (at - Date.parse(f.clearedAt) > OWED_TTL_MS) return null;
+      if (!writeJson(paths().heldSessions, { ...f, owed: { ...o, claimedBy: String(sessionId), claimedAt: iso(at) } })) return null;
+      return { ids: withoutSelf(Array.isArray(o.ids) ? o.ids : [], sessionId), unmapped: (Array.isArray(o.unmapped) ? o.unmapped : []).filter((x) => x.sessionId !== sessionId) };
+    });
+  } catch { return null; }
+}
+
+// The sessions still owed a message after a clear nobody has claimed (for `release-watch.mjs held`); [] when none.
+export function owedSessions(at = now()) {
+  try {
+    if (isHoldActive()) return [];
+    const f = readHeld();
+    return f && f.clearedAt && f.owed && !f.owed.claimedBy && at - Date.parse(f.clearedAt) <= OWED_TTL_MS ? f.sessions : [];
+  } catch { return []; }
+}
+
+// The text a lead gets when it claims the owed messages: the send instruction for mapped leads, and the unmapped leads by Claude Code
+// session id (each still sees the cleared notice on its next prompt). '' when nothing is owed.
+export function owedText(o) {
+  if (!o) return '';
+  const parts = [];
+  if (o.ids.length) parts.push(clearInstruction(o.ids));
+  if (o.unmapped.length) parts.push(`These held leads have no desktop session to message (message by hand; each still sees the cleared notice on its next prompt): ${o.unmapped.map((x) => `${x.sessionId} (cwd ${x.cwd || '?'})`).join('; ')}.`);
+  return parts.join(' ');
 }
 
 // Mark a session as already told (the one whose prompt lifted the hold sees the lift line instead).
 export function markNoticed(sessionId, at = now()) {
   try {
-    const f = readHeld();
-    if (!f || !f.clearedAt || !sessionId) return false;
-    return writeJson(paths().heldSessions, { ...f, noticed: { ...(f.noticed || {}), [sessionId]: iso(at) } });
+    if (!sessionId) return false;
+    return locked(paths().heldSessions, () => {
+      const f = readHeld();
+      if (!f || !f.clearedAt) return false;
+      return writeJson(paths().heldSessions, { ...f, noticed: { ...(f.noticed || {}), [sessionId]: iso(at) } });
+    });
   } catch { return false; }
 }
 

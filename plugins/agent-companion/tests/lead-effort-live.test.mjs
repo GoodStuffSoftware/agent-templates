@@ -75,7 +75,7 @@ test('wording: the high text is exactly the operator-facing wording (pinned)', (
     LEAD_EFFORT_CHECK_TEXT_HIGH,
     'Orchestrating (workers, reviewers, releases)? Before the first spawn and after any resume or compaction, call get_session with session_id "self" and read its effort (if the operator says it was raised, continue). A lead runs at high; at high or above, say nothing about effort. ' +
     'Unattended (scheduledTaskId in get_session, headless or -p run): state the effort once, only if below high. ' +
-    'Interactive and below high: state once, in your first report, the effort you run at and that orchestration is tuned for high. Information only: nothing is asked or held. You cannot change your own effort; the operator can. Then say nothing more about effort. ' +
+    'Interactive and below high: state once, in your first report, the effort you run at and that orchestration is tuned for high; nothing is asked or held. You cannot change your own effort. Then say nothing more about effort. ' +
     'Never raise to max, never lower, never suggest lowering.',
   );
 });

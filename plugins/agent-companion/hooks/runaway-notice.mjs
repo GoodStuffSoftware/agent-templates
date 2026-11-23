@@ -27,7 +27,7 @@
 import { readStdin, passthrough, callerIsSubagent, opt, stateRootPath } from './lib/context.mjs';
 import {
   flagLine as releaseWatchLine, isHoldActive, clear as clearWatch, now as nowMs, noteShown, noteHeld, clearedNotice, markNoticed, noteCandidate, confirmCandidates,
-  matchHumanPrompt, promptSha, CLEAR_WORDS_RE, localIdsOf, clearInstruction, notePendingMessages, withoutSelf,
+  matchHumanPrompt, promptSha, CLEAR_WORDS_RE, notePendingMessages, takeOwedMessages, owedText,
 } from './lib/release-watch-state.mjs';
 import { unattendedReason } from '../scripts/lib/usage/surface.mjs';
 import { drainNotices, renderNotices } from './lib/runaway.mjs';
@@ -63,12 +63,20 @@ try {
         const typedNow = () => (p.origin && p.origin.kind === 'human')
           || matchHumanPrompt(p.transcript_path, promptSha(prompt), at - 120e3, at + 10e3);
         const wantsClear = isHoldActive() && CLEAR_WORDS_RE.test(prompt.trim());
+        // The held sessions owed a local message after ANY lift (this prompt, a confirmed candidate, the tick) are recorded by clear();
+        // the first lead prompt after it claims them and is told to send them (its Stop hook blocks once until it has), like the CLI clear.
+        const owedInstruction = () => {
+          const owed = takeOwedMessages(p.session_id, at);
+          if (!owed) return '';
+          if (owed.ids.length && !notePendingMessages(p.session_id, p.transcript_path, owed.ids, at)) owed.ids = [];
+          return owedText(owed);
+        };
         if (wantsClear && typedNow()) {
-          const lifted = clearWatch({ by: 'prompt' });
+          clearWatch({ by: 'prompt' });
           markNoticed(p.session_id, at);
           watch = '[agent-companion] The release hold is lifted on the operator\'s word: new agents, heavy jobs and running workers carry on.';
-          const ids = withoutSelf(localIdsOf(lifted.heldSessions || []), p.session_id);
-          if (ids.length && notePendingMessages(p.session_id, p.transcript_path, ids)) watch += ' ' + clearInstruction(ids);
+          const extra = owedInstruction();
+          if (extra) watch += ' ' + extra;
         } else {
           confirmCandidates({ at });                      // a candidate from an earlier turn of any session
           // Skip only exact automated markers with no human origin in the payload; the origin or transcript check is the real gate.
@@ -79,6 +87,7 @@ try {
           if (watch && wantsClear) watch += ' The "clear hold" words could not be confirmed as typed by the operator yet: ask the operator to repeat "clear hold", or run the clear command after the operator says so.';
           if (watch && isHoldActive()) noteHeld(p, at);
           if (!watch) watch = clearedNotice(p.session_id, at);
+          if (!isHoldActive()) { const extra = owedInstruction(); if (extra) watch = [watch, extra].filter(Boolean).join(' '); }
           if (watch) noteShown(p.session_id, at);         // after the candidate: this turn's prompt was typed before the line was shown
         }
       }
