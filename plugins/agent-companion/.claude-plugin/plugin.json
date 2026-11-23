@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.63",
+  "version": "0.31.64",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -760,6 +760,12 @@
       "title": "Safe git worktree remove",
       "description": "On by default. A `git worktree remove` of a tree that holds a Windows junction or a directory symlink (a shared node_modules, for instance) is rewritten to scripts/worktree-remove-safe.mjs, which removes each link as a link first, because git follows a junction and empties its target. A PowerShell command is denied with the rewritten command in the text unless resource_gate_powershell_rewrite is true. Not seen: bash -c, xargs, aliases and a prefix that takes a value (sudo -u user git). Off = the command runs exactly as written.",
       "default": true
+    },
+    "wait_loop_cap_minutes": {
+      "type": "number",
+      "title": "Wait-loop cap (minutes)",
+      "description": "Default 60; 0 = off. A background Bash command (run_in_background) that holds an unbounded `until ...; do ... sleep ...; done` or `while` loop is rewritten, by the bash-tail.mjs hook, so the loop ends after this many minutes: it prints `wait-cap: gave up after N min; condition never met` and exits 124, and the agent learns it on the task notification. The deadline is a $SECONDS test inside the loop (no `timeout`, which on Windows Git Bash can be System32's timeout.exe). Loops that already have a bound (timeout, $SECONDS, a counter, date +%s) and foreground commands are left alone. Silent: no transcript note.",
+      "default": 60
     },
     "shared_resources_line": {
       "type": "boolean",
