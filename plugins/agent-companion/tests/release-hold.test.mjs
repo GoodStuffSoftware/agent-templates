@@ -149,7 +149,8 @@ test('subagent-context: held -> next call denied with the hand-off text; handoff
 }));
 
 // ---- prompt clear (runaway-notice.mjs)
-const prompt = (text) => runHook('hooks/runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's-p', prompt: text, cwd: 'x' }, { env: { CLAUDE_CODE_SESSION_ATTENDED: '1' } });
+// A typed prompt carries origin.kind 'human' in the payload; a prompt with no origin proof (older build, wakeup, peer message) never lifts a hold.
+const prompt = (text, origin = { kind: 'human' }) => runHook('hooks/runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's-p', prompt: text, cwd: 'x', ...(origin ? { origin } : {}) }, { env: { CLAUDE_CODE_SESSION_ATTENDED: '1' } });
 const ctxOf = (r) => r.json?.hookSpecificOutput?.additionalContext || '';
 
 test('prompt: "clear hold" from the operator lifts the hold; a task-notification, other prompts and a long text do not', () => withFx(() => {
@@ -162,6 +163,10 @@ test('prompt: "clear hold" from the operator lifts the hold; a task-notification
   assert.equal(existsSync(holdFile()), true);
   prompt(`${'x '.repeat(60)}clear hold`);
   assert.equal(existsSync(holdFile()), true, 'a long text is not a command');
+  prompt('Clear hold', null);
+  assert.equal(existsSync(holdFile()), true, 'the words with no human origin proof never lift it');
+  prompt('clear hold', { kind: 'task-notification' });
+  assert.equal(existsSync(holdFile()), true, 'a non-human origin never lifts it');
   const ok = prompt('Clear hold');
   assert.equal(existsSync(holdFile()), false);
   assert.match(ctxOf(ok), /hold is lifted/);
@@ -191,12 +196,12 @@ const metrics = (tel) => {
   const w = { n: 40, finished: 40, unitsPerWorker: { mean: 1, p50: 0.8, p90: 2 }, peakCtxP90: 100000, over110kPct: 10, over150kPct: 0, noStatusPct: 5, partialPct: 10, blockedPct: 1, hookErrorWorkersPct: 40, apiErrorWorkers: 0, apiNonUsageWorkers: 0 };
   return {
     spawns: { since: 100, base: 700, perHour: { since: 10, base: 10 } }, span: { since: 10, base: 168 },
-    telemetry: tel, bash: { since: { n: 100, failPct: 4 }, base: { n: 500, failPct: 4 } },
+    telemetry: tel, bash: { since: { n: 300, realFails: 12, realFailPct: 4, refusals: 0, refusalPer100: 0 }, base: { n: 500, realFails: 20, realFailPct: 4, refusals: 0, refusalPer100: 0 } }, bashExit: {}, activeHours: { since: 10, base: 100 },
     queueClears: { since: 0, base: 5, perHour: { since: 0, base: 0.03 } },
     workers: { since: { ...w }, base: { ...w } }, hookSignatures: { since: {}, base: {} },
   };
 };
-const names = (m, o) => { try { return evaluate(m, o).map((f) => f.name); } catch (e) { return `threw: ${e.message}`; } };
+const names = (m, o) => { try { return evaluate(m, o).flags.map((f) => f.name); } catch (e) { return `threw: ${e.message}`; } };
 
 test('evaluate: warn and autofix outcomes never flag; a new deny guard flags on its rate per 100 spawns over a floor, not on presence', () => {
   const warns = metrics({ 'denial:poll-guard/warn': bucket(9, 0, 9, 0), 'denial:routing-autofix/autofix': bucket(12, 0, 12, 0) });

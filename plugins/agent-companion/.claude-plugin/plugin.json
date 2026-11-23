@@ -839,6 +839,78 @@
       "description": "The post-release watch (scripts/release-watch.mjs tick, run every 10 minutes by a scheduled job) checks the newest install at +1, +2, +4, +8, +12, +16, +20 and +24 hours. A flagged check opens a flag shown to lead sessions at SessionStart and on every prompt until the operator answers. If nobody answers within this many minutes of the notice, a hold is written (release-hold.json), except for a flag that only says the watch had nothing to measure (usage-source-empty), which never holds. 0 = notify only, never hold. The hold lifts only with `release-watch.mjs clear` or the words 'clear hold' / 'release hold'.",
       "default": 30
     },
+    "release_watch_min_spawns": {
+      "type": "number",
+      "title": "Release watch: minimum spawns for a verdict",
+      "description": "A watch window with fewer agent spawns than this cannot judge the spawn-rate metrics; the check reports 'inconclusive' and the watch keeps going instead of closing clean. Default 30, measured on one busy single-operator machine: 12.6 spawns/h over 7 days (2116 spawns); the 0.31.63 +1h window had 26. A lighter user gets more inconclusive checks and a longer watch, which is the intended failure mode.",
+      "default": 30
+    },
+    "release_watch_min_workers": {
+      "type": "number",
+      "title": "Release watch: minimum workers for a verdict",
+      "description": "A watch window with fewer distinct workers than this cannot judge the per-worker metrics (inconclusive, as for spawns). Default 20, measured on one busy single-operator machine: 17-26 workers per hourly window.",
+      "default": 20
+    },
+    "release_watch_min_bash": {
+      "type": "number",
+      "title": "Release watch: minimum worker Bash calls for a verdict",
+      "description": "A watch window with fewer worker Bash calls than this cannot judge the Bash-failure and queue-denial metrics (inconclusive). Default 200, measured on one busy single-operator machine: 44,992 worker Bash calls over 7 days = 268 per hour.",
+      "default": 200
+    },
+    "release_watch_ack_ttl_minutes": {
+      "type": "number",
+      "title": "Release watch: pending-acknowledgement lifetime (minutes)",
+      "description": "A reply to an open flag whose prompt origin is not marked human is only a candidate: it becomes the acknowledgement once the session transcript shows a human record for it, and a candidate still unconfirmed after this many minutes is rejected. Default 10, matching the 10-minute tick cadence of the scheduled job.",
+      "default": 10
+    },
+    "release_watch_finish_spawns": {
+      "type": "number",
+      "title": "Release watch: spawns needed to finish a watch",
+      "description": "A release watch finishes only after this many spawn rows since the newest install (together with the worker, Bash and active-hour floors below), with a clean last verdict and no open flag. Default 100, measured on one busy single-operator machine: about 8 hours at the 7-day mean of 12.6 spawns per hour; 0.31.61 reached 253 in 8.4 hours.",
+      "default": 100
+    },
+    "release_watch_finish_workers": {
+      "type": "number",
+      "title": "Release watch: worker transcripts needed to finish a watch",
+      "description": "Worker transcripts since the newest install needed to finish a watch. Default 60, measured on the same machine: about 0.6 worker transcripts per spawn row in check windows.",
+      "default": 60
+    },
+    "release_watch_finish_bash": {
+      "type": "number",
+      "title": "Release watch: worker Bash calls needed to finish a watch",
+      "description": "Worker Bash calls since the newest install needed to finish a watch. Default 600, measured on the same machine: about 2 hours at 268 worker Bash calls per hour.",
+      "default": 600
+    },
+    "release_watch_finish_active_hours": {
+      "type": "number",
+      "title": "Release watch: active hours needed to finish a watch",
+      "description": "Distinct clock hours holding at least one spawn row since the newest install. Default 6, measured on the same machine: an evening install (0.31.63) had 2 active hours in its first 4.",
+      "default": 6
+    },
+    "release_watch_extend_hours": {
+      "type": "number",
+      "title": "Release watch: hours added when the activity floors are not reached",
+      "description": "When the last check is done but the finish floors are not met, one more check is added this many hours later. Default 4 (operator rule: 4-hour steps).",
+      "default": 4
+    },
+    "release_watch_cap_hours": {
+      "type": "number",
+      "title": "Release watch: latest hour a watch is extended to",
+      "description": "Extensions stop this many hours after the newest install; the watch then ends as insufficient-data (a flag that never starts a hold). Default 72, which covers a weekend of low use after one working day.",
+      "default": 72
+    },
+    "release_watch_standing": {
+      "type": "boolean",
+      "title": "Release watch: daily standing-health look",
+      "description": "Once a day the tick looks at the last 7 days against fixed ceilings and against the 28 days before them, independent of any release, and shows findings in one line per day. It reports only: it never opens the release flag, starts a hold or affects a verdict. Default on.",
+      "default": true
+    },
+    "release_watch_standing_hours": {
+      "type": "number",
+      "title": "Release watch: hours between standing-health looks",
+      "description": "Minimum hours between two standing-health looks. Default 24 (operator rule: daily).",
+      "default": 24
+    },
     "catchup_note": {
       "type": "boolean",
       "title": "Catch-up note",
