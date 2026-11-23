@@ -611,32 +611,37 @@ test('the ledger keeps every run, not a rolling hundred', () => {
 test('the self-review clause runs the governor before spawning a reviewer, and keeps the subagent route', () => {
   const rung = { model: 'sonnet', effort: 'high', agent: 'ac-sonnet-high' };
   const block = selfReviewBlock(rung);
+  // 0.31.65 trim: the API-review procedure and the reviewer-brief list moved to docs/SELF-REVIEW.md, which the block links.
+  const doc = readFileSync(join(PLUGIN_ROOT, 'docs', 'SELF-REVIEW.md'), 'utf8');
   assert.ok(block.includes('api-credits.mjs" decide review'));
-  assert.ok(block.includes('api-review.mjs" run --brief-file'));
-  assert.ok(block.includes('--model sonnet --effort high'));
-  assert.ok(block.includes('--review-file'));
-  assert.ok(block.includes('no verdict line, no land'));
-  assert.ok(block.includes('run_in_background') && block.includes('it logs itself at 8 minutes and goes on, and only a hung run is stopped'), 'a review can outlive a foreground Bash call (10 minutes), so it runs in the background');
-  assert.ok(!block.includes('15 minutes') && !block.includes('stops itself after'), 'no wall-clock stop is promised');
-  assert.ok(block.includes(`this instruction: "${REVIEW_INSTRUCTION}"`), 'the reviewer brief carries the read-only instruction');
-  assert.ok(!block.includes('can run the affected tests'));
-  assert.ok(block.includes('the API reviewer only reads (read-only tools, no shell: it cannot run even the targeted tests'));
+  assert.ok(block.includes('SELF-REVIEW.md "API review"'), 'the block points at the API procedure');
+  assert.ok(doc.includes('api-review.mjs" run --brief-file'));
+  assert.ok(doc.includes('--model <your reviewer model> [--effort <effort>]'), 'the runner is told the reviewer model and effort');
+  assert.ok(doc.includes('--review-file'));
+  assert.ok(doc.includes('no verdict line, no land'));
+  assert.ok(doc.includes('run_in_background') && doc.includes('it logs itself at 8 minutes and goes on'), 'a review can outlive a foreground Bash call (10 minutes), so it runs in the background');
+  assert.ok(!block.includes('15 minutes') && !block.includes('stops itself after') && !doc.includes('15 minutes') && !doc.includes('stops itself after'), 'no wall-clock stop is promised');
+  assert.ok(doc.includes(REVIEW_INSTRUCTION), 'the reviewer brief carries the read-only instruction (docs/SELF-REVIEW.md, kept equal to REVIEW_INSTRUCTION)');
+  assert.ok(block.includes('SELF-REVIEW.md') && block.includes('Follow the Reviewer instruction in <plugin>/docs/SELF-REVIEW.md'), 'the block tells the reviewer to read the instruction in the doc');
+  assert.ok(!block.includes('can run the affected tests') && !doc.includes('can run the affected tests'));
+  assert.ok(doc.includes('The API reviewer only reads (read-only tools, no shell: it cannot run even the targeted tests'));
   assert.ok(block.includes(`0. ${BATCH_RULE} Keep the raw output of your test runs for the reviewer.`), 'step 0 is the shared batch rule: no chunking, unit tests as you go, e2e once per batch and tree');
   assert.ok(block.includes('0. Finish the task in your brief; at the context handoff notice, hand off as the writer clause on your brief says.'));
-  assert.ok(block.indexOf('0. Finish the task') < block.indexOf('1. List anything you built'));
+  assert.ok(block.indexOf('0. Finish the task') < block.indexOf('1. Remove or flag'));
   // Project tiers: the risk step sits between the commit and the reviewer steps, and the API route is skipped when the cell checks for real.
-  assert.ok(block.indexOf('1. List anything you built') < block.indexOf('2. State your risk') && block.indexOf('2. State your risk') < block.indexOf('3. Only when your cell names a reviewer'));
-  assert.ok(block.includes('the API reviewer has no shell, so skip the API route below'));
-  assert.ok(block.includes('--writer sonnet/high --risk <your risk> --review-file'), 'the API runner is told the risk');
+  assert.ok(block.indexOf('1. Remove or flag') < block.indexOf('2. State `RISK') && block.indexOf('2. State `RISK') < block.indexOf('3. Only when your cell names a reviewer'));
+  assert.ok(block.includes('Unless the cell has the reviewer check the running app, first run'), 'the API route is skipped when the reviewer checks the running app');
+  assert.ok(doc.includes('--writer <your model/effort> --risk <your risk> --review-file'), 'the API runner is told the risk');
   assert.ok(block.includes('Its brief opens with these five lines, as plain text:') && block.includes('   ROLE: reviewer\n   RISK: <your risk>\n   API: no\n   ```'), 'the writer\'s own reviewer carries API: no (one advance per review)');
-  assert.ok(block.includes('you decide your own review, once, with the `decide review` below'), 'S1: the writer decides once; the guard does not decide its reviewer again');
-  assert.ok(block.includes('the raw output of your own test and build runs'), 'the writer still runs the checks and hands over the output');
-  assert.ok(block.includes('Throwaway test code (probes, timing harnesses, temporary diagnostics that never ship) has no review gate'));
-  assert.ok(block.includes('runs at most the tests that cover the changed code when they need no build (plus the project\'s own run command when your cell asks for a check in the running app, as the instruction says): no separate builds, no full suite, no e2e, no CI, no commits, no pushes'));
-  assert.ok(!block.includes('Bash timeout of 600000 ms'));
-  assert.ok(block.includes("brief TEXT goes into that file, never only a path to it"));
-  assert.ok(block.includes('spawn exactly ONE reviewer, in the foreground'));
-  assert.ok(block.includes('API review unavailable'));
+  assert.ok(doc.includes('The reviewer you spawn carries the line `API: no`, so the guard never decides it a second time'), 'the writer decides once; the guard does not decide its reviewer again');
+  assert.ok(doc.includes('the raw output of your own test and build runs'), 'the writer still runs the checks and hands over the output');
+  assert.ok(block.includes('your raw test and build output'), 'the reviewer brief gets the raw output');
+  assert.ok(block.includes('only throwaway test code'), 'throwaway test code has no review gate');
+  assert.ok(doc.includes('runs at most the tests that cover the changed code when they need no build (plus the project\'s own run command when your cell asks for a check in the running app): no separate builds, no full suite, no e2e, no CI, no commits, no pushes'));
+  assert.ok(!doc.includes('Bash timeout of 600000 ms'));
+  assert.ok(doc.includes("the lead's brief TEXT goes into the file, never only a path to it"));
+  assert.ok(block.includes('exactly ONE reviewer, foreground'));
+  assert.ok(doc.includes('API review unavailable'));
   const agent = readFileSync(join(PLUGIN_ROOT, 'agents', 'ac-sonnet-high.md'), 'utf8');
   assert.ok(agent.includes('api-credits.mjs" decide review'), 'the generated rung body carries the clause');
 });
@@ -1110,8 +1115,10 @@ test('record-fallback: a failed review prints its id; the command marks that led
 
 test('self-review protocol: the API path tells the writer to run record-fallback with the review id before the plan reviewer', () => {
   const block = selfReviewBlock({ model: 'sonnet', effort: 'high', agent: 'ac-sonnet-high' });
-  assert.match(block, /\(review id: <id>\)/);
-  assert.match(block, /api-credits\.mjs" record-fallback <id> --reason "<why>"/);
+  const doc = readFileSync(join(PLUGIN_ROOT, 'docs', 'SELF-REVIEW.md'), 'utf8'); // the fallback step lives in the linked doc since 0.31.65
+  assert.ok(block.includes('SELF-REVIEW.md "API review"'));
+  assert.match(doc, /\(review id: <id>\)/);
+  assert.match(doc, /api-credits\.mjs" record-fallback <id> --reason "<why>"/);
 });
 
 test('real-review count: probe and measure rows are left out; stopped and fallen-back reviews are counted with their spend', () => {

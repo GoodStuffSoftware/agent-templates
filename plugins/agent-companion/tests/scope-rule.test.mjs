@@ -14,7 +14,7 @@ import {
 import { selfReviewBlock } from '../hooks/lib/self-review.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const STEP = 'List anything you built that the brief did not ask for; remove it or flag it to the lead.';
+const STEP = 'Remove or flag to the lead anything you built that the brief did not ask for.';
 
 test('clause text is the approved wording', () => {
   assert.equal(SCOPE_WRITER_CLAUSE, 'Build the smallest change that meets the ask. Before creating a script, workflow, module, test file or feature the brief does not name, stop and report the proposal to the lead instead of building it.');
