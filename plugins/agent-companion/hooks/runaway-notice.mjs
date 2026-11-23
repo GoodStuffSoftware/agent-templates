@@ -27,7 +27,7 @@
 import { readStdin, passthrough, callerIsSubagent, opt, stateRootPath } from './lib/context.mjs';
 import {
   flagLine as releaseWatchLine, isHoldActive, clear as clearWatch, now as nowMs, noteShown, noteHeld, clearedNotice, markNoticed, noteCandidate, confirmCandidates,
-  matchHumanPrompt, promptSha, CLEAR_WORDS_RE,
+  matchHumanPrompt, promptSha, CLEAR_WORDS_RE, localIdsOf, clearInstruction, notePendingMessages, withoutSelf,
 } from './lib/release-watch-state.mjs';
 import { unattendedReason } from '../scripts/lib/usage/surface.mjs';
 import { drainNotices, renderNotices } from './lib/runaway.mjs';
@@ -64,9 +64,11 @@ try {
           || matchHumanPrompt(p.transcript_path, promptSha(prompt), at - 120e3, at + 10e3);
         const wantsClear = isHoldActive() && CLEAR_WORDS_RE.test(prompt.trim());
         if (wantsClear && typedNow()) {
-          clearWatch({ by: 'prompt' });
+          const lifted = clearWatch({ by: 'prompt' });
           markNoticed(p.session_id, at);
           watch = '[agent-companion] The release hold is lifted on the operator\'s word: new agents, heavy jobs and running workers carry on.';
+          const ids = withoutSelf(localIdsOf(lifted.heldSessions || []), p.session_id);
+          if (ids.length && notePendingMessages(p.session_id, p.transcript_path, ids)) watch += ' ' + clearInstruction(ids);
         } else {
           confirmCandidates({ at });                      // a candidate from an earlier turn of any session
           // Skip only exact automated markers with no human origin in the payload; the origin or transcript check is the real gate.

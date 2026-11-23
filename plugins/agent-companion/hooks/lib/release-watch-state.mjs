@@ -9,8 +9,7 @@
 // AGENT_COMPANION_FAKE_NOW moves the clock for tests. Nothing here throws.
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync, renameSync, mkdirSync, openSync, fstatSync, readSync, closeSync, readdirSync, statSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { stateDir, opt } from './context.mjs';
 
@@ -32,6 +31,7 @@ export const paths = () => {
     checks: join(d, 'release-watch-checks.jsonl'),
     standing: join(d, 'release-watch-standing.json'),
     heldSessions: join(d, 'release-hold-sessions.json'),
+    messagePending: join(d, 'release-hold-message-pending.json'),
   };
 };
 
@@ -369,7 +369,7 @@ export function maybeHold({ holdMinutes, at = now() } = {}) {
 export function clear({ by = 'operator', at = now() } = {}) {
   const out = { flagCleared: false, holdCleared: false, heldSessions: [] };
   try {
-    out.heldSessions = heldSessions();
+    out.heldSessions = withLocalIds(heldSessions());
     const f = readFlag();
     if (f && !f.clearedAt) {
       writeJson(paths().flag, { ...f, clearedAt: iso(at), clearedBy: by, cooldown: answerLevels(f, at, f.cooldown) });
@@ -395,7 +395,6 @@ export function clear({ by = 'operator', at = now() } = {}) {
 // Every session shown the hold notice or refused by the hold is recorded (a lead by session id; a subagent by session id and agent id),
 // so the operator can message each one after the clear and each lead gets a one-time "cleared" notice on its next prompt.
 export const HELD_CAP = 200;
-const pluginRoot = () => process.env.CLAUDE_PLUGIN_ROOT || join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const sessionKey = (x) => `${x.sessionId}|${x.agentId || ''}`;
 const readHeld = () => { const f = readJson(paths().heldSessions); return f && Array.isArray(f.sessions) ? f : null; };
 
@@ -424,14 +423,69 @@ export function heldSessions() {
   } catch { return []; }
 }
 
-// One text for `held` and `clear`: counts, then one line per session, then "message each: <lead ids>".
+// ---- desktop session ids ----
+// The Claude desktop app keeps one JSON file per session under %APPDATA%/Claude/claude-code-sessions/<account>/<org>/local_<uuid>.json
+// ({ sessionId: "local_<uuid>", cliSessionId: <the Claude Code session id>, cwd, ... }). Read only. AGENT_COMPANION_DESKTOP_SESSIONS_DIR moves it for tests.
+export const desktopStoreDir = () => process.env.AGENT_COMPANION_DESKTOP_SESSIONS_DIR || (process.env.APPDATA ? join(process.env.APPDATA, 'Claude', 'claude-code-sessions') : null);
+
+// Map of Claude Code session id -> desktop session id (local_<uuid>); empty when the store is missing. Never throws.
+export function desktopSessionMap(dir = desktopStoreDir()) {
+  const m = new Map();
+  const walk = (d, depth) => {
+    let names; try { names = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of names) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) { if (depth < 3) walk(p, depth + 1); continue; }
+      if (!/^local_.+\.json$/.test(e.name)) continue;
+      const j = readJson(p);
+      if (j && typeof j.cliSessionId === 'string' && /^local_/.test(String(j.sessionId || ''))) m.set(j.cliSessionId, j.sessionId);
+    }
+  };
+  try { if (dir) walk(dir, 0); } catch { /* fail open */ }
+  return m;
+}
+
+// Each lead entry gets localSessionId (the desktop id, or null when the store has no such session). Subagent entries are left as they are.
+export function withLocalIds(list, map = desktopSessionMap()) {
+  return list.map((x) => (x.agentId ? x : { ...x, localSessionId: map.get(x.sessionId) || null }));
+}
+
+export const MESSAGE_LINE = 'Send each of these sessions a local message now: ';
+export const localIdsOf = (list) => list.filter((x) => !x.agentId && x.localSessionId).map((x) => x.localSessionId);
+
+// One text for `held` and `clear`: counts, one line per lead, then the local ids to message and the leads with no desktop id.
 export function heldText(list) {
   if (!list.length) return 'held sessions: none recorded';
   const leads = list.filter((x) => !x.agentId); const subs = list.filter((x) => x.agentId);
   const lines = [`held sessions: ${leads.length} lead, ${subs.length} subagent`];
-  for (const x of leads) lines.push(`lead ${x.sessionId}  cwd ${x.cwd || '?'}  seen ${x.firstSeen} .. ${x.lastSeen}`);
-  if (leads.length) lines.push(`message each: ${leads.map((x) => x.sessionId).join(' ')}`);
+  for (const x of leads) lines.push(`lead ${x.sessionId}  local ${x.localSessionId || 'unmapped'}  cwd ${x.cwd || '?'}  seen ${x.firstSeen} .. ${x.lastSeen}`);
+  const ids = localIdsOf(list);
+  const un = leads.filter((x) => !x.localSessionId);
+  if (ids.length) lines.push(`${MESSAGE_LINE}${ids.join(' ')}`);
+  if (un.length) lines.push(`No desktop session found for these (message by hand): ${un.map((x) => `${x.sessionId} (cwd ${x.cwd || '?'})`).join('; ')}`);
   return lines.join('\n');
+}
+
+// ---- the local messages owed after a clear ----
+// Set by the PostToolUse hook on the clear (or the prompt that lifts the hold) for the session that ran it; the Stop hook reads it.
+// { [sessionId]: { ids[], offset (transcript size when set), blocked } }
+export function notePendingMessages(sessionId, transcriptPath, ids, at = now()) {
+  try {
+    if (!sessionId || !ids || !ids.length) return false;
+    let offset = 0; try { offset = statSync(transcriptPath).size; } catch { /* no transcript: scan from 0 */ }
+    const f = readJson(paths().messagePending) || {};
+    f[sessionId] = { ids: [...new Set(ids)], offset, blocked: false, at: iso(at) };
+    return writeJson(paths().messagePending, f);
+  } catch { return false; }
+}
+export const readPendingMessages = (sessionId) => { const f = readJson(paths().messagePending); return f && f[sessionId] ? f[sessionId] : null; };
+export function settlePendingMessages(sessionId, patch) {
+  try {
+    const f = readJson(paths().messagePending) || {};
+    if (!f[sessionId]) return false;
+    if (patch === null) delete f[sessionId]; else f[sessionId] = { ...f[sessionId], ...patch };
+    return writeJson(paths().messagePending, f);
+  } catch { return false; }
 }
 
 function markHoldCleared(at, by) {
@@ -461,11 +515,9 @@ export function clearedNotice(sessionId, at = now()) {
   } catch { return null; }
 }
 
-// What a held session is told to do. lead: one recurring cron polls status; subagent: write the handoff and stop; unknown caller: nothing extra.
+// What a held session is told to do. lead: stop and wait for the local message sent at the clear; subagent: write the handoff and stop; unknown caller: nothing extra.
 export function holdWaitText(kind) {
-  if (kind === 'lead') {
-    return ` Arm one recurring CronCreate every 20 minutes that runs \`node ${pluginRoot().replace(/\\/g, '/')}/scripts/release-watch.mjs status\`; while it shows a hold, end that turn with no output; once it shows none, delete the cron and resume.`;
-  }
+  if (kind === 'lead') return ' Stop and wait: end your turn now. A local message arrives in this session when the hold clears; do not poll.';
   if (kind === 'subagent') return ' Write your handoff and stop; your lead resumes you after the clear.';
   return '';
 }
@@ -526,4 +578,15 @@ export function holdDenyMessage(what = 'new work', p = null) {
       + 'Tell the operator at once. Only the operator lifts it, by saying "clear hold"; do not try to lift it yourself. The lead may still answer the operator; leases already granted keep running.'
       + holdWaitText(kindOf(p));
   } catch { return null; }
+}
+
+// ---- the lead's instruction after a clear ----
+export function clearInstruction(ids) {
+  return `[agent-companion] The hold is cleared. ${MESSAGE_LINE}${ids.join(' ')}. Send each one SendMessage {to: "<id>"} or mcp__ccd_session_mgmt__send_message {session_id: "<id>"} saying the hold is cleared and it should resume from its handoff. A stopped session never sees another prompt, so this message is how it wakes; your turn is blocked once if any of them is missing.`;
+}
+
+// The ids minus the session that ran the clear (it needs no message to itself).
+export function withoutSelf(ids, sessionId) {
+  const own = desktopSessionMap().get(sessionId);
+  return own ? ids.filter((x) => x !== own) : ids;
 }

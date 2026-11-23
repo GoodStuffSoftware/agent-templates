@@ -4,7 +4,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, appendFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -330,8 +330,8 @@ const promptAs = (sid, text, origin = { kind: 'human' }) => runHook('hooks/runaw
 test('hold notice records the lead session; after the clear each recorded lead gets the cleared notice once, others never', () => withFx(() => {
   putHold(HOLD);
   const shown = promptAs('lead-a', 'status?');
-  assert.match(ctxOf(shown), /CronCreate every 20 minutes/);
-  assert.match(ctxOf(shown), /release-watch\.mjs status/);
+  assert.match(ctxOf(shown), /Stop and wait: end your turn now\. A local message arrives/);
+  assert.doesNotMatch(ctxOf(shown), /CronCreate|cron/);
   promptAs('lead-a', 'and now?');
   promptAs('lead-b', 'hello');
   const l = sessionsOf();
@@ -355,4 +355,73 @@ test('subagent denied by the hold: handoff-and-stop wording only, no cron; the d
   assert.match(reason(denied), /Write your handoff and stop/);
   assert.doesNotMatch(reason(denied), /CronCreate/);
   assert.ok(sessionsOf().some((x) => x.agentId), 'recorded with its agent id');
+}));
+
+// ---- the local message each held lead is owed after a clear (hooks/hold-message.mjs) ----
+const L_A = 'local_aaaa1111-0000-4000-8000-000000000001';
+const L_B = 'local_bbbb2222-0000-4000-8000-000000000002';
+const L_SELF = 'local_cccc3333-0000-4000-8000-000000000003';
+const clearOut = (...ids) => `cleared (flag true, hold true)\nheld sessions: ${ids.length} lead, 0 subagent\nSend each of these sessions a local message now: ${ids.join(' ')}\n`;
+const clearPayload = (tp, stdout, command = 'node /p/scripts/release-watch.mjs clear --by operator') => ({ hook_event_name: 'PostToolUse', session_id: 'lead-self', transcript_path: tp, tool_name: 'Bash', tool_input: { command }, tool_response: { stdout } });
+const stopPayload = (tp, extra = {}) => ({ hook_event_name: 'Stop', session_id: 'lead-self', transcript_path: tp, ...extra });
+const sendUse = (name, input) => JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't' + Math.random(), name, input }] } }) + '\n';
+const pendingFile = () => join(process.env.AGENT_COMPANION_STATE_DIR, 'state', 'release-hold-message-pending.json');
+
+test('hold-message post: a Bash clear adds the send-a-local-message instruction with the ids and records the owed ids; other commands add nothing', () => withFx((fx) => {
+  const tp = join(fx.dir, 't.jsonl'); writeFileSync(tp, 'x\n');
+  const r = runHook('hooks/hold-message.mjs', clearPayload(tp, clearOut(L_A, L_B)), { args: ['--event', 'post'] });
+  assert.match(ctxOf(r), new RegExp(`Send each of these sessions a local message now: ${L_A} ${L_B}`));
+  assert.match(ctxOf(r), /SendMessage/); assert.match(ctxOf(r), /mcp__ccd_session_mgmt__send_message/);
+  assert.deepEqual(JSON.parse(readFileSync(pendingFile(), 'utf8'))['lead-self'].ids, [L_A, L_B]);
+  assert.equal(ctxOf(runHook('hooks/hold-message.mjs', clearPayload(tp, clearOut(L_A), 'node /p/scripts/release-watch.mjs status'), { args: ['--event', 'post'] })), '');
+  assert.equal(ctxOf(runHook('hooks/hold-message.mjs', clearPayload(tp, 'cleared (flag true, hold true)\nheld sessions: none recorded\n'), { args: ['--event', 'post'] })), '', 'no ids: nothing to say');
+  assert.equal(ctxOf(runHook('hooks/hold-message.mjs', { ...clearPayload(tp, clearOut(L_A)), agent_id: 'sub-1' }, { args: ['--event', 'post'] })), '', 'a subagent is not the lead');
+}));
+
+test('hold-message post: the session that ran the clear is not told to message itself', () => withFx((fx) => {
+  const desk = join(fx.dir, 'desk', 'acct', 'org'); mkdirSync(desk, { recursive: true });
+  writeFileSync(join(desk, L_SELF + '.json'), JSON.stringify({ sessionId: L_SELF, cliSessionId: 'lead-self' }));
+  const r = runHook('hooks/hold-message.mjs', clearPayload(join(fx.dir, 'none.jsonl'), clearOut(L_SELF, L_B)), { args: ['--event', 'post'], env: { AGENT_COMPANION_DESKTOP_SESSIONS_DIR: join(fx.dir, 'desk') } });
+  assert.doesNotMatch(ctxOf(r), new RegExp(L_SELF)); assert.match(ctxOf(r), new RegExp(L_B));
+}));
+
+test('hold-message stop: blocks once naming the ids not yet messaged; counts SendMessage to and ccd send_message session_id since the clear; never a second block', () => withFx((fx) => {
+  const tp = join(fx.dir, 't.jsonl');
+  writeFileSync(tp, sendUse('SendMessage', { to: L_A, message: 'before the clear: does not count' }));
+  runHook('hooks/hold-message.mjs', clearPayload(tp, clearOut(L_A, L_B)), { args: ['--event', 'post'] });
+  assert.equal(runHook('hooks/hold-message.mjs', stopPayload(tp, { agent_id: 'sub-1' }), { args: ['--event', 'stop'] }).json, null, 'a subagent end is never blocked');
+  appendFileSync(tp, sendUse('SendMessage', { to: L_A, message: 'hold cleared, resume' }));
+  const b = runHook('hooks/hold-message.mjs', stopPayload(tp), { args: ['--event', 'stop'] });
+  assert.equal(b.json.decision, 'block');
+  assert.match(b.json.reason, new RegExp(L_B)); assert.doesNotMatch(b.json.reason, new RegExp(L_A));
+  assert.equal(runHook('hooks/hold-message.mjs', stopPayload(tp), { args: ['--event', 'stop'] }).json, null, 'one block at most');
+}));
+
+test('hold-message stop: every id messaged (either tool) -> no block and the owed record is dropped; no record -> silent', () => withFx((fx) => {
+  const tp = join(fx.dir, 't.jsonl'); writeFileSync(tp, '');
+  assert.equal(runHook('hooks/hold-message.mjs', stopPayload(tp), { args: ['--event', 'stop'] }).json, null, 'nothing owed');
+  runHook('hooks/hold-message.mjs', clearPayload(tp, clearOut(L_A, L_B)), { args: ['--event', 'post'] });
+  appendFileSync(tp, sendUse('SendMessage', { to: L_A, message: 'resume' }) + sendUse('mcp__ccd_session_mgmt__send_message', { session_id: L_B, message: 'resume' }));
+  assert.equal(runHook('hooks/hold-message.mjs', stopPayload(tp), { args: ['--event', 'stop'] }).json, null);
+  assert.equal(JSON.parse(readFileSync(pendingFile(), 'utf8'))['lead-self'], undefined);
+}));
+
+test('hold-message stop: fails open on an unreadable transcript path (still blocks only once) and on a broken record file', () => withFx((fx) => {
+  runHook('hooks/hold-message.mjs', clearPayload(join(fx.dir, 'gone.jsonl'), clearOut(L_A)), { args: ['--event', 'post'] });
+  assert.equal(runHook('hooks/hold-message.mjs', stopPayload(join(fx.dir, 'gone.jsonl')), { args: ['--event', 'stop'] }).json.decision, 'block');
+  assert.equal(runHook('hooks/hold-message.mjs', stopPayload(join(fx.dir, 'gone.jsonl')), { args: ['--event', 'stop'] }).json, null);
+  writeFileSync(pendingFile(), '{broken');
+  assert.equal(runHook('hooks/hold-message.mjs', stopPayload(join(fx.dir, 'gone.jsonl')), { args: ['--event', 'stop'] }).json, null);
+}));
+
+test('the prompt that lifts the hold also gets the instruction for the other mapped held leads', () => withFx((fx) => {
+  const desk = join(fx.dir, 'desk', 'acct', 'org'); mkdirSync(desk, { recursive: true });
+  writeFileSync(join(desk, L_A + '.json'), JSON.stringify({ sessionId: L_A, cliSessionId: 'lead-a' }));
+  const e = { CLAUDE_CODE_SESSION_ATTENDED: '1', AGENT_COMPANION_DESKTOP_SESSIONS_DIR: join(fx.dir, 'desk') };
+  const as = (sid, text) => runHook('hooks/runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: sid, prompt: text, cwd: '/w/demo', transcript_path: '/t/demo.jsonl', origin: { kind: 'human' } }, { env: e });
+  putHold(HOLD);
+  as('lead-a', 'status?');
+  const ok = as('lead-b', 'clear hold');
+  assert.match(ctxOf(ok), /hold is lifted/);
+  assert.match(ctxOf(ok), new RegExp(`Send each of these sessions a local message now: ${L_A}`));
 }));
