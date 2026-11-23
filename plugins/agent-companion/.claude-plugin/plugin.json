@@ -839,6 +839,30 @@
       "description": "The post-release watch (scripts/release-watch.mjs tick, run every 10 minutes by a scheduled job) checks the newest install at +1, +2, +4, +8, +12, +16, +20 and +24 hours. A flagged check opens a flag shown to lead sessions at SessionStart and on every prompt until the operator answers. If nobody answers within this many minutes of the notice, a hold is written (release-hold.json), except for a flag that only says the watch had nothing to measure (usage-source-empty), which never holds. 0 = notify only, never hold. The hold lifts only with `release-watch.mjs clear` or the words 'clear hold' / 'release hold'.",
       "default": 30
     },
+    "release_watch_min_spawns": {
+      "type": "number",
+      "title": "Release watch: minimum spawns for a verdict",
+      "description": "A watch window with fewer agent spawns than this cannot judge the spawn-rate metrics; the check reports 'inconclusive' and the watch keeps going instead of closing clean. Default 30, measured on one busy single-operator machine: 12.6 spawns/h over 7 days (2116 spawns); the 0.31.63 +1h window had 26. A lighter user gets more inconclusive checks and a longer watch, which is the intended failure mode.",
+      "default": 30
+    },
+    "release_watch_min_workers": {
+      "type": "number",
+      "title": "Release watch: minimum workers for a verdict",
+      "description": "A watch window with fewer distinct workers than this cannot judge the per-worker metrics (inconclusive, as for spawns). Default 20, measured on one busy single-operator machine: 17-26 workers per hourly window.",
+      "default": 20
+    },
+    "release_watch_min_bash": {
+      "type": "number",
+      "title": "Release watch: minimum worker Bash calls for a verdict",
+      "description": "A watch window with fewer worker Bash calls than this cannot judge the Bash-failure and queue-denial metrics (inconclusive). Default 200, measured on one busy single-operator machine: 44,992 worker Bash calls over 7 days = 268 per hour.",
+      "default": 200
+    },
+    "release_watch_ack_ttl_minutes": {
+      "type": "number",
+      "title": "Release watch: pending-acknowledgement lifetime (minutes)",
+      "description": "A reply to an open flag whose prompt origin is not marked human is only a candidate: it becomes the acknowledgement once the session transcript shows a human record for it, and a candidate still unconfirmed after this many minutes is rejected. Default 10, matching the 10-minute tick cadence of the scheduled job.",
+      "default": 10
+    },
     "catchup_note": {
       "type": "boolean",
       "title": "Catch-up note",

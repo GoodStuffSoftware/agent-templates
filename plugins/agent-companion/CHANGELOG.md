@@ -2,6 +2,10 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.64 (unreleased)
+
+- **Release watch v2, stage 1: human-only replies, minimum evidence, harness refusals, status.** An open flag is answered only by a human prompt (payload origin `human`, or a candidate the next tick confirms against a human record in the transcript); task notifications, peer messages and prompts with no origin never answer it. Every check now returns a verdict (`ok`, `flagged`, `inconclusive`) with its metrics: a window below the evidence floors (options `release_watch_min_spawns` 30, `release_watch_min_workers` 20, `release_watch_min_bash` 200) is `inconclusive` and the watch keeps going instead of closing clean; rolling windows sum inconclusive checks. Harness refusals are their own metric and flag (`harness-refusals`, never a hold). New option `release_watch_ack_ttl_minutes` (10). `status` prints the verdict and metric rows per check. Known gap: the queue-denied count has no cd-prefix split (the gate rows carry no reason field). Measurements behind the defaults: `docs/DEFAULTS-ENVIRONMENT.md`.
+
 ## 0.31.63 — 2026-11-22
 
 - **The spawn guard routes reviews to the API credits (options `api_review_route` off|writers|all, `api_review_high` plan|api).** A review spawn (a parity TYPE) with a diff range in its brief is decided by the credit governor inside the guard and, on `api`, rewritten into an `ac-haiku` run of `api-review.mjs` (the original brief kept in `state/review-briefs/`); RISK high, an Opus review, `API: no`, no or two competing diff ranges, a brief whose API run failed in the last 30 minutes, a reviewer's own spawn and any error pass through as written. `decide --peek` answers without advancing the alternation counter; review-verdicts rows carry `route` and `route_reason`, `api-review.mjs` writes one `route: api` row per API review, and `api-credits.mjs status` prints the API share of all reviews for today and 7 days. Default off; this environment's values are in `docs/DEFAULTS-ENVIRONMENT.md`.
