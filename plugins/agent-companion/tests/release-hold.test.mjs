@@ -210,3 +210,114 @@ test('evaluate: warn and autofix outcomes never flag; a new deny guard flags on 
   assert.deepEqual(names(metrics({ 'denial:new-guard/deny': bucket(5, 0, 4, 0) })), [], 'present but under the floor');
   assert.deepEqual(names(metrics({ 'denial:new-guard/deny': bucket(2, 0, 30, 0) })), [], 'too few hits');
 });
+
+// ---- 0.31.64 ack fixes: transcript scan depth, fresh-session ack, tick confirms "clear hold", legacy-ack window
+import * as S from '../hooks/lib/release-watch-state.mjs';
+
+const FLAG = [{ name: 'queue-clears', value: 3.6, detail: 'x' }];
+let flagSeq = 0;
+const freshFlag = () => [{ name: `queue-flag-${++flagSeq}`, value: 3.6, detail: 'x' }]; // a new name each time: an answered name is on cooldown
+const iso = (t) => new Date(t).toISOString();
+const urec = (at, text, origin = { kind: 'human' }) => JSON.stringify({ type: 'user', ...(origin ? { origin } : {}), timestamp: iso(at), message: { content: text } });
+const filler = (at, bytes) => JSON.stringify({ type: 'assistant', timestamp: iso(at), message: { content: [{ type: 'text', text: 'x'.repeat(bytes) }] } });
+const mkTranscript = (fx, name, lines) => { const p = join(fx.dir, `${name}.jsonl`); writeFileSync(p, lines.join('\n') + '\n'); return p; };
+const readFlagNow = () => S.readFlag();
+const hookEnv = { env: { CLAUDE_CODE_SESSION_ATTENDED: '1', AC_ATTENDED: '1' } };
+const promptHook = (session, text, extra = {}) => runHook('hooks/runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: session, prompt: text, cwd: 'x', ...extra }, hookEnv);
+const startHook = (session) => runHook('hooks/scout-surface.mjs', { hook_event_name: 'SessionStart', session_id: session, source: 'startup', cwd: 'x' }, hookEnv);
+
+test('confirm: the human record is found even when more than 256 KB follows it; past the 16 MB cap it is not', () => withFx((fx) => {
+  const t0 = Date.now();
+  S.openFlag({ version: '9', flags: FLAG, at: t0 - 60e3 });
+  S.noteShown('s1', t0 - 30e3);
+  const lines = [urec(t0 - 1000, 'looks fine'), ...Array.from({ length: 12 }, (_, i) => filler(t0 + i, 64 * 1024))]; // ~768 KB after the human record
+  const tp = mkTranscript(fx, 'busy', lines);
+  assert.ok(S.noteCandidate({ sessionId: 's1', transcriptPath: tp, prompt: 'looks fine', at: t0 }));
+  const ack = S.confirmCandidates({ at: t0 + 5000 });
+  assert.ok(ack, 'confirmed from a transcript whose end holds only filler');
+  assert.equal(ack.signal, 'transcript-origin-human');
+  assert.ok(readFlagNow().ackedAt);
+  // Past the hard cap the record is out of reach: no ack, and the candidate is kept until the TTL.
+  S.openFlag({ version: '10', flags: [{ name: 'queue-denied', value: 20, detail: 'y' }], at: t0 + 10e3 });
+  S.noteShown('s1', t0 + 11e3);
+  const big = [urec(t0 + 12e3, 'second reply'), ...Array.from({ length: 17 }, (_, i) => filler(t0 + 13e3 + i, 1024 * 1024))];
+  const tp2 = mkTranscript(fx, 'huge', big);
+  assert.ok(S.noteCandidate({ sessionId: 's1', transcriptPath: tp2, prompt: 'second reply', at: t0 + 14e3 }));
+  assert.equal(S.confirmCandidates({ at: t0 + 15e3 }), null, 'a record more than 16 MB back is not read');
+}));
+
+test('fresh session: the flag shown at SessionStart is recorded, so the first reply typed there acks (also one starting with "[" or "<")', () => withFx(() => {
+  for (const reply of ['sounds good', '[ok] ship it', '<3 thanks, go on']) {
+    S.openFlag({ version: '9', flags: freshFlag(), at: Date.now() });
+    const out = startHook('fresh-1');
+    assert.match(out.stdout, /RELEASE WATCH 9/, 'SessionStart shows the flag');
+    assert.ok(readFlagNow().shownTo['fresh-1'], 'SessionStart recorded the flag as shown to the session');
+    const r = promptHook('fresh-1', reply, { origin: { kind: 'human' } });
+    assert.doesNotMatch(r.stdout || '', /RELEASE WATCH/, `answered by the first reply: ${reply}`);
+    const f = readFlagNow();
+    assert.ok(f.ackedAt, `acked: ${reply}`);
+    assert.equal(f.ack.signal, 'payload-origin-human');
+    S.writeJson(S.paths().flag, { ...f, clearedAt: iso(Date.now()) });
+  }
+}));
+
+test('prompt: only exact automated markers are skipped; a bracketed reply with no origin is still a candidate for the transcript check', () => withFx(() => {
+  S.openFlag({ version: '9', flags: FLAG, at: Date.now() });
+  startHook('s-m');
+  promptHook('s-m', '<task-notification>done</task-notification>', { origin: null });
+  assert.deepEqual(readFlagNow().candidates, [], 'a task-notification text is no candidate');
+  promptHook('s-m', '[bracket reply]');
+  assert.equal(readFlagNow().candidates.length, 1);
+  assert.equal(readFlagNow().ackedAt, null);
+}));
+
+test('transcript only: no origin in the payload, the typed record in the transcript acks on the next hook run; a task-notification or scheduled record with the same text does not', () => withFx((fx) => {
+  for (const [name, origin, acks] of [['human', { kind: 'human' }, true], ['notification', { kind: 'task-notification' }, false], ['scheduled', { kind: 'scheduled' }, false]]) {
+    S.openFlag({ version: '9', flags: freshFlag(), at: Date.now() });
+    const sid = `s-t-${name}`;
+    promptHook(sid, 'first look');                       // shows the flag: the session is now recorded as shown
+    assert.ok(readFlagNow().shownTo[sid]);
+    const tp = mkTranscript(fx, `tr-${name}`, [urec(Date.now() + 200, 'real reply here', origin)]);
+    promptHook(sid, 'real reply here', { transcript_path: tp });   // payload carries no origin: a candidate
+    assert.equal(readFlagNow().ackedAt, null, 'not acked on the turn itself');
+    assert.equal(readFlagNow().candidates.length, 1);
+    promptHook(sid, 'anything', { transcript_path: tp });          // the next hook run confirms against the transcript
+    const f = readFlagNow();
+    if (acks) { assert.ok(f.ackedAt, 'acked from the transcript'); assert.equal(f.ack.signal, 'transcript-origin-human'); }
+    else assert.equal(f.ackedAt, null, `a ${name} record never acks`);
+    S.writeJson(S.paths().flag, { ...f, clearedAt: iso(Date.now()) });
+  }
+}));
+
+test('hold: the tick confirms a pending "clear hold" from the transcript, so the operator need not repeat it', () => withFx((fx) => {
+  const t0 = Date.now();
+  S.openFlag({ version: '9', flags: FLAG, at: t0 - 3600e3 });
+  S.noteShown('s1', t0 - 60e3);
+  putHold({ ...HOLD, since: iso(t0 - 30e3) });
+  assert.equal(S.isHoldActive(), true);
+  const tp = mkTranscript(fx, 'clr', [urec(t0 - 500, 'clear hold')]);
+  assert.ok(S.noteCandidate({ sessionId: 's1', transcriptPath: tp, prompt: 'clear hold', at: t0 }), 'recorded during the hold');
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: t0 + 5000 }), null);
+  assert.equal(S.isHoldActive(), false, 'the tick lifted the hold');
+  // A candidate whose record is not typed leaves the hold in place.
+  S.openFlag({ version: '9', flags: freshFlag(), at: t0 - 3600e3 });
+  S.noteShown('s1', t0 + 1000);
+  putHold({ ...HOLD, since: iso(t0) });
+  const tp2 = mkTranscript(fx, 'clr2', [urec(t0 + 60e3, 'clear hold', { kind: 'scheduled' })]);
+  S.writeJson(S.paths().flag, { ...readFlagNow(), candidates: [] });
+  assert.ok(S.noteCandidate({ sessionId: 's1', transcriptPath: tp2, prompt: 'clear hold', at: t0 + 61e3 }));
+  S.maybeHold({ holdMinutes: 30, at: t0 + 62e3 });
+  assert.equal(S.isHoldActive(), true);
+}));
+
+test('findHumanRecordNear: a slow hook (up to 30 s) still finds the typed record; with a text hash only that text counts', () => withFx((fx) => {
+  const t0 = Date.parse('2026-03-01T12:00:00Z');
+  const proj = join(fx.dir, 'projects', 'p1'); mkdirSync(proj, { recursive: true });
+  writeFileSync(join(proj, 'sess-a.jsonl'), [urec(t0, 'ok go'), urec(t0 + 1000, 'sched', { kind: 'scheduled' })].join('\n') + '\n');
+  const find = (o) => S.findHumanRecordNear({ projectsDir: join(fx.dir, 'projects'), near: t0 + 25e3, ...o });
+  assert.equal(find({})?.session, 'sess-a', '25 s later, inside the 30 s window');
+  assert.equal(find({ near: t0 + 40e3 }), null, 'outside the window');
+  assert.equal(find({ sha: S.promptSha('ok go') })?.promptAt, t0, 'the hash of the text matches');
+  assert.equal(find({ sha: S.promptSha('something else') }), null, 'a different text is not the reply');
+  assert.equal(find({ near: t0 + 1000 })?.promptAt, t0, 'only typed records count, never the scheduled one');
+}));

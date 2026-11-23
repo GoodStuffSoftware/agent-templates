@@ -140,26 +140,40 @@ const recText = (rec) => {
 };
 export const promptSha = (text) => createHash('sha256').update(String(text ?? '').trim()).digest('hex').slice(0, 12);
 
-// The last 256 KB of a transcript as lines (first partial line dropped). Bounded: never reads a whole transcript.
-function defaultTail(path) {
+// The end of a transcript as lines (first partial line dropped), read back in growing chunks (256 KB, doubling) until the first
+// record's timestamp is older than `fromMs` (the scan has passed the time asked for), the whole file is read, or MAX_SCAN_BYTES is
+// reached. A busy lead session can write far more than one chunk after a typed prompt. Bounded: never reads more than the cap.
+export const MAX_SCAN_BYTES = 16 * 1024 * 1024;
+const TS_RE = /"timestamp"\s*:\s*"([^"]+)"/;
+const firstTimestamp = (lines) => {
+  for (const l of lines) { const m = l && TS_RE.exec(l); const t = m && Date.parse(m[1]); if (t > 0) return t; }
+  return null;
+};
+function defaultTail(path, fromMs, maxBytes = MAX_SCAN_BYTES) {
   let fd;
   try {
     fd = openSync(path, 'r');
     const { size } = fstatSync(fd);
-    const start = Math.max(0, size - TAIL_BYTES);
-    const buf = Buffer.alloc(size - start);
-    readSync(fd, buf, 0, buf.length, start);
-    const lines = buf.toString('utf8').split('\n');
-    if (start > 0) lines.shift();
-    return lines;
+    let len = Math.min(size, TAIL_BYTES);
+    for (;;) {
+      const start = size - len;
+      const buf = Buffer.alloc(len);
+      readSync(fd, buf, 0, len, start);
+      const lines = buf.toString('utf8').split('\n');
+      if (start > 0) lines.shift();
+      if (start === 0 || len >= maxBytes) return lines;
+      const first = firstTimestamp(lines);
+      if (first != null && fromMs > 0 && first < fromMs) return lines; // passed the candidate's time
+      len = Math.min(size, maxBytes, len * 2);
+    }
   } catch { return []; } finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* */ } } }
 }
 
-// True when the transcript tail holds a typed (isHumanRecord) prompt with this sha written within [from, to] (epoch ms).
+// True when the transcript holds a typed (isHumanRecord) prompt with this sha written within [from, to] (epoch ms).
 export function matchHumanPrompt(path, sha, from, to, readTail = defaultTail) {
   try {
     if (!path || !sha) return false;
-    for (const l of readTail(path) || []) {
+    for (const l of readTail(path, from) || []) {
       if (!l) continue;
       let r; try { r = JSON.parse(l); } catch { continue; }
       if (!isHumanRecord(r)) continue;
@@ -172,9 +186,10 @@ export function matchHumanPrompt(path, sha, from, to, readTail = defaultTail) {
 }
 
 // Scans lead transcripts (<projectsDir>/*/*.jsonl, modified since `since`, newest first, at most maxFiles) for a typed (isHumanRecord)
-// record written within withinMs of `near`. Used once, by the v2 flag migration, to tell a legacy ack (a bare reply) from a human one.
-// Returns { session, promptAt } or null. Tail reads only; fails closed.
-export function findHumanRecordNear({ projectsDir, since = 0, near, withinMs = 2000, maxFiles = 200, readTail = defaultTail } = {}) {
+// record written within withinMs of `near` (30 s: a slow hook stamps its ack later than the transcript record). Used once, by the v2
+// flag migration, to tell a legacy ack (a bare reply) from a human one. With `sha` (the hash of the reply text) only a record with that
+// text counts; without it the human record nearest in time wins. Returns { session, promptAt } or null. Bounded reads; fails closed.
+export function findHumanRecordNear({ projectsDir, since = 0, near, withinMs = 30e3, sha = null, maxFiles = 200, readTail = defaultTail } = {}) {
   try {
     if (!projectsDir || !(near > 0)) return null;
     const files = [];
@@ -187,15 +202,19 @@ export function findHumanRecordNear({ projectsDir, since = 0, near, withinMs = 2
       }
     }
     files.sort((a, b) => b.m - a.m);
+    let best = null;
     for (const { fp, id } of files.slice(0, maxFiles)) {
-      for (const l of readTail(fp) || []) {
+      for (const l of readTail(fp, near - withinMs) || []) {
         if (!l || !l.includes('"human"')) continue;
         let r; try { r = JSON.parse(l); } catch { continue; }
         if (!isHumanRecord(r)) continue;
         const t = Date.parse(r.timestamp);
-        if (t > 0 && Math.abs(t - near) <= withinMs) return { session: r.sessionId || id, promptAt: t };
+        if (!(t > 0) || Math.abs(t - near) > withinMs) continue;
+        if (sha && promptSha(recText(r)) !== sha) continue;
+        if (!best || Math.abs(t - near) < best.d) best = { d: Math.abs(t - near), session: r.sessionId || id, promptAt: t };
       }
     }
+    if (best) return { session: best.session, promptAt: best.promptAt };
   } catch { /* fail closed */ }
   return null;
 }
@@ -316,9 +335,11 @@ export function holdIntervals(nowMs = now()) {
 export function maybeHold({ holdMinutes, at = now() } = {}) {
   try {
     const delay = Number(holdMinutes);
-    if (!(delay > 0)) return null;
     const f = readFlag();
-    if (!flagIsOpen(f) || f.ackedAt || isHoldActive()) return null;
+    if (!flagIsOpen(f) || f.ackedAt) return null;
+    // During a hold the tick still confirms a pending "clear hold" candidate, so the operator need not repeat the words.
+    if (isHoldActive()) { confirmCandidates({ at }); return null; }
+    if (!(delay > 0)) return null;
     if (confirmCandidates({ at })) return null; // a typed reply found in the transcript: answered, no hold
     const hf = holdable(f.flags);
     if (!hf.length) return null; // only watch-health flags (usage-source-empty): report, never hold
