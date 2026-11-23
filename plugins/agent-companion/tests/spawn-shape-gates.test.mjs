@@ -405,3 +405,31 @@ test('regression: fit-autofill + premium warrant + memory nudge + gates all coex
     cleanup();
   }
 });
+
+test('worktree clause: isolation worktree gets one short command clause; no isolation, none; never twice', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const run = (sid, extra, prompt = 'TYPE: bounded-feature\nROLE: writer\nbuild the widget') => {
+      const res = runHook('hooks/spawn-guard.mjs', {
+        session_id: sid, agent_type: 'main', cwd: dir,
+        tool_input: { subagent_type: 'general-purpose', model: 'sonnet', name: 'widget-w', run_in_background: true, prompt, ...extra },
+      }, { env: baseEnv(dir) });
+      assert.equal(res.status, 0, res.stderr);
+      return res.json?.hookSpecificOutput?.updatedInput?.prompt ?? '';
+    };
+    const wt = run('sess-wt-1', { isolation: 'worktree' });
+    const m = wt.match(/\[agent-companion: worktree\] ([^\n]*)/);
+    assert.ok(m, 'the clause is appended');
+    assert.ok(m[0].length <= 330, `short: ${m[0].length}`);
+    assert.match(m[1], /do not cd into it/);
+    assert.match(m[1], /git -C only on your own tree/);
+    assert.match(m[1], /Write, never with heredocs/);
+    assert.match(m[1], /one plain command so the queue can wrap it/);
+    assert.equal(wt.split('[agent-companion: worktree]').length, 2, 'once');
+    assert.doesNotMatch(run('sess-wt-2', {}), /agent-companion: worktree/, 'no isolation, no clause');
+    const again = run('sess-wt-3', { isolation: 'worktree' }, 'build it\n[agent-companion: worktree] already here');
+    assert.equal(again.split('[agent-companion: worktree]').length, 2, 'a brief that carries it is not given a second');
+  } finally {
+    cleanup();
+  }
+});

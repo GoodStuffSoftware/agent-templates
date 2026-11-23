@@ -2054,6 +2054,8 @@ export function ladderToolPolicy() {
     everywhere: list(t.everywhere, ['Artifact', 'ArtifactComments', 'ArtifactData', 'ArtifactCheck', 'mcp__visualize', 'mcp__terminal', 'mcp__ccd_session']),
     browserOnly: list(t.browserOnly, ['mcp__Claude_Browser']),
     keepOn,
+    // denyOn { tool: [agent...] }: dropped only on the listed agents.
+    denyOn: Object.fromEntries(Object.entries(t.denyOn && typeof t.denyOn === 'object' && !Array.isArray(t.denyOn) ? t.denyOn : {}).map(([tool, agents]) => [tool, list(agents, [])])),
   };
 }
 
@@ -2069,6 +2071,7 @@ export function expectedDisallowedTools(agent) {
   const out = [...pol.everywhere];
   if (!(v && v.browser)) out.push(...pol.browserOnly);
   for (const [server, agents] of Object.entries(pol.keepOn)) if (!agents.includes(agent)) out.push(server);
+  for (const [tool, agents] of Object.entries(pol.denyOn)) if (agents.includes(agent)) out.push(tool);
   return out;
 }
 

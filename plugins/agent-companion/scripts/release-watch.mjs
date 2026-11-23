@@ -62,7 +62,15 @@ const units = (u, m) => 2e-6 * MULT(m) * ((u.input_tokens || 0) + 5 * (u.output_
 const quant = (a, p) => { const s = a.slice().sort((x, y) => x - y); return s.length ? +s[Math.min(s.length - 1, Math.floor(p * s.length))].toFixed(2) : null; };
 const sum = (a, f) => a.reduce((s, x) => s + f(x), 0);
 // A Bash tool_result error that is the harness refusing the command (isolation, a form it cannot verify), not the command failing.
-export const HARNESS_REFUSAL_RE = /isolated in the worktree|too complex to verify|names git in a form too complex|changes directory to the shared tree/i;
+// Safety limit on worker transcripts read per analysis (files are chosen by mtime inside the window, newest first).
+export const WORKER_SCAN_CAP = 12000;
+// Agent types that are not on the reporting contract (no STATUS line, own report format): left out of the worker status and Bash metrics, counted by name in workers.excluded.
+export const NON_CONTRACT_TYPES = new Set(['Explore', 'Plan', 'web-fetch', 'claude-code-guide', 'statusline-setup']);
+// A hook-verification spawn says so in its brief (first 400 chars of its first message): synthetic, not work.
+export const PROBE_RE = /^[\s\S]{0,400}?hook verification spawn, not real work/i;
+const STATUS_RE = /STATUS:\s*(done|partial|blocked)/i;
+const STATUS_LINE_RE = /^[\s>*_`#-]*STATUS:\s*(done|partial|blocked)/im;
+export const HARNESS_REFUSAL_RE =/isolated in the worktree|too complex to verify|names git in a form too complex|changes directory to the shared tree/i;
 
 // Queue clears that mean something went wrong: a lease whose holder died or went stale, a holder past the ceiling, a stuck release.
 // Waiting tickets whose requester left, idle clears, the operator's manual clear, and rows written by test runs are routine.
@@ -80,7 +88,7 @@ export function isFailureClear(r) {
 // the baseline never moves when a later release joins). winFrom: start of the window measured now (default baseTo; the tick passes the last
 // conclusive check's time, so each check is a rate over its own window, not a running count since install). releases: [{version, T}] of a
 // chain (two or more): the result then carries byVersion[version], one full metrics object per release with only the since side split by version.
-export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, releases, days = 7, sample = 500, telDir, projectsDir, clearsFiles, holds } = {}) {
+export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, releases, days = 7, sample = 500, scanCap = WORKER_SCAN_CAP, telDir, projectsDir, clearsFiles, holds } = {}) {
   const root = stateRootPath();
   telDir = telDir || join(dataRoot(), 'telemetry');
   projectsDir = projectsDir || join(claudeDir(), 'projects');
@@ -126,16 +134,19 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
   }
   const fresh = files.filter((f) => f.m >= W0); const old = files.filter((f) => f.m < W0);
   const step = Math.max(1, Math.ceil(old.length / sample));
-  const pick = [...fresh.slice(0, 2000).map((f) => f.fp), ...old.filter((_, i) => i % step === 0).map((f) => f.fp)];
+  // Newest first: the safety cap (WORKER_SCAN_CAP, above a full busy week: 5676 files seen) then drops the oldest files, never whole projects.
+  fresh.sort((a, b) => b.m - a.m);
+  const pick = [...fresh.slice(0, scanCap).map((f) => f.fp), ...old.filter((_, i) => i % step === 0).map((f) => f.fp)];
   const seen = new Set(); const WR = [];
   for (const fp of pick) {
     let L; try { L = readFileSync(fp, 'utf8').split('\n'); } catch { continue; }
-    let first = null; let u = 0; let peak = 0; let hook = 0; let terr = 0; let api = null; let txt = '';
+    let first = null; let u = 0; let peak = 0; let hook = 0; let terr = 0; let api = null; let txt = ''; let stLine = null; let probe = false; let seenUser = false;
     const bashIds = new Set(); let bash = 0; let refusal = 0; let bashFail = 0; const sigs = [];
     for (const l of L) {
       if (!l) continue; let o; try { o = JSON.parse(l); } catch { continue; }
       if (o.timestamp && !first) first = Date.parse(o.timestamp);
       const c = o.message?.content;
+      if (o.type === 'user' && !seenUser) { seenUser = true; const t0 = typeof c === 'string' ? c : Array.isArray(c) ? (c.find((b) => b && b.type === 'text') || {}).text : ''; probe = PROBE_RE.test(String(t0 || '')); }
       if (o.type === 'assistant' && o.message?.usage && o.message.model !== '<synthetic>') {
         const k = o.requestId || o.message.id || o.uuid;
         if (!seen.has(k)) {
@@ -150,7 +161,11 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
           const t = typeof b.content === 'string' ? b.content : JSON.stringify(b.content);
           if (HARNESS_REFUSAL_RE.test(t)) refusal++; else if (!/^PreToolUse:/.test(t)) bashFail++;
         }
-        if (b.type === 'text' && o.type === 'assistant') txt = b.text;
+        // The report is the last assistant text or the SubagentHandback call's message (the harness delivers it as the result); a STATUS given earlier still counts when the worker was woken and answered without one.
+        if (o.type === 'assistant' && (b.type === 'text' || (b.type === 'tool_use' && b.name === 'SubagentHandback'))) {
+          const tx = b.type === 'text' ? b.text : b.input && b.input.message;
+          if (typeof tx === 'string') { txt = tx; const m = STATUS_LINE_RE.exec(tx); if (m) stLine = m[1].toLowerCase(); }
+        }
         if (b.type === 'tool_result' && b.is_error) {
           terr++; const t = typeof b.content === 'string' ? b.content : JSON.stringify(b.content);
           const m = /^(PreToolUse:[\w:]+) hook error: (.{0,48})/.exec(t);
@@ -161,9 +176,11 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
     if (!first || first < B0 || first > nowMs) continue;
     const w = first >= W0 ? 'since' : first < BT ? 'base' : null;
     if (!w || inHold(first)) continue;
-    const st = /STATUS:\s*(done|partial|blocked)/i.exec(txt);
-    let fin = false; try { fin = JSON.parse(readFileSync(fp.replace(/\.jsonl$/, '.meta.json'), 'utf8')).finished === true; } catch { /* none */ }
-    WR.push({ w, first, sigs, u, peak, hook, terr, api, bash, refusal, bashFail, status: st ? st[1].toLowerCase() : (fin ? 'none' : 'running') });
+    const st = STATUS_RE.exec(txt);
+    const status0 = st ? st[1].toLowerCase() : stLine;
+    let fin = false; let atype = ''; try { const mt = JSON.parse(readFileSync(fp.replace(/\.jsonl$/, '.meta.json'), 'utf8')); fin = mt.finished === true; atype = String(mt.agentType || ''); } catch { /* none */ }
+    const ex = probe ? 'probe' : NON_CONTRACT_TYPES.has(atype) ? atype : null;
+    WR.push({ w, first, sigs, u, peak, hook, terr, api, bash, refusal, bashFail, ex, status: status0 || (fin ? 'none' : 'running') });
   }
   // The whole result for the since side restricted to release `vf` (null = the whole chain); the baseline side is always the shared one.
   const build = (vf) => {
@@ -218,13 +235,17 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
     }
     out.workers = {}; out.bash = {};
     for (const w of ['since', 'base']) {
-      const bn = sum(W[w], (x) => x.bash); const rf = sum(W[w], (x) => x.refusal); const bf = sum(W[w], (x) => x.bashFail);
+      const cw = W[w].filter((x) => !x.ex);
+      const bn = sum(cw, (x) => x.bash); const rf = sum(cw, (x) => x.refusal); const bf = sum(cw, (x) => x.bashFail);
       out.bash[w] = { n: bn, realFails: bf, realFailPct: per(bf, bn), refusals: rf, refusalPer100: per(rf, bn) };
     }
     for (const w of ['since', 'base']) {
-      const a = W[w]; const fin = a.filter((x) => x.status !== 'running');
+      const a = W[w]; const fin = a.filter((x) => x.status !== 'running' && !x.ex);
+      // Workers left out of the status and Bash metrics (types off the reporting contract, hook-verification probes), named, never dropped silently.
+      const excluded = { probes: 0, byType: {} };
+      for (const x of a) if (x.ex === 'probe') excluded.probes++; else if (x.ex) excluded.byType[x.ex] = (excluded.byType[x.ex] || 0) + 1;
       out.workers[w] = {
-        n: a.length, finished: fin.length,
+        n: a.length, finished: fin.length, excluded,
         unitsPerWorker: { mean: +(sum(a, (x) => x.u) / Math.max(1, a.length)).toFixed(2), p50: quant(a.map((x) => x.u), 0.5), p90: quant(a.map((x) => x.u), 0.9) },
         peakCtxP90: quant(a.map((x) => x.peak), 0.9),
         over110kPct: per(a.filter((x) => x.peak > 110000).length, a.length), over150kPct: per(a.filter((x) => x.peak > 150000).length, a.length),
@@ -264,7 +285,7 @@ export function usageOf(m, unitsPerPct = unitsPerPercent()) {
 export const TH = {
   minSpawns: 30, minWorkers: 20, minBash: 200, guardFactor: 2, guardMinN: 10, newGuardMin: 5,
   rewritePer100: 3, rewriteMinEv: 3, hookErrorPp: 15, newSigWorkers: 5, over150Pct: 5, over150MinEv: 3, handoffHardPer100: 2, handoffHardMinEv: 3, handoffEndBlockPer100: 10, handoffEndBlockMinEv: 5,
-  noStatusPct: 15, noStatusMinFinished: 30, noStatusPp: 10, noStatusMinEv: 5, partialPct: 35, partialMinFinished: 20, partialMinEv: 5, blockedPct: 6, blockedMinEv: 3,
+  noStatusPct: 15, noStatusMinFinished: 30, noStatusPp: 10, noStatusMinEv: 5, partialPct: 35, partialMinFinished: 20, partialMinEv: 5, blockedPct: 6, blockedMinEv: 5,
   bashFailPct: 7, bashFailMinEv: 10, refusalPer100: 10, refusalMinEv: 10, gateDeniedPer100: 20, gateDeniedMinEv: 5, clearsFactor: 2, clearsMin: 10, minActiveHours: 2,
   apiWorkers: 3, apiNonUsage: 2, newGuardPer100: 10, hookErrorMinEv: 5,
   struggle100: 2, struggleMinEv: 3, unitsFactor: 1.5, unitsAbs: 1.9, unitsMinEv: 5, pollDeny100: 18, pollMinEv: 5,
@@ -575,7 +596,7 @@ export function standing({ at = S.now(), run = analyze } = {}) {
     const trend = shortHistory ? 'inconclusive (history short)' : 'judged';
     const verdict = findings.length ? 'findings' : shortHistory ? 'inconclusive' : 'ok';
     const text = (x) => `${x.name} ${x.value}${x.unit ? ' ' + x.unit : ''} (${x.kind === 'ceiling' ? `ceiling ${x.ceiling}` : `was ${x.prior}`})`;
-    const out = { at: iso(at), verdict, trend, findings: findings.map((x) => ({ ...x, detail: text(x) })), shownOn: null };
+    const out = { at: iso(at), verdict, trend, findings: findings.map((x) => ({ ...x, detail: text(x) })), workers: { n: ws.n, finished: ws.finished, excluded: ws.excluded || null }, shownOn: null };
     S.writeJson(S.paths().standing, out);
     S.appendRow({ at: out.at, event: 'standing', verdict, trend, findings: out.findings });
     return out;
@@ -652,7 +673,7 @@ export function migrateFlag({ at = S.now(), projectsDir, run = analyze } = {}) {
       const hit = S.findHumanRecordNear({ projectsDir: projectsDir || join(claudeDir(), 'projects'), since: Date.parse(f.notifiedAt) || 0, near: ackAt });
       if (hit) next.ack = { session: hit.session, promptAt: f.ackedAt, confirmedAt: iso(at), signal: S.HUMAN_SIGNAL.transcript, shownAt: (f.shownTo || {})[hit.session] ?? null };
       else {
-        next.ackedAt = null; next.ack = null; next.notifiedAt = iso(at); next.candidates = [];
+        next.ackedAt = null; next.ack = null; next.notifiedAt = null; next.candidates = [];
         S.appendRow({ at: iso(at), event: 'ack-revoked', version: f.version ?? null, reason: 'legacy ack without human record' });
         out = { ...out, revoked: true };
       }
@@ -742,7 +763,7 @@ export function status(at = S.now(), { all = false, json = false } = {}) {
     const a = flag.ack;
     const who = flag.ackedAt ? `answered ${flag.ackedAt}${a ? ` in session ${String(a.session || '').slice(0, 8)} (signal ${a.signal}, shown ${a.shownAt || '?'})` : ''}`
       : `unanswered${(() => { const d = Number(opt('release_watch_hold_minutes', 30)); const n = Date.parse(flag.notifiedAt); return d > 0 && n > 0 ? `, hold at ${iso(n + d * 60e3)}` : ''; })()}`;
-    lines.push(`flag open since ${flag.openedAt}, notified ${flag.notifiedAt}, ${who}: ${flag.flags.map((x) => `${x.name}=${x.value}${x.detail ? ' (' + x.detail + ')' : ''}`).join('; ')}`);
+    lines.push(`flag open since ${flag.openedAt}, ${flag.notifiedAt ? `notified ${flag.notifiedAt}` : 'not yet shown'}, ${who}: ${flag.flags.map((x) => `${x.name}=${x.value}${x.detail ? ' (' + x.detail + ')' : ''}`).join('; ')}`);
   } else lines.push('no open flag');
   lines.push(hold && !hold.clearedAt ? `HOLD since ${hold.since}: ${hold.reason}` : 'hold: none');
   if (hold && !hold.clearedAt && flag && flag.clearedBy === 'v2-migration') lines.push('the hold stays for the operator: its flag was closed as superseded by v2 evidence rules, and a hold is never lifted by the migration (run: release-watch.mjs clear)');

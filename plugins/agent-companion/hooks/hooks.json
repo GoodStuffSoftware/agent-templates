@@ -44,6 +44,19 @@
         ]
       },
       {
+        "matcher": "^(Bash|PowerShell)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/bash-read.mjs"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "^Read$",
         "hooks": [
           {
@@ -397,9 +410,19 @@
             "type": "command",
             "command": "node",
             "args": [
-              "${CLAUDE_PLUGIN_ROOT}/hooks/runaway-notice.mjs"
+              "${CLAUDE_PLUGIN_ROOT}/hooks/runaway-notice.mjs",
+              "--no-watch"
             ],
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/runaway-notice.mjs",
+              "--watch"
+            ],
+            "timeout": 5
           },
           {
             "type": "command",

@@ -81,8 +81,7 @@ test('a brief that asks a worker to load a skill is recognised, so the guard doe
 test('the self-review block tells a worker with no Skill tool that the text is the whole spawn recipe', () => {
   for (const agent of ['ac-sonnet-high']) { // the Opus rungs are read-only plan legs since 0.31.54 and carry no block
     const body = readFileSync(join(PLUGIN_ROOT, 'agents', `${agent}.md`), 'utf8');
-    assert.match(body, /you have no Skill tool/, agent);
-    assert.match(body, /do not look for the team-orchestration skill/, agent);
+    assert.ok(body.includes('No Skill tool here: this text plus `<plugin>' + '/docs/SELF-REVIEW.md` is the recipe'), agent);
   }
 });
 
@@ -156,4 +155,22 @@ test('spawn-guard messages name the recommender by absolute path, not a bare rel
   const bare = src.match(/node scripts\/recommend\.mjs/g) || [];
   assert.equal(bare.length, 1, 'only the RECOMMEND_CMD fallback may carry the bare form');
   assert.doesNotMatch(src, /the setup skill/, 'a worker has no Skill tool: name the SKILL.md path');
+});
+
+// --- 0.31.65 overhead trim: ccd_turn on every ac-* agent, Agent on sonnet-low only ---
+
+const acAgents = () => readdirSync(join(PLUGIN_ROOT, 'agents')).filter((f) => /^ac-.*\.md$/.test(f)).map((f) => f.replace(/\.md$/, ''));
+
+test('mcp__ccd_turn is denied on every ac-* agent (its schemas cost every rung and no worker needs them)', () => {
+  const agents = acAgents();
+  assert.ok(agents.length >= 12, `found ${agents.length} ac-* agents`);
+  for (const a of agents) assert.ok(denied(a).includes('mcp__ccd_turn'), a);
+  assert.ok(cfg.ladderTools.everywhere.includes('mcp__ccd_turn'));
+});
+
+test('Agent is denied on ac-sonnet-low only (no other ac-* agent loses it)', () => {
+  assert.deepEqual(cfg.ladderTools.denyOn, { Agent: ['ac-sonnet-low'] });
+  for (const a of acAgents()) {
+    assert.equal(denied(a).includes('Agent'), a === 'ac-sonnet-low', a);
+  }
 });

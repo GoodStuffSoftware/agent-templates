@@ -64,7 +64,7 @@ test('a fresh install: every subcommand works, exits 0 and creates nothing', () 
     assert.match(list.out, /settings\.json: .*\(not present\)/);
     const all = cli(fx, ['list', '--all']);
     assert.match(all.out, /main_compact_floor_tokens = 0/);
-    assert.match(all.out, /All 1\d\d options:/);
+    assert.match(all.out, /All [12]\d\d options:/);
   } finally { fx.cleanup(); }
 });
 

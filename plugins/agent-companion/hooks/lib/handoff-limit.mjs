@@ -4,7 +4,9 @@
 // ceiling (lib/context-ceiling.mjs) is advice too and is off. Nothing kept a worker from running to the ~217K
 // auto-compaction. This adds, on the SAME hook and the SAME transcript reading (hooks/subagent-context.mjs, PreToolUse,
 // subagents only; the lead is never touched):
-//   soft limit  (option subagent_context_notice_tokens, default 110000)  the notice, then again every
+//   warn        (option subagent_context_warn_tokens, default 110000, 0 = off)  once: keep the handoff file current
+//   soft limit  (option subagent_context_notice_tokens, default 110000; subagent_context_notice_high_tokens, default 130000, for
+//               ac-sonnet-high, ac-sonnet-xhigh and the ac-opus-* rungs)  the handoff notice, then again every
 //               subagent_context_notice_repeat_tokens (default 15000) while the context keeps growing
 //   hard limit  (option subagent_context_hard_tokens, default 150000)    a PreToolUse deny of everything except what a handoff
 //               needs: Write/Edit/Read of a .md file whose name contains "handoff", and Bash/PowerShell that is only git add,
@@ -27,6 +29,42 @@ export const HANDOFF_LOG = 'handoff-limit.jsonl';
 export const HANDOFF_SOFT_DEFAULT = 110000;
 export const HANDOFF_REPEAT_DEFAULT = 15000;
 export const HANDOFF_HARD_DEFAULT = 150000;
+export const WARN_DEFAULT = 110000;         // 0.31.65: warn (keep the handoff file current), every rung
+export const HANDOFF_HIGH_DEFAULT = 130000; // 0.31.65: hand off, for the higher rungs (sonnet high and xhigh, the opus rungs)
+
+// The higher rungs carry more context per step and re-read less, so they hand off later (operator decision 2026-11-23).
+// A bare or plugin-prefixed agent type.
+export const isHighRung = (agentType) => /^(ac-sonnet-(high|xhigh)|ac-opus-[a-z]+)$/.test(String(agentType || '').toLowerCase().replace(/^[^:]*:/, ''));
+
+// The handoff notice line for this agent type: subagent_context_notice_tokens for the lower rungs, subagent_context_notice_high_tokens
+// for the higher rungs (a high value of 0 or less falls back to the lower rungs' line); 0 on the base option = no notice at all.
+export function handoffThreshold(agentType) {
+  const base = Number(opt('subagent_context_notice_tokens', 110000));
+  if (!(base > 0)) return 0;
+  if (!isHighRung(agentType)) return base;
+  const high = Number(opt('subagent_context_notice_high_tokens', HANDOFF_HIGH_DEFAULT));
+  if (!(high > 0)) return base;
+  // The higher rungs never hand off earlier than the lower ones (a raised base lifts them too), and a notice line at or past the hard
+  // stop would never be heard (the hard deny comes first): then the base line stands.
+  const t = Math.max(base, high);
+  const hard = Number(opt('subagent_context_hard_tokens', HANDOFF_HARD_DEFAULT));
+  return hard > 0 && t >= hard ? base : t;
+}
+
+// The warn line (subagent_context_warn_tokens, 0 = none). It applies only below the handoff line: where the two coincide there is
+// just the handoff notice.
+export function warnThreshold(agentType) {
+  const w = Number(opt('subagent_context_warn_tokens', WARN_DEFAULT));
+  const h = handoffThreshold(agentType);
+  return w > 0 && h > 0 && w < h ? w : 0;
+}
+
+// The warn text: advice, once.
+export function warnText(ctx, handoff, hard, variant = 'writer') {
+  const lines = `handoff notice at ${kTokens(handoff)}${hard ? `, hard stop at ${kTokens(hard)}` : ''}`;
+  if (variant === 'readonly') return `[agent-companion] Context at ${kTokens(ctx)} (${lines}): keep your findings so far in your detail file, so a handoff at any moment loses nothing.`;
+  return `[agent-companion] Context at ${kTokens(ctx)} (${lines}): keep your handoff file <task>-handoff.md next to your detail file current (${HANDOFF_FIELDS}), so a handoff at any moment loses nothing.`;
+}
 
 // The settings, read once per hook run. `soft` is subagent_context_notice_tokens (0 = no notice), `hard` 0 = no deny.
 export function handoffConfig(soft) {

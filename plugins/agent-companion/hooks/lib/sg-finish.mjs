@@ -10,7 +10,8 @@ import {
 } from './context.mjs';
 import { matchRules, renderRules } from './rules.mjs';
 import { buildScopeClause } from './scope-rule.mjs';
-import { buildWriterClause } from './writer-brief.mjs';
+import { buildWriterClause, buildWorktreeClause } from './writer-brief.mjs';
+import { buildCommandsBlock } from './project-commands.mjs';
 import { knowledgeDecision, knowledgeClause, holdKnowledgeNotice } from './knowledge-check.mjs';
 import { applyTierClause } from './tier-clause.mjs';
 import { planLegSpawn } from './opus-writer.mjs';
@@ -70,6 +71,12 @@ export async function finishSpawn({
 
     // 1b2. The writer clause (lib/writer-brief.mjs): handoff, test running, and staging for a brief with more than 4 deliverables.
     try { if (!planLeg) suffix += buildWriterClause(declaredType, declaredRole, input.prompt); } catch { /* fail open */ }
+
+    // 1b2b. The worktree command clause (lib/writer-brief.mjs): isolation "worktree" only, any type.
+    try { suffix += buildWorktreeClause(input.isolation, input.prompt); } catch { /* fail open */ }
+
+    // 1b2c. The project's command list (lib/project-commands.mjs): writer, fixer, lander, e2e, verify; nothing when the project has no list.
+    try { if (!planLeg) suffix += buildCommandsBlock(declaredType, declaredRole, input.prompt, p.cwd); } catch { /* fail open */ }
 
     // 1b3. The knowledge check clause (lib/knowledge-check.mjs): a builder TYPE gets one look at the current docs before it builds,
     //      (not the read-only plan leg, which edits nothing) unless the brief already carries the lead's own dated line. The first such spawn of a session also holds a one-line

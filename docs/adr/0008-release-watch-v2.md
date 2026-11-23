@@ -53,6 +53,19 @@ worked example (253 spawns in 8.4 h) and the 0.31.62 and 0.31.63 check logs.
   turn: the operator could have read it. A prompt in a session that never showed the flag is not a reply.
 - The flag record keeps `ack = { session, promptAt, confirmedAt, signal, shownAt }`; `signal` names the proof
   (`transcript-origin-human` or `payload-origin-human`). The explicit clear command and the "clear hold" words are unchanged.
+- **Notified means shown to a person (0.31.65).** The tick writes the flag with `notifiedAt = null`; the first session
+  that shows the flag line (`noteShown`) sets `notifiedAt`, and the hold countdown (`release_watch_hold_minutes`) runs
+  from that first showing, never from the tick. Cause: a tick wrote a flag at 17:00Z, the operator's lead sat idle until
+  19:55Z, and the countdown had run from the tick, so the hold could fire before any lead had shown the flag. A flag that
+  is new or has more than doubled is a new notification and resets `notifiedAt` to null. The flag line states the
+  countdown ("Hold countdown: N min left; ... held at <time>").
+- **The flag line runs in its own process.** `hooks.json` registers `runaway-notice.mjs` twice on UserPromptSubmit:
+  `--watch` (release watch only, timeout 5 s, small state files) and `--no-watch` (budget scan, interrupted-worker scan,
+  notice drain; timeout 10 s). The slow scans can reach their timeout on a large session after an idle spell, and a hook
+  that times out delivers nothing; with the flag line in the same process, one such prompt lost it. No argument runs both
+  (tests, older registrations).
+- **Showing a flag is never an answer.** `noteShown` sets `shownTo` and `notifiedAt` and nothing else; only a confirmed
+  typed reply (above) or the clear command writes `ackedAt`.
 
 ### 2. Evidence floors per metric
 
@@ -60,6 +73,25 @@ Every metric has a minimum event count (numerator) and a minimum denominator. Be
 **inconclusive**; above it but below the event floor it is **ok**. Release-window floors: 30 spawns for spawn-rate
 metrics, 20 worker transcripts for worker-share metrics, 200 worker Bash calls for Bash metrics; event floors 3 to 10
 by metric (spec table). Queue denials are judged against max(20, 2x the 7-day rate) per 100 spawns, not a fixed 20.
+Floors that differ from the general rule (0.31.65):
+
+| Metric | Denominator floor | Event floor |
+|---|---|---|
+| `blocked-share` | 20 finished workers | **5 blocked workers** (was 3: three blocked of 39, all brief or environment problems of other projects, started a hold) |
+| `no-final-status`, `partial-share` | 30 / 20 finished workers | 5 |
+| `harness-refusals` | 200 worker Bash calls | 10 |
+| `worker-bash-fail` | 200 worker Bash calls | 10 |
+
+The worker metrics read worker transcripts chosen by file mtime inside the window (newest first, a safety cap of 12000
+files above a full busy week; before 0.31.65 the first 2000 in directory order, which dropped about 65% of a week and
+whole projects). A worker's STATUS is the latest `STATUS:` line of its assistant text or of its `SubagentHandback`
+call (`input.message`), so a report delivered through the handback tool, or given before the worker was woken again,
+counts. Agent types off the reporting contract (`Explore`, `Plan`, `web-fetch`, `claude-code-guide`,
+`statusline-setup`) and hook-verification probe spawns (brief opens with "Hook verification spawn, not real work")
+stay out of `no-final-status`, `partial-share`, `blocked-share`, `worker-bash-fail` and `harness-refusals`; their
+counts are named in `workers.excluded` (and in the standing file), never dropped silently. Usage and context metrics
+still count every worker.
+
 `runaway` is the one metric with no floor, on purpose: a runaway session is a real fault even once, so a single
 `runaway:fired` event in the window flags it.
 

@@ -20,11 +20,13 @@
 // taken ("lock-timeout": the hook failed open and, for a post, a read went
 // unrecorded).
 
-import { resolve } from 'node:path';
-import { statSync } from 'node:fs';
-import { readStdin, opt, deny, passthrough, appendLog } from './lib/context.mjs';
+import { resolve, dirname, relative } from 'node:path';
+import { statSync, readFileSync, existsSync } from 'node:fs';
+import { readStdin, opt, deny, passthrough, appendLog, writeAndExit, callerIsSubagent, pathUnder } from './lib/context.mjs';
 import { isServedCall } from './lib/delegation.mjs';
+import { outlineKind, outlineOf, countLinesIn, OUTLINE_MAX_CHARS, inBudgetScope } from './lib/read-shell.mjs';
 import {
+  budgetOf, READ_BUDGET_LINES_DEFAULT, OUTLINE_MIN_LINES,
   TELEMETRY_STREAM, agentOf, pathKeyOf, pathHash, statOf, withState, resetAgent, decide, record, invalidate, denyText, requestOf,
 } from './lib/read-dedupe.mjs';
 
@@ -68,6 +70,8 @@ function row(p, ctx, outcome, x = {}) {
     ...(x.age_ms !== undefined ? { age_ms: x.age_ms } : {}),
     ...(x.deny_at !== undefined ? { deny_at: new Date(x.deny_at).toISOString() } : {}),
     ...(x.why ? { allow_reason: x.why } : {}),
+    ...(x.reason ? { reason: x.reason } : {}),
+    ...(x.have !== undefined ? { lines_read: x.have } : {}),
     ...(x.idx !== undefined ? { read_index: x.idx } : {}),
     lock_wait_ms: ctx.wait_ms,
     duration_ms: Date.now() - T0,
@@ -121,7 +125,24 @@ try {
   }
 
   if (ev === 'pre') {
-    const r = withState(sid, agent, (state) => decide(state, { agent, pk, input: p.tool_input, stat }));
+    // Subagents only: a per-file line budget (read_budget, read_budget_lines) and an outline of a big file on its first read.
+    const sub = callerIsSubagent(p);
+    // Same scope as the shell-read hook: the agent's own repository, and not a log or test-output file.
+    const budget = sub && opt('read_budget', true) && inBudgetScope(f, cwd, pathUnder, { existsSync }, { resolve, dirname, relative })
+      ? budgetOf(Number(opt('read_budget_lines', READ_BUDGET_LINES_DEFAULT))) : null;
+    let bigLines = 0;
+    let outlineText = '';
+    if (sub && stat && stat.size > 4000 && stat.size <= 2 * 1024 * 1024 && outlineKind(f)) {
+      try {
+        const buf = readFileSync(resolve(cwd, f));
+        if (!buf.subarray(0, 8192).includes(0)) {
+          const text = buf.toString('utf8');
+          bigLines = countLinesIn(text);
+          if (bigLines > OUTLINE_MIN_LINES) outlineText = outlineOf(text, f, OUTLINE_MAX_CHARS);
+        }
+      } catch { bigLines = 0; }
+    }
+    const r = withState(sid, agent, (state) => decide(state, { agent, pk, input: p.tool_input, stat, budget, bigLines }));
     ctx.wait_ms = r.wait_ms;
     if (!r.locked) {
       row(p, ctx, 'lock-timeout'); // fail open: the read runs
@@ -134,10 +155,24 @@ try {
       passthrough();
     }
     if (value.action === 'deny') {
+      if (value.budget) {
+        row(p, ctx, 'deny', { ...value, reason: 'budget', est: 0 });
+        deny(`Read budget: you have already read ${value.have} distinct lines of ${f} (budget ${value.max}). grep -n for the symbol you need, then Read offset/limit 80. Repeat this call and it will run.`);
+      }
       row(p, ctx, 'deny', value);
       deny(denyText(value.a, value.b));
     }
     if (value.action === 'allow' && value.why) row(p, ctx, 'allow', value);
+    const notes = [];
+    if (value.nudge) {
+      row(p, ctx, 'nudge', { ...value, est: 0 });
+      notes.push(`[agent-companion] read budget: you have read ${value.have} distinct lines of ${f} and this read passes ${budget.nudge}. Stop walking it in chunks: grep -n for the symbol you need, then Read offset/limit 80. New lines past ${budget.max} are denied.`);
+    }
+    if (value.outline && outlineText) {
+      row(p, ctx, 'outline', { ...value, est: 0 });
+      notes.push(`[agent-companion] outline of ${f} (${bigLines} lines, name:line): ${outlineText}. Read offset/limit from these line numbers.`);
+    }
+    if (notes.length) writeAndExit(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: notes.join('\n') } }));
   }
   passthrough();
 } catch {

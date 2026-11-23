@@ -18,7 +18,8 @@ import { rolloutActive, ceilingNoticeText, ceilingRung, CEILING_DEFAULT_TOKENS, 
 const SID = 'sess-ceil';
 const AGENT = 'worker-ceil-test-1';
 // The size notice is pinned to its pre-0.31.54 value (300000) here: these tests are about the ceiling nudge, and the 110000 default would add its own notice at the sizes they use.
-const NOTICE_300K = { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' };
+// The 0.31.65 high-rung line (130000) and the warn (110000) are pinned out of the way the same way.
+const NOTICE_300K = { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_HIGH_TOKENS: '300000', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_WARN_TOKENS: '0' };
 const ON = { ...NOTICE_300K, AGENT_COMPANION_FAKE_NOW: '2026-10-15T00:00:00Z', CLAUDE_PLUGIN_OPTION_SUBAGENT_CEILING_TOKENS: '175000' };
 const DEFAULTS = { ...NOTICE_300K, AGENT_COMPANION_FAKE_NOW: '2026-10-15T00:00:00Z' }; // the ceiling option unset: the shipped default
 
@@ -287,7 +288,7 @@ test('the existing compaction/size notice is unchanged and combines with the cei
       const l2 = layout(fx2);
       writeFileSync(l2.agentFile, user('go') + turn('r1', 320000));
       const only = ctxText(run(l2.lead, { ...ON, AGENT_COMPANION_FAKE_NOW: '2026-10-01T00:00:00Z', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' }));
-      assert.equal(only, '[agent-companion] Context at 320K: finish the current step, commit and push any work in progress to your branch, write a handoff file <task>-handoff.md next to your detail file (done, remaining, files touched, branch and sha, the exact next step), then end with "DONE: partial, handoff at <path>".');
+      assert.equal(only, '[agent-companion] Context at 320K: finish the current step, commit and push any work in progress to your branch, write a handoff file <task>-handoff.md next to your detail file (done, remaining, files touched, branch and sha, the exact next step; keep the file under about 4,000 chars, name files and line ranges instead of pasting code, and give the exact next step), then end with "DONE: partial, handoff at <path>".');
     } finally { fx2.cleanup(); }
   } finally { fx.cleanup(); }
 });
@@ -362,7 +363,7 @@ test('the 300K size notice still fires for a low rung, unchanged', () => {
     const { lead, agentFile } = layout(fx);
     writeFileSync(agentFile, user('go') + turn('r1', 320000));
     const out = ctxText(run(lead, { ...ON, CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_TOKENS: '300000' }, { agent_type: 'ac-haiku' }));
-    assert.equal(out, '[agent-companion] Context at 320K: finish the current step, commit and push any work in progress to your branch, write a handoff file <task>-handoff.md next to your detail file (done, remaining, files touched, branch and sha, the exact next step), then end with "DONE: partial, handoff at <path>".');
+    assert.equal(out, '[agent-companion] Context at 320K: finish the current step, commit and push any work in progress to your branch, write a handoff file <task>-handoff.md next to your detail file (done, remaining, files touched, branch and sha, the exact next step; keep the file under about 4,000 chars, name files and line ranges instead of pasting code, and give the exact next step), then end with "DONE: partial, handoff at <path>".');
     assert.equal(existsSync(join(telemetryDir(), 'context-ceiling.jsonl')), false);
   } finally { fx.cleanup(); }
 });

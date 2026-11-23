@@ -1,6 +1,6 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -117,7 +117,7 @@ test('evaluate: spawn rewrites, queue, context, status, bash, api, runaway, blee
   assert.ok(names(metrics({ telemetry: { 'gate:denied': t(25, 40, 25, 6) } })).includes('queue-denied'));
   assert.ok(names(metrics({ queueClears: { since: 31, base: 5, perHour: { since: 3.6, base: 0.06 } } })).includes('queue-clears'));
   assert.ok(names(metrics({ telemetry: { 'handoff:hard/deny': t(3, 0, 3, 0) } })).includes('handoff-hard-deny'));
-  const m = metrics(); m.workers.since = { ...m.workers.since, over150kPct: 8, noStatusPct: 20, partialPct: 40, blockedPct: 9, hookErrorWorkersPct: 60, apiErrorWorkers: 3, apiNonUsageWorkers: 1, unitsPerWorker: { mean: 2, p50: 1, p90: 4 } };
+  const m = metrics(); m.workers.since = { ...m.workers.since, over150kPct: 8, noStatusPct: 20, partialPct: 40, blockedPct: 15, hookErrorWorkersPct: 60, apiErrorWorkers: 3, apiNonUsageWorkers: 1, unitsPerWorker: { mean: 2, p50: 1, p90: 4 } };
   const n = names(m);
   for (const x of ['context-over-150k', 'no-final-status', 'partial-share', 'blocked-share', 'hook-error-share', 'api-errors', 'units-per-worker', 'units-p90']) assert.ok(n.includes(x), x);
   assert.ok(names(metrics({ bash: { since: { n: 300, realFails: 27, realFailPct: 9, refusals: 0, refusalPer100: 0 }, base: { n: 500, realFails: 5, realFailPct: 1, refusals: 0, refusalPer100: 0 } } })).includes('worker-bash-fail'));
@@ -146,6 +146,67 @@ test('analyze: reads telemetry and worker transcripts of invented data', () => {
   assert.equal(m.workers.since.n, 1); assert.equal(m.workers.since.over150kPct, 100);
 });
 
+// ---- 0.31.65 standing metrics ----
+function worker(proj, id, { atype, finished = true, text, handback, extra = [], brief = 'Do the invented task.', refusals = 0, bash = 0, at = T + HOUR } = {}) {
+  const sd = join(claude, 'projects', proj, 'sess', 'subagents'); mkdirSync(sd, { recursive: true });
+  const ts = new Date(at).toISOString();
+  const a = (content) => ({ type: 'assistant', timestamp: ts, requestId: id + content.length + Math.random(), message: { model: 'claude-sonnet', usage: { input_tokens: 10, output_tokens: 5 }, content } });
+  const L = [{ type: 'user', timestamp: ts, message: { role: 'user', content: brief } }];
+  for (let i = 0; i < bash; i++) {
+    L.push(a([{ type: 'tool_use', id: `${id}-b${i}`, name: 'Bash', input: { command: 'x' } }]));
+    if (i < refusals) L.push({ type: 'user', timestamp: ts, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `${id}-b${i}`, is_error: true, content: 'This agent is isolated in the worktree W, but this command is too complex to verify' }] } });
+  }
+  if (text) L.push(a([{ type: 'text', text }]));
+  if (handback) L.push(a([{ type: 'tool_use', id: id + '-hb', name: 'SubagentHandback', input: { message: handback } }]));
+  L.push(...extra.map((t) => a([{ type: 'text', text: t }])));
+  const fp = join(sd, `agent-${id}.jsonl`);
+  writeFileSync(fp, L.map((l) => JSON.stringify(l)).join('\n'));
+  writeFileSync(fp.replace(/\.jsonl$/, '.meta.json'), JSON.stringify({ agentType: atype || 'agent-companion:ac-sonnet-low', finished }));
+  return fp;
+}
+const wk = (m) => m.workers.since;
+
+test('standing-metrics: STATUS is read from the SubagentHandback call and from earlier in the transcript', () => {
+  worker('C--pa', 'hb1', { handback: 'STATUS: partial\nBLOCKERS: none' });
+  worker('C--pa', 'hb2', { handback: 'no status here' });
+  worker('C--pa', 'wake', { text: 'STATUS: blocked\nneeds a credential', extra: ['The monitor expired; the report above stands.'] });
+  worker('C--pa', 'plain', { text: 'STATUS: done' });
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(wk(m).finished, 4);
+  assert.equal(wk(m).noStatusPct, 25, 'only the handback without a STATUS line');
+  assert.equal(wk(m).partialPct, 25); assert.equal(wk(m).blockedPct, 25);
+});
+
+test('standing-metrics: off-contract types and hook-verification probes are left out of status and Bash metrics and named', () => {
+  worker('C--pb', 'ok', { text: 'STATUS: done', bash: 10, refusals: 1 });
+  worker('C--pb', 'ex1', { atype: 'Explore', text: 'findings only', bash: 10, refusals: 5 });
+  worker('C--pb', 'ex2', { atype: 'web-fetch', text: 'page text' });
+  worker('C--pb', 'pr1', { brief: 'TYPE: x\n\nHook verification spawn, not real work: reply FOUND: no', text: 'FOUND: no', bash: 10, refusals: 5 });
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(wk(m).n, 4); assert.equal(wk(m).finished, 1); assert.equal(wk(m).noStatusPct, 0);
+  assert.deepEqual(wk(m).excluded, { probes: 1, byType: { Explore: 1, 'web-fetch': 1 } });
+  assert.equal(m.bash.since.n, 10); assert.equal(m.bash.since.refusals, 1); assert.equal(m.bash.since.refusalPer100, 10);
+});
+
+test('standing-metrics: files are chosen by mtime inside the window, every project represented; the cap drops the oldest', () => {
+  const a = worker('C--aaa', 'old', { text: 'STATUS: done' });
+  const b = worker('C--zzz', 'mid', { text: 'STATUS: done' });
+  const c = worker('C--zzz', 'new', { text: 'STATUS: done' });
+  const t = (s) => new Date(Date.now() - s * 1000);
+  utimesSync(a, t(300), t(300)); utimesSync(b, t(200), t(200)); utimesSync(c, t(100), t(100));
+  assert.equal(wk(W.analyze({ T, nowMs: T + 3 * HOUR })).n, 3, 'default cap covers a busy week');
+  assert.equal(wk(W.analyze({ T, nowMs: T + 3 * HOUR, scanCap: 2 })).n, 2, 'a safety cap keeps the newest two, not alphabetical order');
+  assert.ok(W.WORKER_SCAN_CAP >= 6000);
+});
+
+test('standing-metrics: blocked-share needs 5 blocked workers before it can flag', () => {
+  const mk = (blockedPct, finished) => { const m = metrics(); m.workers.since = { ...m.workers.since, finished, blockedPct }; return names(m).includes('blocked-share'); };
+  assert.equal(W.TH.blockedMinEv, 5);
+  assert.equal(mk(8, 39), false, '3 blocked of 39 stays quiet');
+  assert.equal(mk(10, 40), false, '4 blocked of 40 stays quiet');
+  assert.equal(mk(12.5, 40), true, '5 blocked of 40 flags');
+});
+
 // ---- state, hold, clear ----
 test('state: fail open on bad files', () => {
   writeFileSync(file('release-watch-flag.json'), '{bad'); writeFileSync(file('release-hold.json'), 'xx');
@@ -156,6 +217,10 @@ test('state: fail open on bad files', () => {
 
 test('hold is written only after notifiedAt + delay with no reply', () => {
   S.openFlag({ version: '1', flags: flag, at: T, check: '+1h' });
+  assert.equal(S.readFlag().notifiedAt, null, 'the tick never marks the flag as notified');
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 5 * HOUR }), null, 'never shown: no countdown, so no hold');
+  assert.ok(S.noteShown('s1', T)); // a session shows the flag: the countdown starts here
+  assert.equal(S.readFlag().notifiedAt, iso(T));
   assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 29 * 60e3 }), null);
   assert.equal(S.isHoldActive(), false);
   assert.equal(S.maybeHold({ holdMinutes: 0, at: T + 99 * HOUR }), null, '0 = notify only');
@@ -169,6 +234,7 @@ test('a reply before the hold stops the countdown; a reply during the hold does 
   assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 5 * HOUR }), null);
   S.clear({ at: T + 6 * HOUR });
   S.openFlag({ version: '1', flags: [{ name: 'other', value: 1 }], at: T + 7 * HOUR });
+  S.noteShown('s2', T + 7 * HOUR);
   S.maybeHold({ holdMinutes: 30, at: T + 8 * HOUR });
   assert.equal(S.isHoldActive(), true);
   assert.equal(humanAck(T + 9 * HOUR), null);
@@ -177,6 +243,7 @@ test('a reply before the hold stops the countdown; a reply during the hold does 
 
 test('clear lifts the hold, logs a row, and the cooldown suppresses the same flag unless it worsens', () => {
   S.openFlag({ version: '1', flags: flag, at: T });
+  S.noteShown('s1', T);
   S.maybeHold({ holdMinutes: 30, at: T + HOUR });
   const r = S.clear({ by: 'test', at: T + 2 * HOUR });
   assert.deepEqual(r, { flagCleared: true, holdCleared: true });
@@ -199,12 +266,14 @@ test('flag line: open unanswered flag and hold, silent when answered', () => {
   assert.equal(S.flagLine(), null);
   S.clear({ at: T - 1 });
   S.openFlag({ version: '1.2.3', flags: [{ name: 'z', value: 1 }], at: T });
+  S.noteShown('s1', T);
   S.maybeHold({ holdMinutes: 1, at: T + HOUR });
   assert.match(S.flagLine(), /RELEASE HOLD/);
 });
 
 test('flag line during a hold names flags raised later, and is unchanged without any', () => {
   S.openFlag({ version: '1', flags: [{ name: 'z', value: 1 }], at: T });
+  S.noteShown('s1', T);
   S.maybeHold({ holdMinutes: 1, at: T + HOUR });
   const before = S.flagLine();
   assert.match(before, /RELEASE HOLD/); assert.doesNotMatch(before, /Later checks/);
@@ -243,6 +312,73 @@ test('hooks: SessionStart shows the line to a lead, not to a subagent', () => {
   assert.match(lead.stdout, /RELEASE WATCH 9/);
   const sub = hook('scout-surface.mjs', { hook_event_name: 'SessionStart', session_id: 's', agent_id: 'a1', source: 'startup', cwd: tmp });
   assert.doesNotMatch(sub.stdout, /RELEASE WATCH/);
+});
+
+// ---- 0.31.65 flag delivery: the countdown starts at the first showing, and the flag line has its own hook process ----
+const R = await import('../hooks/lib/runaway.mjs');
+const hookAt = (args, payload, at) => spawnSync(process.execPath, [join(ROOT, 'hooks', 'runaway-notice.mjs'), ...args], {
+  input: JSON.stringify({ hook_event_name: 'UserPromptSubmit', cwd: tmp, ...payload }),
+  env: { ...env(), AC_ATTENDED: '1', ...(at ? { AGENT_COMPANION_FAKE_NOW: String(at) } : {}) }, encoding: 'utf8', windowsHide: true, cwd: tmp,
+});
+const ctxOf = (r) => { try { return JSON.parse(r.stdout).hookSpecificOutput.additionalContext; } catch { return ''; } };
+
+test('delivery timeline: the tick writes the flag, the lead is idle for 2 h, the first prompt shows it and the 30 min countdown starts there', () => {
+  S.openFlag({ version: '7.7.7', flags: flag, at: T, check: '+1h' });
+  assert.equal(S.readFlag().notifiedAt, null, 'the tick does not count as a notification');
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 31 * 60e3 }), null, 'nobody saw it: no hold 31 min after the tick');
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 2 * HOUR - 1 }), null, 'still unseen 2 h on: still no hold');
+  const r = hookAt(['--watch'], { session_id: 'lead-idle', prompt: 'back again' }, T + 2 * HOUR);
+  const line = ctxOf(r);
+  assert.match(line, /RELEASE WATCH 7\.7\.7/); assert.match(line, /Hold countdown: 30 min left/);
+  const f = S.readFlag();
+  assert.equal(f.notifiedAt, iso(T + 2 * HOUR), 'the countdown starts at the showing, not at the tick');
+  assert.equal(f.shownTo['lead-idle'], iso(T + 2 * HOUR)); assert.equal(f.ackedAt, null, 'showing is not an answer');
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 2 * HOUR + 29 * 60e3 }), null);
+  assert.equal(S.isHoldActive(), false);
+  assert.ok(S.maybeHold({ holdMinutes: 30, at: T + 2 * HOUR + 31 * 60e3 }), 'held 30 min after the showing');
+  assert.equal(S.isHoldActive(), true);
+});
+
+test('delivery: a later prompt of the same session shows the shrinking countdown without moving the start; showing never acks; a worse flag restarts it', () => {
+  S.openFlag({ version: '7.7.7', flags: [{ name: 'queue-clears', value: 3, level: 3, detail: 'x' }], at: T });
+  hookAt(['--watch'], { session_id: 'lead-a', prompt: 'one' }, T + HOUR);
+  const later = ctxOf(hookAt(['--watch'], { session_id: 'lead-a', prompt: 'two' }, T + HOUR + 10 * 60e3));
+  assert.match(later, /Hold countdown: 20 min left/);
+  assert.equal(S.readFlag().notifiedAt, iso(T + HOUR)); assert.equal(S.readFlag().ackedAt, null);
+  // a flag that is new, or has more than doubled, is a new notification: unseen again until a session shows it
+  S.openFlag({ version: '7.7.7', flags: [{ name: 'another-flag', value: 2, level: 2 }], at: T + 2 * HOUR });
+  assert.equal(S.readFlag().notifiedAt, null, 'renotify clears the first-showing time');
+  assert.deepEqual(S.readFlag().shownTo, {});
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 5 * HOUR }), null);
+  assert.match(ctxOf(hookAt(['--watch'], { session_id: 'lead-a', prompt: 'three' }, T + 3 * HOUR)), /Hold countdown: 30 min left/);
+});
+
+test('hook modes: --watch prints the flag line and leaves queued notices alone; --no-watch drains notices and prints no flag line', () => {
+  S.openFlag({ version: '7.7.7', flags: flag, at: T });
+  assert.ok(R.queueNotice('lead-m', 'invented queued notice'));
+  const w = ctxOf(hookAt(['--watch'], { session_id: 'lead-m', prompt: 'p1' }, T + HOUR));
+  assert.match(w, /RELEASE WATCH 7\.7\.7/); assert.doesNotMatch(w, /invented queued notice/);
+  const nw = ctxOf(hookAt(['--no-watch'], { session_id: 'lead-m', prompt: 'p2' }, T + HOUR));
+  assert.match(nw, /invented queued notice/); assert.doesNotMatch(nw, /RELEASE WATCH/);
+  assert.equal(ctxOf(hookAt(['--no-watch'], { session_id: 'lead-m', prompt: 'p3' }, T + HOUR)), '', 'drained once');
+  const both = ctxOf(hookAt([], { session_id: 'lead-m', prompt: 'p4' }, T + HOUR));
+  assert.match(both, /RELEASE WATCH 7\.7\.7/, 'no argument still runs the release watch');
+  // --no-watch never shows the flag, so it never starts the countdown
+  S.clear({ at: T + 2 * HOUR });
+  S.openFlag({ version: '7.7.7', flags: [{ name: 'fresh-one', value: 5 }], at: T + 3 * HOUR });
+  hookAt(['--no-watch'], { session_id: 'lead-n', prompt: 'p5' }, T + 4 * HOUR);
+  assert.equal(S.readFlag().notifiedAt, null);
+});
+
+test('hooks.json: UserPromptSubmit registers runaway-notice twice, --no-watch (10 s) and --watch (5 s); PostToolUse stays on the plain form', () => {
+  const h = JSON.parse(readFileSync(join(ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks;
+  const reg = (ev) => (h[ev] || []).flatMap((g) => g.hooks.map((x) => ({ ...x, matcher: g.matcher }))).filter((x) => (x.args || []).some((a) => a.endsWith('runaway-notice.mjs')));
+  const ups = reg('UserPromptSubmit');
+  assert.equal(ups.length, 2);
+  const nw = ups.find((x) => x.args.includes('--no-watch')); const w = ups.find((x) => x.args.includes('--watch'));
+  assert.ok(nw && w); assert.equal(nw.timeout, 10); assert.equal(w.timeout, 5);
+  const post = reg('PostToolUse');
+  assert.equal(post.length, 1); assert.deepEqual(post[0].args.filter((a) => a.startsWith('--')), []);
 });
 
 // ---- 0.31.63 fix round: one test per fix, invented data ----
@@ -306,7 +442,10 @@ test('B3: per-window rates; answered flag quiet unless its rate more than double
   // unanswered repeat does not restart the countdown
   rmSync(file('release-watch-flag.json'), { force: true });
   S.openFlag({ version: '1', T: a, check: '+1h', flags: fl(3), at: T });
+  assert.equal(S.readFlag().notifiedAt, null, 'not shown yet');
+  S.noteShown('s1', T);
   const n0 = S.readFlag().notifiedAt;
+  assert.equal(n0, iso(T), 'the first showing starts the countdown');
   S.openFlag({ version: '1', T: a, check: '+2h', flags: fl(3.5), at: T + 20 * 60e3 });
   assert.equal(S.readFlag().notifiedAt, n0);
   assert.ok(S.maybeHold({ holdMinutes: 30, at: T + 31 * 60e3 }), 'countdown ran from the first notice');
@@ -380,7 +519,10 @@ test('replay: a real spike in the same replay still flags and holds', () => {
   const r = W.tick({ at: T + 8 * HOUR, installed: installed(), holdMinutes: 30 });
   assert.ok(r.flagged.includes('queue-clears'), String(r.flagged)); assert.ok(r.flagged.includes('guard:demo-guard/deny'), String(r.flagged));
   assert.equal(r.held, false);
-  assert.equal(W.tick({ at: T + 8 * HOUR + 31 * 60e3, installed: installed(), holdMinutes: 30 }).held, true);
+  assert.equal(W.tick({ at: T + 8 * HOUR + 31 * 60e3, installed: installed(), holdMinutes: 30 }).held, false, 'no session has shown the flag: no countdown, no hold');
+  assert.ok(S.noteShown('s1', T + 9 * HOUR)); // a session shows the flag one hour after the tick
+  assert.equal(W.tick({ at: T + 9 * HOUR + 29 * 60e3, installed: installed(), holdMinutes: 30 }).held, false, 'the countdown runs from the showing');
+  assert.equal(W.tick({ at: T + 9 * HOUR + 31 * 60e3, installed: installed(), holdMinutes: 30 }).held, true);
   assert.equal(S.isHoldActive(), true);
 });
 
@@ -506,6 +648,7 @@ test('usage-source-empty is reported but never starts a hold', () => {
   assert.equal(S.isHoldActive(), false);
   // beside a release flag the hold still starts, and names only the release flag
   S.openFlag({ version: '1', flags: [{ name: 'usage-source-empty', value: 0, level: 0 }, { name: 'queue-denied', value: 30, level: 30 }], at: T + 5 * HOUR, check: '+4h' });
+  S.noteShown('s1', T + 5 * HOUR);
   const h = S.maybeHold({ holdMinutes: 30, at: T + 5 * HOUR + 31 * 60e3 });
   assert.ok(h, 'a release flag beside it still holds'); assert.match(h.reason, /queue-denied/); assert.doesNotMatch(h.reason, /usage-source-empty/);
   assert.deepEqual(h.flags.map((x) => x.name), ['queue-denied']); assert.doesNotMatch(S.holdDenyMessage(), /usage-source-empty/);
@@ -601,8 +744,8 @@ test('payload-origin', () => {
 
 test('clear-words-need-typed', () => {
   S.openFlag({ version: '1', flags: [{ name: 'z', value: 1 }], at: T });
+  assert.ok(S.noteShown('s1', T)); // a session sees the flag: the countdown starts
   assert.ok(S.maybeHold({ holdMinutes: 1, at: T + HOUR }));
-  assert.ok(S.noteShown('s1', T + HOUR)); // a session sees the hold line
   assert.equal(S.noteCandidate({ sessionId: 's1', transcriptPath: 'fake', prompt: 'build is green', at: T + HOUR + MIN }), false, 'during a hold only the clear words are recorded');
   assert.ok(S.noteCandidate({ sessionId: 's1', transcriptPath: 'fake', prompt: 'clear hold', at: T + HOUR + 2 * MIN }));
   const sched = urec(T + HOUR + 2 * MIN, 'clear hold', { isMeta: true, promptSource: 'system', turnOrigin: 'scheduled' });
@@ -872,6 +1015,7 @@ test('standing-ceiling: a metric over its fixed ceiling is a finding; it is only
   assert.equal(existsSync(file('release-watch-run.json')), false, 'no chain started');
   // with a flag and a hold already there they stay exactly as they were
   W.tick({ at: T + HOUR, installed: installed(), run: flagged, holdMinutes: 30, standingRun: none });
+  S.noteShown('s1', T + HOUR); // a session shows the flag; the countdown starts there
   const before = readFileSync(file('release-watch-flag.json'), 'utf8');
   const hb = S.maybeHold({ holdMinutes: 30, at: T + HOUR + 31 * MIN }); assert.ok(hb);
   const holdBefore = existsSync(file('release-watch-hold.json')) ? readFileSync(file('release-watch-hold.json'), 'utf8') : null;
@@ -1015,10 +1159,12 @@ test('legacy-flag-still-flags-revoked: a flag still over the v2 floor keeps its 
   assert.deepEqual(r.migrated, { kept: ['queue-denied'], revoked: true });
   const f = S.readFlag();
   assert.equal(f.v, 2); assert.equal(S.flagIsOpen(f), true);
-  assert.equal(f.ackedAt, null); assert.equal(f.ack, null); assert.equal(f.notifiedAt, iso(at)); assert.deepEqual(f.candidates, []);
+  assert.equal(f.ackedAt, null); assert.equal(f.ack, null); assert.equal(f.notifiedAt, null); assert.deepEqual(f.candidates, []);
   const row = allRows().find((x) => x.event === 'ack-revoked'); assert.ok(row);
   assert.match(S.flagLine() || '', /queue-denied/, 'the flag is shown again');
-  assert.equal(S.maybeHold({ holdMinutes: 30, at: at + 10 * MIN }), null, 'the countdown restarted from the migration');
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: at + 31 * MIN }), null, 'no countdown until a session shows the flag again');
+  assert.ok(S.noteShown('s1', at)); // the first showing starts the countdown
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: at + 10 * MIN }), null, 'the countdown restarted from that showing');
   assert.ok(S.maybeHold({ holdMinutes: 30, at: at + 31 * MIN }), 'and a hold follows if still unanswered');
 });
 

@@ -27,7 +27,7 @@
 
 import { readStdin, opt, passthrough, appendLog } from './lib/context.mjs';
 import {
-  HANDOFF_LOG, handoffConfig, handoffActive, handoffReturnPath, handoffContinueText, finalIsComplete, handoffFileWritten, endGuardText, handoffRow,
+  HANDOFF_LOG, handoffThreshold, handoffConfig, handoffActive, handoffReturnPath, handoffContinueText, finalIsComplete, handoffFileWritten, endGuardText, handoffRow,
 } from './lib/handoff-limit.mjs';
 import { noticeVariant } from './lib/subagent-context.mjs';
 import { readBrief } from './lib/step-budget.mjs';
@@ -82,7 +82,7 @@ function runawayCheck(p, path) {
 // reported to the lead once, however often the worker stops (SendMessage
 // continues it and it stops again).
 function contextCheck(p, path) {
-  const threshold = opt('subagent_context_notice_tokens', CONTEXT_DEFAULT_TOKENS);
+  const threshold = handoffThreshold(p.agent_type);
   if (!(threshold > 0) || !p.agent_id) return;
 
   const sig = readContextSignal(path);
@@ -126,7 +126,7 @@ function handoffReturnCheck(p, path) {
   let model = null; let sig = null;
   try { sig = readContextSignal(path); model = (sig || {}).model || null; } catch { /* the type alone is enough */ }
   try { // one row per continuation the lead is told to spawn (action `return`; tokens null when the transcript has no reading)
-    appendLog(HANDOFF_LOG, handoffRow(p, sig || {}, 'soft', 'return', opt('subagent_context_notice_tokens', CONTEXT_DEFAULT_TOKENS)));
+    appendLog(HANDOFF_LOG, handoffRow(p, sig || {}, 'soft', 'return', handoffThreshold(p.agent_type)));
   } catch { /* logging never blocks the notice */ }
   queueNotice(p.session_id, handoffContinueText(p.agent_type, p.agent_id, file, model));
 }
@@ -134,7 +134,7 @@ function handoffReturnCheck(p, path) {
 // The one thing this hook can say to a worker: a worker past the soft limit that ends with no completed STATUS and no handoff file is
 // asked ONCE to write the handoff first (decision: block, then it ends again). The claim per agent id means a second end is never blocked.
 function handoffStopGuard(p, path) {
-  const soft = opt('subagent_context_notice_tokens', CONTEXT_DEFAULT_TOKENS);
+  const soft = handoffThreshold(p.agent_type);
   const hc = handoffConfig(soft);
   if (!p.agent_id || !(soft > 0) || !handoffActive(hc, p.agent_type)) return null;
   const msg = typeof p.last_assistant_message === 'string' ? p.last_assistant_message : '';

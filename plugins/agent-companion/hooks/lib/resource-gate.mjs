@@ -840,14 +840,41 @@ function leadingCd(s, shell = 'bash') {
   const [first, second] = scanned.segments;
   if (!first || !second || s.slice(0, first.start).trim() !== '') return null;
   // `cd d && x`, `cd d; x` and `cd d` newline `x` all keep the cd outside the queue with the same meaning.
-  if (!/^\s*(?:&&|;|\r?\n)\s*$/.test(s.slice(first.end, second.start))) return null;
+  const gap = s.slice(first.end, second.start);
+  // `cd d && ( ... )`: the rest is one parenthesised group, wrapped whole (see groupRestOk).
+  const groupGap = !ps && /^\s*(?:&&|;|\r?\n)\s*\(\s*$/.test(gap);
+  if (!groupGap && !/^\s*(?:&&|;|\r?\n)\s*$/.test(gap)) return null;
   if (/<<|[`$]/.test(first.text)) return null;
   const w = wordsOf(first.text);
   if (ps ? !['cd', 'chdir', 'sl', 'set-location'].includes(String(w[0]).toLowerCase()) : w[0] !== 'cd') return null;
   // `cd -- <dir>` is `cd <dir>`; any other extra word (cd -P x, cd a b) is not verified.
   const args = w[1] === '--' ? w.slice(2) : w.slice(1);
   if (args.length > 1) return null;
+  if (groupGap) {
+    const open = s.indexOf('(', first.end);
+    return groupRestOk(s.slice(open)) ? { rest: open, cdEnd: first.end } : null;
+  }
   return { rest: second.start + second.text.match(/^\s*/)[0].length, cdEnd: first.end };
+}
+
+/**
+ * True when `rest` (starting at a `(`) is one `( ... )` group, optionally followed by more
+ * plain steps joined with `&&`, `;`, `|` or a newline, and holds no other group, brace group
+ * or heredoc. Wrapping that text whole (the queue runs it in `bash -c`, from the directory
+ * the hoisted cd set) keeps the cwd and the exit status. A `||` or a background `&` after
+ * the group would change what a failed or detached cd means, so those stay denied.
+ */
+function groupRestOk(rest) {
+  const close = skipDollarParen(`$${rest}`, 0) - 1; // matching `)` of the leading `(`
+  if (close < 1 || close >= rest.length || rest[close] !== ')') return false;
+  const after = rest.slice(close + 1);
+  if (/\|\||(?<![&>\d])&(?![&>])/.test(after)) return false;
+  for (const part of [rest.slice(1, close), after]) {
+    let sc;
+    try { sc = scanCommand(part); } catch { return false; }
+    if (sc.flags.has('group') || sc.flags.has('heredoc')) return false;
+  }
+  return true;
 }
 
 /**
@@ -937,9 +964,12 @@ export async function gateDecision(command, { cwd, mode = DEFAULT_GATE_MODE, env
     const why = !(mode === 'rewrite') ? ''
       : losesCwd ? ' (not rewritten: it changes directory after its first step, and inside the queue that change would not last past this call)'
         : ' (rewrite does not apply in this permission mode or next to a permission rule, so it is a denial)';
+    // The project's own listed command for this kind of job (lib/project-commands.mjs), when it has a list.
+    let listed = '';
+    try { listed = (await import('./project-commands.mjs')).listedCommandFor(classes, cwd).trim(); } catch { /* fail open */ }
     return {
       action: 'deny', classes, command: wrapped,
-      text: `Heavy command (${weight}) not run${why}. ${how}${bg}Prefix RESOURCE_QUEUE=0 only when the queue itself is broken.`,
+      text: `Heavy command (${weight}) not run${why}. ${how}${bg}${listed ? `${listed} ` : ''}Prefix RESOURCE_QUEUE=0 only when the queue itself is broken.`,
     };
   } catch { return none; }
 }

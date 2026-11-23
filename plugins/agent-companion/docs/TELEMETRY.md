@@ -421,7 +421,7 @@ compaction once per compaction).
 | `kind` | string | `size` (past the threshold) or `compaction` (a `compact_boundary` just behind it) |
 | `phase` | string | `mid-run`: injected into the subagent by the PreToolUse hook. `stop`: the hook never saw it (it crossed on the subagent's last turn, or it made no tool call), found at SubagentStop, so the subagent was not told |
 | `tokens` | number | the subagent's context size at its latest request (input + cache read + cache write) |
-| `threshold` | number | `subagent_context_notice_tokens` as set |
+| `threshold` | number | the handoff line for this agent type: `subagent_context_notice_tokens` as set, or `subagent_context_notice_high_tokens` (default 130000 since 0.31.65) for `ac-sonnet-high`, `ac-sonnet-xhigh` and the `ac-opus-*` rungs |
 | `trigger`, `pre_tokens` | string, number; `compaction` only | the boundary's `compactMetadata.trigger` (`auto` or `manual`) and the context it held before compacting |
 
 ### `context-ceiling.jsonl` — one record per context-ceiling nudge
@@ -453,9 +453,9 @@ Written by `hooks/subagent-context.mjs` (and, for `end-block` and `return`, `hoo
 | `agent_id`, `agent_type` | string | the subagent and its type |
 | `model` | string or null | model of its latest request |
 | `tokens` | number | its context size at that request (input + cache read + cache write) |
-| `limit` | string | `soft` or `hard` |
+| `limit` | string | `soft`, `hard`, or `warn` (0.31.65: the once-only warn line, `subagent_context_warn_tokens`) |
 | `limit_tokens` | number | that limit as set |
-| `action` | string | `notice` (first soft notice), `repeat` (a later one, every +`subagent_context_notice_repeat_tokens`), `deny` (hard limit, with `tool`), `end-block` (the one end-of-run request to write the handoff), `return` (0.31.61: the worker ended with `DONE: partial, handoff at <path>` and the lead was told, once, to spawn a fresh worker; `limit` is `soft`, `tokens` is null when the transcript had no reading) |
+| `action` | string | `notice` (first soft notice), `warn` (0.31.65: keep-the-handoff-file-current line, below the handoff line; not counted as a notice), `repeat` (a later one, every +`subagent_context_notice_repeat_tokens`), `deny` (hard limit, with `tool`), `end-block` (the one end-of-run request to write the handoff), `return` (0.31.61: the worker ended with `DONE: partial, handoff at <path>` and the lead was told, once, to spawn a fresh worker; `limit` is `soft`, `tokens` is null when the transcript had no reading) |
 | `tool` | string | only on `deny`: the tool that was denied |
 
 ### `long-runs.jsonl` (in `state/`, not `telemetry/`) — one record per long-run crossing, plus one summary per ended long run
@@ -626,6 +626,12 @@ contend for a lock.
 | `lock_wait_ms` | number | time spent waiting for the state lock |
 | `duration_ms` | number | wall time of the hook, process start to the row |
 | `transcript_bytes` | number \| absent | the size of the agent's transcript file at that moment: how deep into the session the read fell |
+| `source` | `shell` | absent | `shell`: the row came from `hooks/bash-read.mjs` (a `sed -n`, `cat`, `head`, `tail`, `Get-Content` or `awk` read) rather than from a Read; it shares the Read's per-agent ledger |
+| `reason` | `covered` | `cap` | `budget` | absent | `deny` rows of the shell hook and budget denials: which rule refused (`covered`: already in context; `cap`: over `read_cap_lines`; `budget`: new lines past `read_budget_lines`) |
+| `lines_read` | number | absent | `nudge` and budget `deny` rows: distinct lines of the file this agent had already read |
+
+The 0.31.65 budget adds outcomes `nudge` (the read crossed 75% of `read_budget_lines`; context was added, nothing denied) and `outline` (the first read of a file over 400 lines carried its outline). `est_chars_avoided` is 0 on a budget denial: the avoided size is unknown. The toggle is `read_budget`.
+
 
 The effect for a review: `sum(est_chars_avoided) - sum(deny_chars)` is what stayed
 out of context, a ceiling, because a `retry-ran` row means the agent did not have

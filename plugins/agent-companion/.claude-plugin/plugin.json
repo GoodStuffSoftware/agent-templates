@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.64",
+  "version": "0.31.65",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -833,6 +833,18 @@
       "description": "The cap of the subagent Read cap, in lines: a Read with no limit on a longer text file is limited to this many lines (a Read from an offset is capped only when more than this many lines remain).",
       "default": 300
     },
+    "read_budget": {
+      "type": "boolean",
+      "title": "Read budget per file",
+      "description": "A subagent that has read this many distinct lines of one file (Read and shell reads together: sed -n, cat, head, tail, Get-Content, awk) gets a nudge at 75% of the budget (grep -n for the symbol you need) and, at the budget, a denial of further NEW lines of that file; the identical call, repeated, runs. The same hook also denies a shell read the Read rules would deny (lines already in context and unchanged; more than read_cap_lines at once) and, on a subagent first read of a file over 400 lines, attaches a compact outline (functions, classes, exports, headings, with line numbers; about 1,500 characters). Main thread, logs and test output, binary files, files outside the repository and the agent's own brief or handoff files are untouched. Default on, with the value measured 2026-11-23 on 38 writers over 90K (a 400-line budget helped 42% of them, median 6.6K tokens). Off = no budget, no outline. Also CLAUDE_PLUGIN_OPTION_READ_BUDGET=0.",
+      "default": true
+    },
+    "read_budget_lines": {
+      "type": "number",
+      "title": "Read budget: lines",
+      "description": "The per-file budget of read_budget, in distinct lines (default 400: measured 2026-11-23 on 38 writers over 90K, where 300 helped more writers but would deny a legitimate read of one 300-line module and 600 helped half as many). The nudge comes at 75% of it.",
+      "default": 400
+    },
     "interrupted_worker_notice": {
       "type": "boolean",
       "title": "Interrupted-worker notice",
@@ -1075,8 +1087,20 @@
     },
     "subagent_context_notice_tokens": {
       "type": "number",
-      "title": "Subagent context notice: tokens",
-      "description": "Advisory only. A PreToolUse hook inside each subagent reads the subagent's own context size (input + cache read + cache write of its latest request). When it passes this many tokens the subagent is told once to finish the current step, commit and push its WIP, write <task>-handoff.md (done / left / first next action) and return \"DONE: partial, handoff at <path>\" (the lead then starts a fresh worker on the same rung from that file); when it has just compacted it is told only to re-read what the next step needs and continue (no wrap-up: workers compact and keep going). A reviewer, lookup, operate or plan-leg worker (a read-only role) gets a read-only variant instead: write what you have to your detail or plan file and return, never commit or push. The lead is told when it stops. Nothing is ever blocked. Shipped default 110000: measured on one operator's Opus workers (2026-11-13), long workers averaged 133k context per call and execution calls were 37% of Opus worker cost; raise it for a machine where workers run cheaper or shorter. 0 turns it off, the compaction note included.",
+      "title": "Subagent context notice: tokens (handoff line, lower rungs)",
+      "description": "Handoff line for ac-haiku, ac-sonnet-low, ac-sonnet-medium and every other agent; ac-sonnet-high, ac-sonnet-xhigh and the ac-opus-* rungs use subagent_context_notice_high_tokens instead (0.31.65). Our value, shipped default 110000, comes from the 2026-11 usage review (see subagent_context_hard_tokens). Advisory only. A PreToolUse hook inside each subagent reads the subagent's own context size (input + cache read + cache write of its latest request). When it passes this many tokens the subagent is told once to finish the current step, commit and push its WIP, write <task>-handoff.md (done / left / first next action) and return \"DONE: partial, handoff at <path>\" (the lead then starts a fresh worker on the same rung from that file); when it has just compacted it is told only to re-read what the next step needs and continue (no wrap-up: workers compact and keep going). A reviewer, lookup, operate or plan-leg worker (a read-only role) gets a read-only variant instead: write what you have to your detail or plan file and return, never commit or push. The lead is told when it stops. Nothing is ever blocked. Shipped default 110000: measured on one operator's Opus workers (2026-11-13), long workers averaged 133k context per call and execution calls were 37% of Opus worker cost; raise it for a machine where workers run cheaper or shorter. 0 turns it off, the compaction note included.",
+      "default": 110000
+    },
+    "subagent_context_notice_high_tokens": {
+      "type": "number",
+      "title": "Subagent context notice: tokens (handoff line, higher rungs)",
+      "description": "The handoff line for ac-sonnet-high, ac-sonnet-xhigh and the ac-opus-* rungs (the lower rungs keep subagent_context_notice_tokens). Our value, shipped default 130000 since 0.31.65: these rungs carry more per step and their calls between 110K and 130K were still productive in the 2026-11 long-run sample; the hard stop stays at subagent_context_hard_tokens. 0 or less falls back to subagent_context_notice_tokens. Raise or lower it for your own workers.",
+      "default": 130000
+    },
+    "subagent_context_warn_tokens": {
+      "type": "number",
+      "title": "Subagent context warning: tokens",
+      "description": "Once per worker, below its handoff line: the worker is told to keep its <task>-handoff.md current so a handoff at any moment loses nothing. Our value, shipped default 110000 since 0.31.65. It shows only for a rung whose handoff line is higher (the higher rungs, 130000); where the two lines coincide only the handoff notice fires. 0 = no warning.",
       "default": 110000
     },
     "subagent_ceiling_tokens": {

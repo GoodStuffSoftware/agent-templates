@@ -231,6 +231,28 @@ test('rewrite: a cd the gate cannot verify keeps the denial', async () => {
   }
 });
 
+test('rewrite: a leading cd then one ( ... ) group is hoisted; the group is wrapped whole', async () => {
+  for (const [head, group] of [
+    ['cd app && ', '( npm ci; npm run lint )'], ['cd app; ', '(npm ci 2>&1 | tail -5)'], ['cd app\n', '( npm ci )'],
+    ['cd -- app && ', '(npm ci --no-audit)'], ['cd app && ', '(npm ci 2>&1 | tail -5) && git diff --stat'], ['cd app && ', '(npm ci > out.log 2>&1; echo done >> out.log) ; tail -3 out.log'],
+  ]) {
+    const c = `${head}${group}`;
+    assert.equal(rewrite(c), `${head}${wrapSegment(group, 'install', LAUNCHER)}`, JSON.stringify(c));
+    const d = await dec(c, { mode: 'rewrite' });
+    assert.equal(d.action, 'rewrite', JSON.stringify(c));
+    assert.equal(wrapLosesCwd(c), false, JSON.stringify(c));
+  }
+});
+
+test('rewrite: a group the gate cannot verify keeps the denial', async () => {
+  for (const c of ['cd a && cd b && ( npm ci )', 'cd a && ( cd b; npm ci )', 'cd a && ( npm ci; cd .. )', 'cd -P a && ( npm ci )', 'cd a b && ( npm ci )',
+    'cd $D && ( npm ci )', 'cd a && ( ( npm ci ) )', 'cd a && ( npm ci ) && ( npm test )', 'cd a && ( npm ci ) || echo failed', 'cd a && ( npm ci ) &',
+    'cd a && ( npm ci; pushd b ) && echo x', 'cd a && { npm ci; }', 'cd a && ( npm ci ) && cd ..', 'npm ci && cd a && ( npm ci )']) {
+    const d = await dec(c, { mode: 'rewrite' });
+    assert.equal(d.action, 'deny', c);
+  }
+});
+
 test('rewrite: wrapLosesCwd flags a directory change inside the wrapped part only', () => {
   assert.equal(wrapLosesCwd('cd app && npm ci'), false);
   assert.equal(wrapLosesCwd('npm ci && cd app'), true);

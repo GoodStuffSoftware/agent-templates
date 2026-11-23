@@ -16,7 +16,7 @@
 // reads the network or calls a model. Every writer fails open: a scout run must
 // never be broken by its own bookkeeping.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, copyFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, copyFileSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
@@ -357,7 +357,14 @@ function writeAtomic(file, text) {
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
   writeFileSync(tmp, text);
-  renameSync(tmp, file);
+  // Windows refuses a rename onto a file another process has open or is renaming over (EPERM/EBUSY/EACCES):
+  // retry briefly so parallel runs queue up instead of one failing.
+  for (let i = 0; ; i++) {
+    try { renameSync(tmp, file); return; } catch (e) {
+      if (i >= 40 || !['EPERM', 'EBUSY', 'EACCES'].includes(e && e.code)) { try { unlinkSync(tmp); } catch { /* best effort */ } throw e; }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10 + i * 5);
+    }
+  }
 }
 
 export function paths(dir) {

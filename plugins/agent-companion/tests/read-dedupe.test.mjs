@@ -374,7 +374,7 @@ test('hook: deny, retry-ran and allow rows carry the documented telemetry fields
   const sid = session();
   const transcript = join(fx.dir, 'transcript.jsonl');
   writeFileSync(transcript, 'x'.repeat(1234));
-  const a = new Agent(fx, sid, 'agent-t');
+  const a = new Agent(fx, sid, 'agent-t', { CLAUDE_PLUGIN_OPTION_READ_BUDGET: '0' }); // this test is about the dedupe rows, not the 0.31.65 budget
   const withExtra = (ev, tool_use_id, offset, limit, extra = {}) => a.run(ev, a.base({
     hook_event_name: ev === 'pre' ? 'PreToolUse' : 'PostToolUse', tool_name: 'Read', tool_use_id, transcript_path: transcript,
     tool_input: { file_path: f, offset, limit }, ...extra,
