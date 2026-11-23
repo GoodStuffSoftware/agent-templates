@@ -421,7 +421,7 @@ compaction once per compaction).
 | `kind` | string | `size` (past the threshold) or `compaction` (a `compact_boundary` just behind it) |
 | `phase` | string | `mid-run`: injected into the subagent by the PreToolUse hook. `stop`: the hook never saw it (it crossed on the subagent's last turn, or it made no tool call), found at SubagentStop, so the subagent was not told |
 | `tokens` | number | the subagent's context size at its latest request (input + cache read + cache write) |
-| `threshold` | number | the handoff line for this agent type: `subagent_context_notice_tokens` as set, or `subagent_context_notice_high_tokens` (default 130000 since 0.31.65) for `ac-sonnet-high`, `ac-sonnet-xhigh` and the `ac-opus-*` rungs |
+| `threshold` | number | the handoff line for this agent type: `subagent_context_notice_tokens` as set, `subagent_context_notice_high_tokens` (default 130000 since 0.31.65) for `ac-sonnet-high` and `ac-sonnet-xhigh`, or `subagent_context_notice_opus_tokens` (default 120000 since 0.31.66) for the `ac-opus-*` rungs |
 | `trigger`, `pre_tokens` | string, number; `compaction` only | the boundary's `compactMetadata.trigger` (`auto` or `manual`) and the context it held before compacting |
 
 ### `context-ceiling.jsonl` — one record per context-ceiling nudge
