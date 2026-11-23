@@ -108,7 +108,7 @@ import { readFileSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { homedir, devNull } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { buildScanContext, scanText, scanOptionsForRel, skipsAsBinary } from './leak-check.mjs';
+import { buildScanContext, scanText, scanOptionsForRel, skipsAsBinary, lessonCapFinding, loadLessonBaseline } from './leak-check.mjs';
 import { cleanGitEnv } from '../plugins/agent-companion/scripts/lib/git-env.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -831,6 +831,8 @@ export function readCommit(git, sha, { maxFileBytes = DEFAULT_MAX_FILE_BYTES } =
     f.compressed = compressedKind(buf);
     // An old version over the cap is not read: every line then counts as new.
     f.lines = newLines(buf, f.oldOids.map((o) => blobs.get(o)).filter(Boolean));
+    // The lesson word cap needs the whole body, not just the new lines.
+    if (!f.binary && f.lines.length && /^lessons\/.+\.md$/.test(f.path.text)) f.lessonText = buf.toString('utf8');
   }
   for (const f of files) {
     delete f.newOid;
@@ -872,7 +874,7 @@ function lineViews(l, binary) {
 // or "denylist line N". Nothing in a hit is text taken from the commit
 // except `file`, a path object that formatHits() prints only through the
 // redactor.
-export function scanCommit(commit, { leakCtx = null, denylist = [], isRepoCommit = () => false } = {}) {
+export function scanCommit(commit, { leakCtx = null, denylist = [], isRepoCommit = () => false, lessonBaseline = {} } = {}) {
   const hits = [];
   const { sha } = commit;
   const derived = leakCtx?.derived || [];
@@ -896,6 +898,10 @@ export function scanCommit(commit, { leakCtx = null, denylist = [], isRepoCommit
       for (const h of scanText(text, { ...scanOptionsForRel(rel), derived, realUsers }).hits) {
         add(h.line - 1, 'leak-check', h.label);
       }
+    }
+    if (leakCtx && f.lessonText !== undefined) {
+      const cap = lessonCapFinding(rel, f.lessonText, lessonBaseline);
+      if (cap?.hit) hits.push({ sha, where: 'diff', file: f.path, line: 1, binary: false, check: 'leak-check', label: cap.hit.label });
     }
     decoded.forEach((d, i) => {
       for (const e of denylist) if (d.views.some((v) => e.test(v))) add(i, 'private-names', `denylist line ${e.lineNo}`);
@@ -1106,6 +1112,7 @@ export function runPushScan({
       return repoCommitCache.get(tok);
     };
 
+    const lessonBaseline = loadLessonBaseline(repo);
     const unscanned = [];
     const compressed = [];
     for (const sha of shas) {
@@ -1114,7 +1121,7 @@ export function runPushScan({
         if (f.unscanned) unscanned.push({ sha, file: f.path, size: f.unscanned.size });
         if (f.compressed) compressed.push({ sha, file: f.path, kind: f.compressed });
       }
-      hits.push(...scanCommit(c, { leakCtx: ctx, denylist: deny.entries, isRepoCommit }));
+      hits.push(...scanCommit(c, { leakCtx: ctx, denylist: deny.entries, isRepoCommit, lessonBaseline }));
     }
 
     for (const u of unscanned) {

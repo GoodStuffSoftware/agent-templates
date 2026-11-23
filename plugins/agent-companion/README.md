@@ -217,6 +217,16 @@ Agents re-read unchanged files: a 7-day measurement (2026-10-04) found 654 repea
 - **Shell reads, budget and outline (0.31.65):** writers read code through `sed -n 'A,Bp'`, `cat`, `head`, `tail`, `Get-Content` and `awk` as much as through Read, and no hook saw those. `hooks/bash-read.mjs` (PreToolUse on `Bash` and `PowerShell`, subagents only) treats a plain read of one text file as a Read: same ledger, same rules, and a denial that names the equivalent `Read(file_path, offset, limit)`; the identical command, repeated, runs. A search (`cat f | grep x`, `grep -n x f`), a redirect, a chain, a glob, several files, logs and tool output (`*.log`, `tmp/`), binaries, files outside the repository and the main thread are untouched. A **per-file budget** (`read_budget`, `read_budget_lines`, default 400) applies to Read and shell reads together: a nudge at 300 distinct lines, a denial of new lines at 400. The first read of a js, mjs, ts, py, md, sh or ps1 file over 400 lines also carries an **outline** (functions, classes, exports, headings, with line numbers; at most about 1,500 characters) as context. Code: `hooks/lib/read-shell.mjs`, `hooks/lib/read-dedupe.mjs`. Fails open.
 - **Measure it:** `telemetry/read-dedupe.jsonl` (see `docs/TELEMETRY.md`): a row per denial, per denied request that was repeated and ran, per repeat-eligible read that was allowed (with the reason, the denominator of the denial rate) and per lock timeout. A high retry share means agents mostly did NOT have the content in context and the threshold or age cap is too loose.
 
+## Resource queue: the one invocation
+
+Heavy work (test suites, builds, e2e, emulators) runs through the machine-wide queue. The one correct form:
+
+```
+node <plugin>/scripts/resource-queue.mjs run -- <cmd...>
+```
+
+`--resource` defaults to `box:1`; add `--resource box:N` for a bigger share and `--class <id>` only for a class named in the rules (an unknown class or flag exits 2 and prints the one usage line). Pass the command after `--` as separate arguments, or one quoted line with `--shell bash`. The resource gate already rewrites most heavy commands, so hand-wrapping is optional. Spec: [docs/resource-queue.md](docs/resource-queue.md).
+
 ## PR and CI wait
 
 Agents polling a PR or CI with `gh pr checks`, `gh run watch`, `gh pr view` and sleep loops pay for every poll: each result is re-read from the prompt cache for the rest of the session. `scripts/pr-wait.mjs` does the waiting inside a process, where it costs no tokens, and returns the final state in one call.
