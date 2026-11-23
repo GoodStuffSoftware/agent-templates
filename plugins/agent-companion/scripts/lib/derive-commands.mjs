@@ -1,6 +1,6 @@
 // derive-commands.mjs -- propose a project's command list from its own files (scripts/project-commands.mjs derive).
 // Sources, weakest first: package.json scripts, a Makefile, gradle, then commands the project's own docs
-// (CLAUDE.md, README, CONTRIBUTING, docs/*.md) show in backticks, which override. Reads files only; runs nothing.
+// (CLAUDE.md, README, CONTRIBUTING, docs/*.md) show in backticks, which win. Reads files only; runs nothing.
 // Every proposal is checked with checkCommand (hooks/lib/project-commands.mjs); a failing one is dropped.
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -59,7 +59,7 @@ function kindOfDocCommand(c) {
   if (/^(?:npm|pnpm|yarn)\s+(?:run\s+)?test(?::unit|:ci)?$/.test(c) || /^npx\s+vitest\s+run$/.test(c)) return 'suite';
   return null;
 }
-// Top-level docs override the files above; docs/*.md only fill a kind nothing else gave.
+// Top-level docs win over the files above; docs/*.md only fill a kind nothing else gave.
 function fromDocs(dir, out) {
   scanDocs(dir, DOC_FILES.map((f) => join(dir, f)), out, 'docs');
   const files = [];

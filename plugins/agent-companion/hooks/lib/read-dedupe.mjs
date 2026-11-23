@@ -430,7 +430,7 @@ export function decide(state, { agent, pk, input, stat, now = Date.now(), budget
 
 // A shell read (`sed -n 'a,bp' f`, `cat f`, ...) goes through the same ledger as a Read: the agent's context holds those lines either way.
 // There is no PostToolUse for it, so the range is recorded here, when the command is allowed (a command that then fails leaves a range
-// recorded that was never read: a missed deny later at worst, and the repeat override covers it). [a, b] is the resolved range, `total`
+// recorded that was never read: a missed deny later at worst, and the repeat escape covers it). [a, b] is the resolved range, `total`
 // the file's line count, `cap` the longest span a call may read (0 = no cap). Rules in order: a denied command repeated runs; a covered,
 // unchanged range of 2,000+ characters is denied; a span over `cap` is denied; new lines past the budget are denied; else allowed and
 // recorded. Returns { value: { action: 'allow'|'deny'|'retry', ... }, dirty } like decide().

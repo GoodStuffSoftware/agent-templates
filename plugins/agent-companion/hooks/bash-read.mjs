@@ -8,7 +8,7 @@
 //   - the call reads more than read_cap_lines lines at once                     -> deny (read_cap)
 //   - the file already cost this agent read_budget_lines distinct lines         -> deny new lines (read_budget); a nudge at 75%
 //   - the first read of a file over 400 lines                                   -> allow, with a compact outline as additionalContext
-// A denial names the equivalent Read call (file_path, offset, limit); the identical command, repeated, runs (dedupe's override).
+// A denial names the equivalent Read call (file_path, offset, limit); the identical command, repeated, runs (dedupe's escape hatch).
 //
 // Untouched: the main thread (payloads from a subagent carry agent_id), a command that is not a plain read of one file (a search piped
 // into grep, a list of commands, a redirect, a glob, several files), binary files, files outside the agent's cwd and repository, logs

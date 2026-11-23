@@ -1162,7 +1162,9 @@ test('legacy-flag-still-flags-revoked: a flag still over the v2 floor keeps its 
   assert.equal(f.ackedAt, null); assert.equal(f.ack, null); assert.equal(f.notifiedAt, null); assert.deepEqual(f.candidates, []);
   const row = allRows().find((x) => x.event === 'ack-revoked'); assert.ok(row);
   assert.match(S.flagLine() || '', /queue-denied/, 'the flag is shown again');
-  assert.equal(S.maybeHold({ holdMinutes: 30, at: at + 10 * MIN }), null, 'the countdown restarted from the migration');
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: at + 31 * MIN }), null, 'no countdown until a session shows the flag again');
+  assert.ok(S.noteShown('s1', at)); // the first showing starts the countdown
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: at + 10 * MIN }), null, 'the countdown restarted from that showing');
   assert.ok(S.maybeHold({ holdMinutes: 30, at: at + 31 * MIN }), 'and a hold follows if still unanswered');
 });
 
