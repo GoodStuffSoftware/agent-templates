@@ -7,10 +7,10 @@
 //   release-watch-checks.jsonl  one row per check and per clear
 // AGENT_COMPANION_FAKE_NOW moves the clock for tests. Nothing here throws.
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync, renameSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { stateDir } from './context.mjs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync, renameSync, mkdirSync, openSync, fstatSync, readSync, closeSync } from 'node:fs';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { stateDir, opt } from './context.mjs';
 
 export const COOLDOWN_MS = 4 * 3600e3;
 export const WORSEN_FACTOR = 2;
@@ -55,6 +55,11 @@ export function appendRow(row) {
 
 const iso = (t) => new Date(t).toISOString();
 
+// Every row of the checks file (checks, holds, clears), oldest first. Fails open to [].
+export function readRows() {
+  try { return readFileSync(paths().checks, 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); } catch { return []; }
+}
+
 // ---- flag ----
 export function readFlag() { return readJson(paths().flag); }
 export function flagIsOpen(f = readFlag()) { return !!(f && Array.isArray(f.flags) && f.flags.length && !f.clearedAt); }
@@ -65,7 +70,7 @@ export function flagIsOpen(f = readFlag()) { return !!(f && Array.isArray(f.flag
 // flags: [{ name, value, level?, detail? }]. Returns the flag object written, or null when nothing new.
 // Flags that report on the watch itself, not on the release: they show in the check, the tick and the flag line, but never start a hold
 // (a fresh install with no telemetry would otherwise hold all work).
-export const NO_HOLD_FLAGS = new Set(['usage-source-empty']);
+export const NO_HOLD_FLAGS = new Set(['usage-source-empty', 'harness-refusals', 'insufficient-data']);
 const holdable = (flags) => (Array.isArray(flags) ? flags : []).filter((x) => x && !NO_HOLD_FLAGS.has(x.name));
 const levelOf = (f) => (typeof f.level === 'number' ? f.level : typeof f.value === 'number' ? f.value : null);
 const answeredFor = (cool, name, T) => { const c = cool[name]; return c && c.T === T ? c : null; };
@@ -95,6 +100,9 @@ export function openFlag({ version, T, check, flags, at = now() } = {}) {
       openedAt: open ? old.openedAt : iso(at),
       notifiedAt: renotify ? iso(at) : old.notifiedAt,
       ackedAt: renotify ? null : old.ackedAt ?? null,
+      shownTo: (open && !renotify && old.shownTo) || {},
+      candidates: (open && !renotify && Array.isArray(old.candidates)) ? old.candidates : [],
+      ack: (open && !renotify && old.ack) || null,
       clearedAt: null,
       cooldown: cool,
     };
@@ -108,14 +116,131 @@ const answerLevels = (f, at, cool = {}) => {
   return c;
 };
 
-// A genuine prompt from the operator: stops the hold countdown and marks the open flags answered. Never lifts a hold.
-export function noteReply(at = now()) {
+// ---- human-only replies ----
+// A reply counts only when the transcript (or the hook payload) positively identifies a typed prompt: origin.kind === 'human'.
+// Scheduled wakeups, task notifications, peer messages and prompts from older builds without an origin never ack.
+export const HUMAN_SIGNAL = { transcript: 'transcript-origin-human', payload: 'payload-origin-human' };
+export const CANDIDATE_TTL_MS = 10 * 60e3;
+const TAIL_BYTES = 256 * 1024;
+const MATCH_BEFORE_MS = 10e3;
+const MATCH_AFTER_MS = 120e3;
+
+export function isHumanRecord(rec) {
+  return !!(rec && typeof rec === 'object' && rec.type === 'user' && rec.origin && rec.origin.kind === 'human'
+    && !rec.isMeta && !rec.isSidechain && !rec.isCompactSummary && !rec.toolUseResult && !rec.sourceToolUseID);
+}
+
+const recText = (rec) => {
+  const c = rec && rec.message && rec.message.content;
+  if (typeof c === 'string') return c.trim();
+  if (Array.isArray(c)) return c.map((b) => (b && b.type === 'text' && typeof b.text === 'string' ? b.text : '')).join('').trim();
+  return '';
+};
+export const promptSha = (text) => createHash('sha256').update(String(text ?? '').trim()).digest('hex').slice(0, 12);
+
+// The last 256 KB of a transcript as lines (first partial line dropped). Bounded: never reads a whole transcript.
+function defaultTail(path) {
+  let fd;
   try {
+    fd = openSync(path, 'r');
+    const { size } = fstatSync(fd);
+    const start = Math.max(0, size - TAIL_BYTES);
+    const buf = Buffer.alloc(size - start);
+    readSync(fd, buf, 0, buf.length, start);
+    const lines = buf.toString('utf8').split('\n');
+    if (start > 0) lines.shift();
+    return lines;
+  } catch { return []; } finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* */ } } }
+}
+
+// True when the transcript tail holds a typed (isHumanRecord) prompt with this sha written within [from, to] (epoch ms).
+export function matchHumanPrompt(path, sha, from, to, readTail = defaultTail) {
+  try {
+    if (!path || !sha) return false;
+    for (const l of readTail(path) || []) {
+      if (!l) continue;
+      let r; try { r = JSON.parse(l); } catch { continue; }
+      if (!isHumanRecord(r)) continue;
+      const t = Date.parse(r.timestamp);
+      if (!(t >= from && t <= to)) continue;
+      if (promptSha(recText(r)) === sha) return true;
+    }
+  } catch { /* fail closed: no match */ }
+  return false;
+}
+
+// The flag was shown to this session on this turn. Only an open, unanswered flag; the first time wins.
+export function noteShown(sessionId, at = now()) {
+  try {
+    if (!sessionId) return false;
     const f = readFlag();
-    if (!flagIsOpen(f) || f.ackedAt || isHoldActive()) return false;
-    return writeJson(paths().flag, { ...f, ackedAt: iso(at), cooldown: answerLevels(f, at, f.cooldown) });
+    if (!flagIsOpen(f) || f.ackedAt) return false;
+    const shownTo = { ...(f.shownTo || {}) };
+    if (shownTo[sessionId]) return false;
+    shownTo[sessionId] = iso(at);
+    return writeJson(paths().flag, { ...f, shownTo });
   } catch { return false; }
 }
+
+// The operator's words that lift a hold: a short prompt saying "clear hold" or "release hold".
+export const CLEAR_WORDS_RE = /^(please\s+)?(clear|release)\s+(the\s+)?hold[.!]*$/i;
+const ackWrite = (f, { session, promptAt, confirmedAt, signal }) => {
+  const ack = { session, promptAt: iso(promptAt), confirmedAt: iso(confirmedAt), signal, shownAt: (f.shownTo || {})[session] ?? null };
+  const next = { ...f, ackedAt: iso(promptAt), ack, candidates: [], cooldown: answerLevels(f, promptAt, f.cooldown) };
+  return writeJson(paths().flag, next) ? ack : null;
+};
+
+// A prompt typed in a session that was shown the flag on an earlier turn. A payload origin of 'human' acks at once; anything else
+// becomes a candidate that confirmCandidates() checks against the transcript. During a hold only the clear-hold words are recorded
+// (a confirmed typed "clear hold" ends the hold). Never stores prompt text, only a sha.
+export function noteCandidate({ sessionId, transcriptPath, prompt, payloadOrigin, at = now() } = {}) {
+  try {
+    const f = readFlag();
+    if (!flagIsOpen(f) || f.ackedAt || !sessionId) return false;
+    const text = String(prompt ?? '').trim();
+    const held = isHoldActive();
+    if (held && !CLEAR_WORDS_RE.test(text)) return false;
+    const shown = Date.parse((f.shownTo || {})[sessionId]);
+    if (!(shown > 0) || !(shown < at)) return false;
+    if (!held && payloadOrigin && payloadOrigin.kind === 'human') {
+      return !!ackWrite(f, { session: sessionId, promptAt: at, confirmedAt: at, signal: HUMAN_SIGNAL.payload });
+    }
+    const cands = Array.isArray(f.candidates) ? [...f.candidates] : [];
+    cands.push({ session: sessionId, transcriptPath: transcriptPath || null, at: iso(at), sha: promptSha(text), len: text.length, ...(held ? { clear: true } : {}) });
+    return writeJson(paths().flag, { ...f, candidates: cands.slice(-20) });
+  } catch { return false; }
+}
+
+// Checks every candidate against its transcript tail. A match acks (ackedAt = the prompt time); a candidate past the TTL with no
+// match is dropped and logged. Acts only on an open, unanswered flag. During a hold only a clear-hold candidate is looked at, and a
+// match ends the hold. Returns the ack (or the clear result) or null.
+export function confirmCandidates({ at = now(), readTail = defaultTail } = {}) {
+  try {
+    const f = readFlag();
+    if (!flagIsOpen(f) || f.ackedAt) return null;
+    const held = isHoldActive();
+    const cands = Array.isArray(f.candidates) ? f.candidates : [];
+    if (!cands.length) return null;
+    const ttl = Number(opt('release_watch_ack_ttl_minutes', 10)) * 60e3 || CANDIDATE_TTL_MS;
+    const keep = [];
+    for (const c of cands) {
+      if (c.clear && !held) continue; // the hold it was for is gone
+      if (held && !c.clear) { keep.push(c); continue; }
+      const ct = Date.parse(c.at);
+      if (matchHumanPrompt(c.transcriptPath, c.sha, ct - MATCH_BEFORE_MS, ct + MATCH_AFTER_MS, readTail)) {
+        if (held) { clear({ by: 'prompt', at }); return { signal: HUMAN_SIGNAL.transcript, cleared: true }; }
+        return ackWrite(f, { session: c.session, promptAt: ct, confirmedAt: at, signal: HUMAN_SIGNAL.transcript });
+      }
+      if (at - ct > ttl) appendRow({ at: iso(at), event: 'ack-rejected', session: c.session, reason: 'no human record' });
+      else keep.push(c);
+    }
+    if (keep.length !== cands.length) writeJson(paths().flag, { ...f, candidates: keep });
+    return null;
+  } catch { return null; }
+}
+
+// Kept for one release so an older hook copy loaded in a long-lived session cannot ack: a bare reply no longer counts.
+export function noteReply() { return false; }
 
 // ---- hold ----
 export function readHold() { return readJson(paths().hold); }
@@ -163,6 +288,7 @@ export function maybeHold({ holdMinutes, at = now() } = {}) {
     if (!(delay > 0)) return null;
     const f = readFlag();
     if (!flagIsOpen(f) || f.ackedAt || isHoldActive()) return null;
+    if (confirmCandidates({ at })) return null; // a typed reply found in the transcript: answered, no hold
     const hf = holdable(f.flags);
     if (!hf.length) return null; // only watch-health flags (usage-source-empty): report, never hold
     const n = Date.parse(f.notifiedAt);
