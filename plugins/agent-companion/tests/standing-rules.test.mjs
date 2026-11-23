@@ -722,7 +722,8 @@ test('the built-in lead session-start rules, effort check on, stay lean enough t
       .filter((r) => r.id !== 'pr-wait-hint') // its length depends on the install path
       .map((r) => `\n- ${r.then.trim()}`.length);
     const total = lines.reduce((a, b) => a + b, 0);
-    assert.ok(total <= 1750, // 0.31.65: 1650 -> 1750 for the writer-brief sentence in delegate-first `built-in lead rules (without pr-wait-hint) take ${total} chars; the operator's own rules share the 3000-char cap`);
+    // 0.31.65: 1650 -> 1750 for the writer-brief sentence in delegate-first
+    assert.ok(total <= 1750, `built-in lead rules (without pr-wait-hint) take ${total} chars; the operator's own rules share the 3000-char cap`);
   } finally {
     cleanup();
   }
