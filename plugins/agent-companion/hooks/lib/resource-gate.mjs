@@ -964,9 +964,12 @@ export async function gateDecision(command, { cwd, mode = DEFAULT_GATE_MODE, env
     const why = !(mode === 'rewrite') ? ''
       : losesCwd ? ' (not rewritten: it changes directory after its first step, and inside the queue that change would not last past this call)'
         : ' (rewrite does not apply in this permission mode or next to a permission rule, so it is a denial)';
+    // The project's own listed command for this kind of job (lib/project-commands.mjs), when it has a list.
+    let listed = '';
+    try { listed = (await import('./project-commands.mjs')).listedCommandFor(classes, cwd).trim(); } catch { /* fail open */ }
     return {
       action: 'deny', classes, command: wrapped,
-      text: `Heavy command (${weight}) not run${why}. ${how}${bg}Prefix RESOURCE_QUEUE=0 only when the queue itself is broken.`,
+      text: `Heavy command (${weight}) not run${why}. ${how}${bg}${listed ? `${listed} ` : ''}Prefix RESOURCE_QUEUE=0 only when the queue itself is broken.`,
     };
   } catch { return none; }
 }
