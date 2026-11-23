@@ -673,7 +673,7 @@ export function migrateFlag({ at = S.now(), projectsDir, run = analyze } = {}) {
       const hit = S.findHumanRecordNear({ projectsDir: projectsDir || join(claudeDir(), 'projects'), since: Date.parse(f.notifiedAt) || 0, near: ackAt });
       if (hit) next.ack = { session: hit.session, promptAt: f.ackedAt, confirmedAt: iso(at), signal: S.HUMAN_SIGNAL.transcript, shownAt: (f.shownTo || {})[hit.session] ?? null };
       else {
-        next.ackedAt = null; next.ack = null; next.notifiedAt = iso(at); next.candidates = [];
+        next.ackedAt = null; next.ack = null; next.notifiedAt = null; next.candidates = [];
         S.appendRow({ at: iso(at), event: 'ack-revoked', version: f.version ?? null, reason: 'legacy ack without human record' });
         out = { ...out, revoked: true };
       }
@@ -763,7 +763,7 @@ export function status(at = S.now(), { all = false, json = false } = {}) {
     const a = flag.ack;
     const who = flag.ackedAt ? `answered ${flag.ackedAt}${a ? ` in session ${String(a.session || '').slice(0, 8)} (signal ${a.signal}, shown ${a.shownAt || '?'})` : ''}`
       : `unanswered${(() => { const d = Number(opt('release_watch_hold_minutes', 30)); const n = Date.parse(flag.notifiedAt); return d > 0 && n > 0 ? `, hold at ${iso(n + d * 60e3)}` : ''; })()}`;
-    lines.push(`flag open since ${flag.openedAt}, notified ${flag.notifiedAt}, ${who}: ${flag.flags.map((x) => `${x.name}=${x.value}${x.detail ? ' (' + x.detail + ')' : ''}`).join('; ')}`);
+    lines.push(`flag open since ${flag.openedAt}, ${flag.notifiedAt ? `notified ${flag.notifiedAt}` : 'not yet shown'}, ${who}: ${flag.flags.map((x) => `${x.name}=${x.value}${x.detail ? ' (' + x.detail + ')' : ''}`).join('; ')}`);
   } else lines.push('no open flag');
   lines.push(hold && !hold.clearedAt ? `HOLD since ${hold.since}: ${hold.reason}` : 'hold: none');
   if (hold && !hold.clearedAt && flag && flag.clearedBy === 'v2-migration') lines.push('the hold stays for the operator: its flag was closed as superseded by v2 evidence rules, and a hold is never lifted by the migration (run: release-watch.mjs clear)');

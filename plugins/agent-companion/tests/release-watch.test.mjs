@@ -1159,7 +1159,7 @@ test('legacy-flag-still-flags-revoked: a flag still over the v2 floor keeps its 
   assert.deepEqual(r.migrated, { kept: ['queue-denied'], revoked: true });
   const f = S.readFlag();
   assert.equal(f.v, 2); assert.equal(S.flagIsOpen(f), true);
-  assert.equal(f.ackedAt, null); assert.equal(f.ack, null); assert.equal(f.notifiedAt, iso(at)); assert.deepEqual(f.candidates, []);
+  assert.equal(f.ackedAt, null); assert.equal(f.ack, null); assert.equal(f.notifiedAt, null); assert.deepEqual(f.candidates, []);
   const row = allRows().find((x) => x.event === 'ack-revoked'); assert.ok(row);
   assert.match(S.flagLine() || '', /queue-denied/, 'the flag is shown again');
   assert.equal(S.maybeHold({ holdMinutes: 30, at: at + 10 * MIN }), null, 'the countdown restarted from the migration');
