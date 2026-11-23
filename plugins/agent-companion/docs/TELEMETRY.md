@@ -626,6 +626,12 @@ contend for a lock.
 | `lock_wait_ms` | number | time spent waiting for the state lock |
 | `duration_ms` | number | wall time of the hook, process start to the row |
 | `transcript_bytes` | number \| absent | the size of the agent's transcript file at that moment: how deep into the session the read fell |
+| `source` | `shell` | absent | `shell`: the row came from `hooks/bash-read.mjs` (a `sed -n`, `cat`, `head`, `tail`, `Get-Content` or `awk` read) rather than from a Read; it shares the Read's per-agent ledger |
+| `reason` | `covered` | `cap` | `budget` | absent | `deny` rows of the shell hook and budget denials: which rule refused (`covered`: already in context; `cap`: over `read_cap_lines`; `budget`: new lines past `read_budget_lines`) |
+| `lines_read` | number | absent | `nudge` and budget `deny` rows: distinct lines of the file this agent had already read |
+
+The 0.31.65 budget adds outcomes `nudge` (the read crossed 75% of `read_budget_lines`; context was added, nothing denied) and `outline` (the first read of a file over 400 lines carried its outline). `est_chars_avoided` is 0 on a budget denial: the avoided size is unknown. The toggle is `read_budget`.
+
 
 The effect for a review: `sum(est_chars_avoided) - sum(deny_chars)` is what stayed
 out of context, a ceiling, because a `retry-ran` row means the agent did not have

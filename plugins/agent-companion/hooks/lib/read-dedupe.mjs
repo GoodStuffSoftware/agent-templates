@@ -135,6 +135,62 @@ export function covers(ranges, a, b) {
   return ranges.some(([x, y]) => x <= a && b <= y);
 }
 
+// Distinct lines in a range list, and how many of [a, b] it does not hold yet.
+export function rangeLen(ranges) {
+  let n = 0;
+  for (const [x, y] of ranges) n += y - x + 1;
+  return n;
+}
+
+export function newLinesIn(ranges, a, b) {
+  let have = 0;
+  for (const [x, y] of ranges) {
+    const lo = Math.max(x, a);
+    const hi = Math.min(y, b);
+    if (hi >= lo) have += hi - lo + 1;
+  }
+  return b - a + 1 - have;
+}
+
+// Per-file read budget (0.31.65). Measured on 38 writers over 90K (2026-10-24 to 2026-11-23, rw-sample): a budget of 400 distinct
+// lines a file helped 42% of them (median 6.6K tokens); 300 helped 55% but starts denying a legitimate read of one 300-line module.
+// So: deny new lines at the budget (400, option read_budget_lines), nudge at three quarters of it (300).
+export const READ_BUDGET_LINES_DEFAULT = 400;
+export const OUTLINE_MIN_LINES = 400;
+const MAX_OUTLINED = 150;
+
+export function budgetOf(max) {
+  const m = Number.isFinite(Number(max)) && Number(max) >= 4 ? Math.floor(Number(max)) : READ_BUDGET_LINES_DEFAULT;
+  return { max: m, nudge: Math.floor(m * 0.75) };
+}
+
+// A denied request is remembered so the identical call, repeated, runs.
+export function markDenied(rec, eff, now) {
+  rec.denied = [...(rec.denied || []), eff].slice(-MAX_DENIED_PER_FILE);
+  // When each outstanding denial was issued, so a retry can say how long the agent took to retry it.
+  rec.deniedAt = { ...(rec.deniedAt || {}), [eff]: now };
+  for (const k of Object.keys(rec.deniedAt)) if (!rec.denied.includes(k)) delete rec.deniedAt[k];
+}
+
+// First read of a file over OUTLINE_MIN_LINES by this agent: true once per (agent, path).
+export function claimOutline(state, agent, pk, now) {
+  const ag = state.agents[agent] ?? (state.agents[agent] = { files: {} });
+  const seen = ag.outlined ?? (ag.outlined = {});
+  if (seen[pk]) return false;
+  seen[pk] = now;
+  const keys = Object.keys(seen);
+  if (keys.length > MAX_OUTLINED) {
+    keys.sort((m, n) => seen[m] - seen[n]);
+    for (const k of keys.slice(0, keys.length - MAX_OUTLINED)) delete seen[k];
+  }
+  return true;
+}
+
+// The agent's own briefs and handoffs are meant to be read whole: no budget.
+export function budgetExempt(pk) {
+  return /(^|[\\/])[^\\/]*(handoff|brief)[^\\/]*$/i.test(String(pk));
+}
+
 // --- state ------------------------------------------------------------------
 
 function blankState() {
@@ -304,12 +360,17 @@ function evictOld(files) {
 // this agent has made (it counts how deep into the session the event is).
 // `age_ms` is the time since the original read of the file was recorded.
 // `stat` is the file's stat now (null when unreadable: allow).
-export function decide(state, { agent, pk, input, stat, now = Date.now() }) {
+// `budget` (budgetOf(), or null = off) is the per-file line budget; `bigLines` is the file's line count when the caller wants an outline
+// considered (0 = no). An allow may carry { nudge: true, have } (budget nudge threshold crossed, once per record) and { outline: true }
+// (first read of a big file); a budget denial is a deny with { budget: true, have, max }.
+export function decide(state, { agent, pk, input, stat, now = Date.now(), budget = null, bigLines = 0 }) {
   const req = requestOf(input);
   if (!req || !stat || !pk) return { value: { action: 'allow' }, dirty: false };
   const idx = (state.reads | 0) + 1;
   state.reads = idx;
-  const allow = (extra = {}) => ({ value: { action: 'allow', idx, ...extra }, dirty: true });
+  const extras = {};
+  if (bigLines > OUTLINE_MIN_LINES && claimOutline(state, agent, pk, now)) extras.outline = true;
+  const allow = (extra = {}) => ({ value: { action: 'allow', idx, ...extras, ...extra }, dirty: true });
 
   // The stat goes with this call to PostToolUse, which records only a read
   // whose file was unchanged across it. Stored on every allowed read.
@@ -348,15 +409,80 @@ export function decide(state, { agent, pk, input, stat, now = Date.now() }) {
   }
 
   if (age_ms > MAX_AGE_MS) return eligible('aged');
-  if (!covers(rec.ranges, a, b)) return eligible('uncovered');
+  if (!covers(rec.ranges, a, b)) {
+    if (budget && !budgetExempt(pk)) {
+      const have = rangeLen(rec.ranges);
+      if (have >= budget.max) {
+        markDenied(rec, eff, now);
+        return { value: { action: 'deny', idx, a, b, est, age_ms, budget: true, have, max: budget.max }, dirty: true };
+      }
+      if (!rec.nudged && have + newLinesIn(rec.ranges, a, b) >= budget.nudge) { rec.nudged = true; extras.nudge = true; extras.have = have; }
+    }
+    return eligible('uncovered');
+  }
   if (est < MIN_CHARS) return eligible('small');
 
-  rec.denied = [...(rec.denied || []), eff].slice(-MAX_DENIED_PER_FILE);
-  // When each outstanding denial was issued, so a retry can say how long the
-  // agent took to retry it.
-  rec.deniedAt = { ...(rec.deniedAt || {}), [eff]: now };
-  for (const k of Object.keys(rec.deniedAt)) if (!rec.denied.includes(k)) delete rec.deniedAt[k];
+  markDenied(rec, eff, now);
   return { value: { action: 'deny', idx, a, b, est, age_ms }, dirty: true };
+}
+
+// --- PreToolUse (a read-shaped Bash/PowerShell command) ------------------------
+
+// A shell read (`sed -n 'a,bp' f`, `cat f`, ...) goes through the same ledger as a Read: the agent's context holds those lines either way.
+// There is no PostToolUse for it, so the range is recorded here, when the command is allowed (a command that then fails leaves a range
+// recorded that was never read: a missed deny later at worst, and the repeat override covers it). [a, b] is the resolved range, `total`
+// the file's line count, `cap` the longest span a call may read (0 = no cap). Rules in order: a denied command repeated runs; a covered,
+// unchanged range of 2,000+ characters is denied; a span over `cap` is denied; new lines past the budget are denied; else allowed and
+// recorded. Returns { value: { action: 'allow'|'deny'|'retry', ... }, dirty } like decide().
+export function decideShell(state, { agent, pk, a, b, total, stat, now = Date.now(), budget = null, cap = 0, bigLines = 0 }) {
+  if (!pk || !stat || !(total >= 1) || !(a >= 1) || !(b >= a)) return { value: { action: 'allow' }, dirty: false };
+  const ag = state.agents[agent] ?? (state.agents[agent] = { files: {} });
+  const files = ag.files;
+  let rec = files[pk];
+  if (rec && (!sameStat(rec, stat) || now - rec.since > MAX_AGE_MS)) { delete files[pk]; rec = undefined; }
+  const eff = `${a}-${b}`;
+  const span = b - a + 1;
+  const cpl = Math.max(1, stat.size / total);
+  const fresh = () => ({ mtimeMs: stat.mtimeMs, size: stat.size, ctimeMs: stat.ctimeMs, total, since: now, ranges: [], cpl, lines: 0, denied: [], t: now });
+  const extras = {};
+  if (bigLines > OUTLINE_MIN_LINES && claimOutline(state, agent, pk, now)) extras.outline = true;
+  const run = (action, extra = {}) => {
+    const r = rec ?? (files[pk] = fresh());
+    r.ranges = addRange(r.ranges, a, b);
+    r.lines = (r.lines || 0) + span;
+    r.total = total;
+    r.t = now;
+    evictOld(files);
+    return { value: { action, a, b, ...extras, ...extra }, dirty: true };
+  };
+
+  const est = Math.round(span * (cpl + LINE_PREFIX_CHARS));
+  const di = rec && Array.isArray(rec.denied) ? rec.denied.indexOf(eff) : -1;
+  if (di >= 0) {
+    rec.denied.splice(di, 1);
+    if (rec.deniedAt) delete rec.deniedAt[eff];
+    return run('retry', { est });
+  }
+  const deny = (extra) => {
+    const r = rec ?? (files[pk] = fresh());
+    markDenied(r, eff, now);
+    return { value: { action: 'deny', a, b, est, ...extra }, dirty: true };
+  };
+  const ranges = rec ? rec.ranges : [];
+  if (rec && covers(ranges, a, b) && est >= MIN_CHARS) return deny({ reason: 'covered' });
+  if (cap > 0 && span > cap) return deny({ reason: 'cap', cap });
+  const have = rangeLen(ranges);
+  if (budget && !budgetExempt(pk)) {
+    if (have >= budget.max && newLinesIn(ranges, a, b) > 0) return deny({ reason: 'budget', budget: true, have, max: budget.max });
+    if (!(rec && rec.nudged) && have + newLinesIn(ranges, a, b) >= budget.nudge) {
+      extras.nudge = true;
+      extras.have = have;
+      const r = rec ?? (files[pk] = fresh());
+      r.nudged = true;
+      rec = r;
+    }
+  }
+  return run('allow');
 }
 
 // --- PostToolUse (Read) ------------------------------------------------------

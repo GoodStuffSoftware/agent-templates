@@ -833,6 +833,18 @@
       "description": "The cap of the subagent Read cap, in lines: a Read with no limit on a longer text file is limited to this many lines (a Read from an offset is capped only when more than this many lines remain).",
       "default": 300
     },
+    "read_budget": {
+      "type": "boolean",
+      "title": "Read budget per file",
+      "description": "A subagent that has read this many distinct lines of one file (Read and shell reads together: sed -n, cat, head, tail, Get-Content, awk) gets a nudge at 75% of the budget (grep -n for the symbol you need) and, at the budget, a denial of further NEW lines of that file; the identical call, repeated, runs. The same hook also denies a shell read the Read rules would deny (lines already in context and unchanged; more than read_cap_lines at once) and, on a subagent first read of a file over 400 lines, attaches a compact outline (functions, classes, exports, headings, with line numbers; about 1,500 characters). Main thread, logs and test output, binary files, files outside the repository and the agent's own brief or handoff files are untouched. Default on, with the value measured 2026-11-23 on 38 writers over 90K (a 400-line budget helped 42% of them, median 6.6K tokens). Off = no budget, no outline. Also CLAUDE_PLUGIN_OPTION_READ_BUDGET=0.",
+      "default": true
+    },
+    "read_budget_lines": {
+      "type": "number",
+      "title": "Read budget: lines",
+      "description": "The per-file budget of read_budget, in distinct lines (default 400: measured 2026-11-23 on 38 writers over 90K, where 300 helped more writers but would deny a legitimate read of one 300-line module and 600 helped half as many). The nudge comes at 75% of it.",
+      "default": 400
+    },
     "interrupted_worker_notice": {
       "type": "boolean",
       "title": "Interrupted-worker notice",

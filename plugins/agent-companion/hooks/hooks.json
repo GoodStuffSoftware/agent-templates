@@ -44,6 +44,19 @@
         ]
       },
       {
+        "matcher": "^(Bash|PowerShell)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/bash-read.mjs"
+            ],
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "^Read$",
         "hooks": [
           {
