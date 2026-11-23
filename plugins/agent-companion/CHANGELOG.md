@@ -2,9 +2,12 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
-## 0.31.66 (unreleased)
+## 0.31.66 — 2026-11-23
 
 - **Hold clear reaches the sessions that stood down.** Every session shown the post-release hold notice or refused by it is recorded (session id, cwd, transcript path, agent id for a subagent, first and last seen; deduped, capped at 200) in `release-hold-sessions.json`. New `release-watch.mjs held [--json]` lists them; `clear` prints the same list ("message each: <ids>") and stores it with `clearedAt` in the clear row of the history. After a clear, each recorded lead session gets a one-time notice on its next prompt: the hold was cleared at <time> by the operator, resume from your handoff or where you stopped. The hold notice and deny texts now tell a lead to arm one recurring 20-minute CronCreate that runs `release-watch.mjs status` (end the turn silently while a hold shows; delete the cron and resume once clear), and a subagent only to write its handoff and stop (its lead resumes it).
+- **Release watch counting.** A tool_result repeated in api-request-blob records counts once; handoff-hard-deny counts distinct workers; `status` names an install the 10-minute job has not armed yet (and `--json` gains `pending`).
+- **Handoff guard.** A handoff written with Bash (`cat >`, `>>`, `tee`) counts, and `DONE: partial, handoff at <path>` is accepted anywhere in the final message (no more false end-blocks); the hand-off notice asks the worker to put `transcript: <path>` at the top of its handoff file; the opus rungs hand off at 120K (new option `subagent_context_notice_opus_tokens`) instead of 130K.
+- **Diff cap.** A Bash `git diff`, `git show` or `git log -p` call now returns at most 400 lines (stat, first 300 lines and the path of the full output to read by range; exit status kept; option `diff_cap`). Built-in session-start rule wording is tightened so the lead-child block fits the 4200 cap again.
 
 ## 0.31.65 — 2026-11-23
 
