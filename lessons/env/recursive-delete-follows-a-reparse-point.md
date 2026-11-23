@@ -8,15 +8,13 @@ since: 2026-08-31
 provenance: [contrib-2]
 corroborated: 2
 ---
-Windows directory junctions and directory symlinks are reparse points. Native Windows tooling generally treats them as links and removes the link. A POSIX-emulation shell on Windows can treat one as an ordinary directory instead — so a recursive force-delete descends into it and deletes the contents of the TARGET, which usually lives somewhere else entirely and is not the thing you were cleaning.
+Windows junctions and directory symlinks are reparse points. A POSIX-emulation shell can treat one as an ordinary directory, so a recursive force-delete descends into it and empties the TARGET, which lives somewhere else. Incident: a dependency directory (`{{DEPS_DIR}}`) was a junction to a shared cache; a "clean the workspace" delete emptied the cache and every other consumer broke later.
 
-The common shape: a dependency directory (`{{DEPS_DIR}}`) is a junction pointing at a shared cache or a sibling checkout to save disk. A routine "clean the workspace" recursive delete then empties the shared cache, and every other consumer of that cache breaks with an unrelated-looking error some time later.
-
-**Why:** The link is invisible in an ordinary listing, and the delete succeeds — the blast radius is entirely outside the directory you named, so nothing in the command's output hints at what happened. Deletes are also the one operation where "follow the link" is never what anybody wanted, which is exactly why the difference goes untested.
+**Why:** The delete succeeds and nothing in the output hints at the blast radius.
 
 **How to apply:**
-- **Dissolve reparse points non-recursively FIRST**, then delete the directory. Remove the link itself (a non-recursive directory removal, or the platform's link-removal verb), confirm it is gone, and only then recurse.
-- Detect them before deleting anything recursive in a workspace you did not create: list the directory with the attribute that reveals reparse points and check for `<JUNCTION>` / `<SYMLINKD>` entries.
-- Prefer the native shell's recursive remove for Windows paths — it removes the link rather than its target — over the emulation shell's, whose semantics depend on how the layer was compiled ([[bash-tool-routes-to-wsl]] is the neighbouring hazard: which shell you actually got is not always the one you asked for).
-- In automation, never recursive-delete a path supplied by configuration without asserting it is a real directory on the expected volume.
-- Corroborated by a second shape: removing a worktree whose dependency directory is a link ([[no-install-through-a-shared-node-modules-link]]).
+- Remove reparse points non-recursively FIRST (the link itself), confirm it is gone, then recurse.
+- Before a recursive delete in a workspace you did not create, look for `<JUNCTION>` / `<SYMLINKD>` entries.
+- Prefer the native shell's recursive remove for Windows paths ([[bash-tool-routes-to-wsl]] is the neighbouring hazard).
+- In automation, assert a configured path is a real directory first.
+- Second shape: removing a worktree whose dependency directory is a link ([[no-install-through-a-shared-node-modules-link]]).
