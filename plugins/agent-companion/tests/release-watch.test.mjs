@@ -764,6 +764,51 @@ test('finish-needs-activity: activity that reaches the floors at an extension fi
   assert.equal(allRows().filter((x) => x.event === 'finished').length, 1);
 });
 
+test('finish-clean-after-ack: an answered flag is cleared by the next conclusive clean check and the chain finishes', () => {
+  W.tick({ at: T + HOUR, installed: installed(), run: flagged, standingRun: none });
+  assert.equal(S.flagIsOpen(S.readFlag()), true);
+  assert.ok(humanAck(T + HOUR + MIN), 'the operator answered the flag');
+  assert.equal(S.flagIsOpen(S.readFlag()), true, 'answered, not yet cleared');
+  const r = W.tick({ at: T + 2 * HOUR + 1, installed: installed(), run: () => rich(), standingRun: none });
+  assert.equal(r.verdict, 'clean'); assert.equal(r.flagCleared, true);
+  let f = S.readFlag();
+  assert.equal(S.flagIsOpen(f), false);
+  assert.equal(f.clearedAt, iso(T + 2 * HOUR + 1)); assert.equal(f.clearedBy, 'v2-watch'); assert.equal(f.clearedReason, 'clean after ack');
+  const row = allRows().find((x) => x.event === 'flag-cleared');
+  assert.ok(row); assert.equal(row.reason, 'clean after ack'); assert.deepEqual(row.flags, ['queue-denied']);
+  W.tick({ at: T + 24 * HOUR, installed: installed(), run: () => rich(), standingRun: none });
+  assert.equal(runFile().status, 'finished', 'no open flag is left to block the finish');
+  assert.equal(runFile().everFlagged, true);
+  assert.equal(allRows().filter((x) => x.event === 'flag-cleared').length, 1);
+  assert.equal(allRows().filter((x) => x.event === 'finished').length, 1);
+  f = S.readFlag(); assert.equal(f.clearedReason, 'clean after ack');
+});
+
+test('finish-clean-after-ack: a clean check never clears a flag nobody answered', () => {
+  W.tick({ at: T + HOUR, installed: installed(), run: flagged, standingRun: none });
+  const r = W.tick({ at: T + 2 * HOUR + 1, installed: installed(), run: () => rich(), standingRun: none });
+  assert.equal(r.verdict, 'clean'); assert.equal(r.flagCleared, undefined);
+  assert.equal(S.flagIsOpen(S.readFlag()), true); assert.equal(allRows().filter((x) => x.event === 'flag-cleared').length, 0);
+});
+
+test('finish-open-flag-at-cap: an unanswered open flag blocks the finish to the 72 h cap, and the closing text blames the flag, not the floors', () => {
+  W.tick({ at: T + HOUR, installed: installed(), run: flagged, standingRun: none });
+  assert.equal(S.readFlag().ackedAt, null);
+  // the activity floors are reached (rich), the verdict is clean, but the flag is unanswered
+  W.tick({ at: T + 24 * HOUR, installed: installed(), run: () => rich(), standingRun: none });
+  assert.equal(runFile().status, 'watching'); assert.equal(runFile().extendedTo, T + 28 * HOUR);
+  W.tick({ at: T + 72 * HOUR, installed: installed(), run: () => rich(), standingRun: none });
+  const s = runFile();
+  assert.equal(s.status, 'insufficient-data'); assert.equal(s.insufficientBecause, 'open-flag');
+  const ins = allRows().find((x) => x.event === 'insufficient-data'); assert.ok(ins);
+  assert.ok(ins.activity.workers >= ins.floors.workers, 'the floors were reached');
+  const f = S.readFlag();
+  assert.equal(S.flagIsOpen(f), true); assert.deepEqual(f.flags.map((x) => x.name), ['queue-denied'], 'the original flag is the open one, no second insufficient-data flag');
+  const text = W.status(T + 73 * HOUR);
+  assert.doesNotMatch(text, /floors were not reached/);
+  assert.match(text, /unanswered flag was still open at the cap/);
+});
+
 // A standing-health stub: 2116 spawns and 127 queue denials in the week is 6.0 per 100, over the ceiling of 5.
 const standingStub = (over = {}) => () => metrics({ spawns: { since: 2116, base: 8000, perHour: { since: 12.6, base: 7 } }, telemetry: { 'gate:denied': t(127, 400, 6, 5) }, activeDays: { since: 7, base: 28 }, ...over });
 const standingRows = () => allRows().filter((x) => x.event === 'standing');
