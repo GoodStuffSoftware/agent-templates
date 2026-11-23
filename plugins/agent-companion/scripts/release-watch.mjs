@@ -76,68 +76,37 @@ export function isFailureClear(r) {
   return true;
 }
 
-// T: the install time; the baseline is always the `days` days before it. winFrom: start of the window measured now (default T;
-// the tick passes the previous check's time, so each check is a rate over its own window, not a running count since install).
-export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, days = 7, sample = 500, telDir, projectsDir, clearsFiles, holds } = {}) {
+// T: the install time of the newest release; the baseline is the `days` days before baseTo (default T; a chain passes its first install time, so
+// the baseline never moves when a later release joins). winFrom: start of the window measured now (default baseTo; the tick passes the last
+// conclusive check's time, so each check is a rate over its own window, not a running count since install). releases: [{version, T}] of a
+// chain (two or more): the result then carries byVersion[version], one full metrics object per release with only the since side split by version.
+export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, releases, days = 7, sample = 500, telDir, projectsDir, clearsFiles, holds } = {}) {
   const root = stateRootPath();
   telDir = telDir || join(dataRoot(), 'telemetry');
   projectsDir = projectsDir || join(claudeDir(), 'projects');
   // The machine-wide queue data (LOCALAPPDATA) is read unless this is a sandboxed test process (isolate.mjs sets the sandbox home switch); a scratch state dir does not hide it.
   clearsFiles = clearsFiles || [...new Set([process.env.CI_BUDGET_DIR && join(process.env.CI_BUDGET_DIR, 'clears.jsonl'), join(dataRoot(), 'ci-budget', 'clears.jsonl'), join(root, 'ci-budget', 'clears.jsonl'),
     !process.env.AGENT_COMPANION_HOME_OVERRIDE && process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'ci-budget', 'clears.jsonl')].filter(Boolean).map((p) => p.replace(/\\/g, '/')))];
-  const B0 = baseFrom > 0 ? baseFrom : T - days * 24 * HOUR;
-  const W0 = winFrom > 0 ? Math.max(winFrom, T) : T;
+  const BT = baseTo > 0 ? baseTo : T;
+  const B0 = baseFrom > 0 ? baseFrom : BT - days * 24 * HOUR;
+  const W0 = winFrom > 0 ? Math.max(winFrom, BT) : BT;
   // What the hold itself caused (denials, refusals, anything logged while it was on) never counts toward a signal.
   const holdIv = holds || S.holdIntervals(nowMs);
   const inHold = (t) => holdIv.some(([a, b]) => t >= a && t <= b);
   // Rows the install's live check writes (session_id "live-check") are synthetic: they never count in any telemetry metric.
-  const rd = (f) => jsonl(join(telDir, f + '.jsonl')).filter((r) => !SYNTHETIC_SESSIONS.has(r && r.session_id));
+  const rows = {};
+  const rd = (f) => (rows[f] ??= jsonl(join(telDir, f + '.jsonl')).filter((r) => !SYNTHETIC_SESSIONS.has(r && r.session_id)));
   const ts = (r) => (typeof r.at === 'number' ? r.at : Date.parse(r.at || r.ts || 0));
-  const win = (r) => { const t = ts(r); if (inHold(t)) return null; return t >= W0 && t <= nowMs ? 'since' : t >= B0 && t < T ? 'base' : null; };
-  const N = { since: 0, base: 0 };
-  for (const r of rd('spawns')) { const w = win(r); if (w) N[w]++; }
-  const span = { since: Math.max((nowMs - W0) / HOUR, 1e-3), base: Math.max((T - B0) / HOUR, 1e-3) };
-  const out = { T: new Date(T).toISOString(), now: new Date(nowMs).toISOString(), spawns: { ...N, perHour: { since: +(N.since / span.since).toFixed(1), base: +(N.base / span.base).toFixed(1) } }, telemetry: {}, span };
-  const count = (file, keyf, filt = () => true) => {
-    const c = {};
-    for (const r of rd(file)) { const w = win(r); if (!w || !filt(r)) continue; const k = keyf(r); (c[k] ??= { since: 0, base: 0 })[w]++; }
-    return c;
+  // The release a since-side row belongs to: a spawn row says so itself (guard_version) when that is a chain version, else the newest release installed by then.
+  const rel = Array.isArray(releases) && releases.length >= 2 ? releases.map((r) => ({ v: r.version || iso(r.T), T: r.T })).sort((a, b) => a.T - b.T) : null;
+  const verAt = (t) => { let v = rel[0].v; for (const r of rel) if (r.T <= t) v = r.v; return v; };
+  const verOf = (r, t) => (r && rel.some((x) => x.v === r.guard_version) ? r.guard_version : verAt(t));
+  const win = (r, vf) => {
+    const t = ts(r); if (inHold(t)) return null;
+    if (t >= W0 && t <= nowMs) return vf == null || verOf(r, t) === vf ? 'since' : null;
+    return t >= B0 && t < BT ? 'base' : null;
   };
-  const add = (name, c) => {
-    for (const [k, v] of Object.entries(c)) out.telemetry[`${name}:${k}`] = { since: v.since, base: v.base, per100spawns: { since: per(v.since, N.since), base: per(v.base, N.base) } };
-  };
-  add('denial', count('denials', (r) => `${r.guard}/${r.outcome}`));
-  add('handoff', count('handoff-limit', (r) => `${r.limit}/${r.action}`));
-  add('ctx', count('subagent-context', (r) => `${r.kind}/${r.phase}`));
-  add('gate', count('resource-gate', (r) => r.event));
-  add('wait', count('worker-wait', (r) => `${r.kind}/${r.action}`, (r) => r.action === 'deny'));
-  add('struggle', count('struggle', () => 'fired', (r) => r.fired));
-  add('runaway', count('runaway', () => 'fired'));
-  {
-    // bash-exit.jsonl rows do not say which failures were harness refusals; the worker transcripts do (out.bash, below). Kept for information only.
-    const c = count('bash-exit', (r) => (r.failed ? 'fail' : 'ok'), (r) => r.caller_is_subagent);
-    const f = c.fail || { since: 0, base: 0 }; const o = c.ok || { since: 0, base: 0 };
-    out.bashExit = { since: { n: f.since + o.since, failPct: per(f.since, f.since + o.since) }, base: { n: f.base + o.base, failPct: per(f.base, f.base + o.base) } };
-  }
-  {
-    // Heavy-command denials split by reason when the row carries one: a command that changes directory after its first step cannot be queued.
-    const q = { since: { n: 0, cdPrefix: 0 }, base: { n: 0, cdPrefix: 0 } };
-    for (const r of rd('resource-gate')) {
-      const w = win(r); if (!w || !/denied/.test(String(r.event || ''))) continue;
-      q[w].n++; if (r.reason === 'cd-prefix' || /changes directory after its first step/.test(String(r.reason || r.detail || ''))) q[w].cdPrefix++;
-    }
-    out.queueDenied = q;
-    // Active hours: distinct clock hours of the window that hold at least one spawn row.
-    const hrs = { since: new Set(), base: new Set() };
-    for (const r of rd('spawns')) { const w = win(r); if (w) hrs[w].add(Math.floor(ts(r) / HOUR)); }
-    out.activeHours = { since: hrs.since.size, base: hrs.base.size };
-  }
-  {
-    const c = { since: 0, base: 0 };
-    for (const f of clearsFiles) for (const r of jsonl(f)) { if (!isFailureClear(r)) continue; const w = win(r); if (w) c[w]++; }
-    out.queueClears = { since: c.since, base: c.base, perHour: { since: +(c.since / span.since).toFixed(2), base: +(c.base / span.base).toFixed(2) } };
-  }
-  // ---- worker transcripts ----
+  // ---- worker transcripts (read once; every version's block is built from the same records) ----
   const files = [];
   let projs = [];
   try { projs = readdirSync(projectsDir); } catch { /* none */ }
@@ -158,11 +127,11 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, days = 7, sampl
   const fresh = files.filter((f) => f.m >= W0); const old = files.filter((f) => f.m < W0);
   const step = Math.max(1, Math.ceil(old.length / sample));
   const pick = [...fresh.slice(0, 2000).map((f) => f.fp), ...old.filter((_, i) => i % step === 0).map((f) => f.fp)];
-  const seen = new Set(); const W = { since: [], base: [] }; const sig = { since: {}, base: {} };
+  const seen = new Set(); const WR = [];
   for (const fp of pick) {
     let L; try { L = readFileSync(fp, 'utf8').split('\n'); } catch { continue; }
     let first = null; let u = 0; let peak = 0; let hook = 0; let terr = 0; let api = null; let txt = '';
-    const bashIds = new Set(); let bash = 0; let refusal = 0; let bashFail = 0;
+    const bashIds = new Set(); let bash = 0; let refusal = 0; let bashFail = 0; const sigs = [];
     for (const l of L) {
       if (!l) continue; let o; try { o = JSON.parse(l); } catch { continue; }
       if (o.timestamp && !first) first = Date.parse(o.timestamp);
@@ -185,40 +154,95 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, days = 7, sampl
         if (b.type === 'tool_result' && b.is_error) {
           terr++; const t = typeof b.content === 'string' ? b.content : JSON.stringify(b.content);
           const m = /^(PreToolUse:[\w:]+) hook error: (.{0,48})/.exec(t);
-          if (m && !/post-release hold/i.test(t) && !inHold(Date.parse(o.timestamp))) { hook++; const w = first >= W0 ? 'since' : first < T ? 'base' : null; const k = `${m[1]} ${m[2]}`; if (w) sig[w][k] = (sig[w][k] || 0) + 1; }
+          if (m && !/post-release hold/i.test(t) && !inHold(Date.parse(o.timestamp))) { hook++; sigs.push(`${m[1]} ${m[2]}`); }
         }
       }
     }
     if (!first || first < B0 || first > nowMs) continue;
-    const w = first >= W0 ? 'since' : first < T ? 'base' : null;
+    const w = first >= W0 ? 'since' : first < BT ? 'base' : null;
     if (!w || inHold(first)) continue;
     const st = /STATUS:\s*(done|partial|blocked)/i.exec(txt);
     let fin = false; try { fin = JSON.parse(readFileSync(fp.replace(/\.jsonl$/, '.meta.json'), 'utf8')).finished === true; } catch { /* none */ }
-    W[w].push({ u, peak, hook, terr, api, bash, refusal, bashFail, status: st ? st[1].toLowerCase() : (fin ? 'none' : 'running') });
+    WR.push({ w, first, sigs, u, peak, hook, terr, api, bash, refusal, bashFail, status: st ? st[1].toLowerCase() : (fin ? 'none' : 'running') });
   }
-  out.workers = {}; out.bash = {};
-  for (const w of ['since', 'base']) {
-    const bn = sum(W[w], (x) => x.bash); const rf = sum(W[w], (x) => x.refusal); const bf = sum(W[w], (x) => x.bashFail);
-    out.bash[w] = { n: bn, realFails: bf, realFailPct: per(bf, bn), refusals: rf, refusalPer100: per(rf, bn) };
-  }
-  for (const w of ['since', 'base']) {
-    const a = W[w]; const fin = a.filter((x) => x.status !== 'running');
-    out.workers[w] = {
-      n: a.length, finished: fin.length,
-      unitsPerWorker: { mean: +(sum(a, (x) => x.u) / Math.max(1, a.length)).toFixed(2), p50: quant(a.map((x) => x.u), 0.5), p90: quant(a.map((x) => x.u), 0.9) },
-      peakCtxP90: quant(a.map((x) => x.peak), 0.9),
-      over110kPct: per(a.filter((x) => x.peak > 110000).length, a.length), over150kPct: per(a.filter((x) => x.peak > 150000).length, a.length),
-      noStatusPct: per(fin.filter((x) => x.status === 'none').length, fin.length),
-      partialPct: per(fin.filter((x) => x.status === 'partial').length, fin.length),
-      blockedPct: per(fin.filter((x) => x.status === 'blocked').length, fin.length),
-      hookErrorWorkersPct: per(a.filter((x) => x.hook > 0).length, a.length),
-      apiErrorWorkers: a.filter((x) => x.api).length,
-      apiNonUsageWorkers: a.filter((x) => x.api && !/usage_limit/.test(String(x.api))).length,
+  // The whole result for the since side restricted to release `vf` (null = the whole chain); the baseline side is always the shared one.
+  const build = (vf) => {
+    const N = { since: 0, base: 0 };
+    for (const r of rd('spawns')) { const w = win(r, vf); if (w) N[w]++; }
+    const span = { since: Math.max((nowMs - W0) / HOUR, 1e-3), base: Math.max((BT - B0) / HOUR, 1e-3) };
+    const out = { T: new Date(T).toISOString(), now: new Date(nowMs).toISOString(), spawns: { ...N, perHour: { since: +(N.since / span.since).toFixed(1), base: +(N.base / span.base).toFixed(1) } }, telemetry: {}, span };
+    const count = (file, keyf, filt = () => true) => {
+      const c = {};
+      for (const r of rd(file)) { const w = win(r, vf); if (!w || !filt(r)) continue; const k = keyf(r); (c[k] ??= { since: 0, base: 0 })[w]++; }
+      return c;
     };
-  }
-  out.estUnitsPerHour = { since: +(out.spawns.perHour.since * out.workers.since.unitsPerWorker.mean).toFixed(2), base: +(out.spawns.perHour.base * out.workers.base.unitsPerWorker.mean).toFixed(2) };
-  out.usage = usageOf(out);
-  out.hookSignatures = { since: sig.since, base: sig.base };
+    const add = (name, c) => {
+      for (const [k, v] of Object.entries(c)) out.telemetry[`${name}:${k}`] = { since: v.since, base: v.base, per100spawns: { since: per(v.since, N.since), base: per(v.base, N.base) } };
+    };
+    add('denial', count('denials', (r) => `${r.guard}/${r.outcome}`));
+    add('handoff', count('handoff-limit', (r) => `${r.limit}/${r.action}`));
+    add('ctx', count('subagent-context', (r) => `${r.kind}/${r.phase}`));
+    add('gate', count('resource-gate', (r) => r.event));
+    add('wait', count('worker-wait', (r) => `${r.kind}/${r.action}`, (r) => r.action === 'deny'));
+    add('struggle', count('struggle', () => 'fired', (r) => r.fired));
+    add('runaway', count('runaway', () => 'fired'));
+    {
+      // bash-exit.jsonl rows do not say which failures were harness refusals; the worker transcripts do (out.bash, below). Kept for information only.
+      const c = count('bash-exit', (r) => (r.failed ? 'fail' : 'ok'), (r) => r.caller_is_subagent);
+      const f = c.fail || { since: 0, base: 0 }; const o = c.ok || { since: 0, base: 0 };
+      out.bashExit = { since: { n: f.since + o.since, failPct: per(f.since, f.since + o.since) }, base: { n: f.base + o.base, failPct: per(f.base, f.base + o.base) } };
+    }
+    {
+      // Heavy-command denials split by reason when the row carries one: a command that changes directory after its first step cannot be queued.
+      const q = { since: { n: 0, cdPrefix: 0 }, base: { n: 0, cdPrefix: 0 } };
+      for (const r of rd('resource-gate')) {
+        const w = win(r, vf); if (!w || !/denied/.test(String(r.event || ''))) continue;
+        q[w].n++; if (r.reason === 'cd-prefix' || /changes directory after its first step/.test(String(r.reason || r.detail || ''))) q[w].cdPrefix++;
+      }
+      out.queueDenied = q;
+      // Active hours: distinct clock hours of the window that hold at least one spawn row. Active days: distinct UTC days (the standing trend's history check).
+      const hrs = { since: new Set(), base: new Set() }; const days = { since: new Set(), base: new Set() };
+      for (const r of rd('spawns')) { const w = win(r, vf); if (w) { hrs[w].add(Math.floor(ts(r) / HOUR)); days[w].add(new Date(ts(r)).toISOString().slice(0, 10)); } }
+      out.activeHours = { since: hrs.since.size, base: hrs.base.size };
+      out.activeDays = { since: days.since.size, base: days.base.size };
+    }
+    {
+      const c = { since: 0, base: 0 };
+      for (const f of clearsFiles) for (const r of jsonl(f)) { if (!isFailureClear(r)) continue; const w = win(r, vf); if (w) c[w]++; }
+      out.queueClears = { since: c.since, base: c.base, perHour: { since: +(c.since / span.since).toFixed(2), base: +(c.base / span.base).toFixed(2) } };
+    }
+    const W = { since: [], base: [] }; const sig = { since: {}, base: {} };
+    for (const x of WR) {
+      if (x.w === 'since' && vf != null && verAt(x.first) !== vf) continue;
+      W[x.w].push(x); for (const k of x.sigs) sig[x.w][k] = (sig[x.w][k] || 0) + 1;
+    }
+    out.workers = {}; out.bash = {};
+    for (const w of ['since', 'base']) {
+      const bn = sum(W[w], (x) => x.bash); const rf = sum(W[w], (x) => x.refusal); const bf = sum(W[w], (x) => x.bashFail);
+      out.bash[w] = { n: bn, realFails: bf, realFailPct: per(bf, bn), refusals: rf, refusalPer100: per(rf, bn) };
+    }
+    for (const w of ['since', 'base']) {
+      const a = W[w]; const fin = a.filter((x) => x.status !== 'running');
+      out.workers[w] = {
+        n: a.length, finished: fin.length,
+        unitsPerWorker: { mean: +(sum(a, (x) => x.u) / Math.max(1, a.length)).toFixed(2), p50: quant(a.map((x) => x.u), 0.5), p90: quant(a.map((x) => x.u), 0.9) },
+        peakCtxP90: quant(a.map((x) => x.peak), 0.9),
+        over110kPct: per(a.filter((x) => x.peak > 110000).length, a.length), over150kPct: per(a.filter((x) => x.peak > 150000).length, a.length),
+        noStatusPct: per(fin.filter((x) => x.status === 'none').length, fin.length),
+        partialPct: per(fin.filter((x) => x.status === 'partial').length, fin.length),
+        blockedPct: per(fin.filter((x) => x.status === 'blocked').length, fin.length),
+        hookErrorWorkersPct: per(a.filter((x) => x.hook > 0).length, a.length),
+        apiErrorWorkers: a.filter((x) => x.api).length,
+        apiNonUsageWorkers: a.filter((x) => x.api && !/usage_limit/.test(String(x.api))).length,
+      };
+    }
+    out.estUnitsPerHour = { since: +(out.spawns.perHour.since * out.workers.since.unitsPerWorker.mean).toFixed(2), base: +(out.spawns.perHour.base * out.workers.base.unitsPerWorker.mean).toFixed(2) };
+    out.usage = usageOf(out);
+    out.hookSignatures = { since: sig.since, base: sig.base };
+    return out;
+  };
+  const out = build(null);
+  if (rel) { out.byVersion = {}; for (const r of rel) out.byVersion[r.v] = build(r.v); }
   return out;
 }
 
