@@ -1,6 +1,6 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -117,7 +117,7 @@ test('evaluate: spawn rewrites, queue, context, status, bash, api, runaway, blee
   assert.ok(names(metrics({ telemetry: { 'gate:denied': t(25, 40, 25, 6) } })).includes('queue-denied'));
   assert.ok(names(metrics({ queueClears: { since: 31, base: 5, perHour: { since: 3.6, base: 0.06 } } })).includes('queue-clears'));
   assert.ok(names(metrics({ telemetry: { 'handoff:hard/deny': t(3, 0, 3, 0) } })).includes('handoff-hard-deny'));
-  const m = metrics(); m.workers.since = { ...m.workers.since, over150kPct: 8, noStatusPct: 20, partialPct: 40, blockedPct: 9, hookErrorWorkersPct: 60, apiErrorWorkers: 3, apiNonUsageWorkers: 1, unitsPerWorker: { mean: 2, p50: 1, p90: 4 } };
+  const m = metrics(); m.workers.since = { ...m.workers.since, over150kPct: 8, noStatusPct: 20, partialPct: 40, blockedPct: 15, hookErrorWorkersPct: 60, apiErrorWorkers: 3, apiNonUsageWorkers: 1, unitsPerWorker: { mean: 2, p50: 1, p90: 4 } };
   const n = names(m);
   for (const x of ['context-over-150k', 'no-final-status', 'partial-share', 'blocked-share', 'hook-error-share', 'api-errors', 'units-per-worker', 'units-p90']) assert.ok(n.includes(x), x);
   assert.ok(names(metrics({ bash: { since: { n: 300, realFails: 27, realFailPct: 9, refusals: 0, refusalPer100: 0 }, base: { n: 500, realFails: 5, realFailPct: 1, refusals: 0, refusalPer100: 0 } } })).includes('worker-bash-fail'));
@@ -144,6 +144,67 @@ test('analyze: reads telemetry and worker transcripts of invented data', () => {
   assert.equal(m.spawns.since, 2); assert.equal(m.spawns.base, 1);
   assert.equal(m.telemetry['denial:g/deny'].since, 1);
   assert.equal(m.workers.since.n, 1); assert.equal(m.workers.since.over150kPct, 100);
+});
+
+// ---- 0.31.65 standing metrics ----
+function worker(proj, id, { atype, finished = true, text, handback, extra = [], brief = 'Do the invented task.', refusals = 0, bash = 0, at = T + HOUR } = {}) {
+  const sd = join(claude, 'projects', proj, 'sess', 'subagents'); mkdirSync(sd, { recursive: true });
+  const ts = new Date(at).toISOString();
+  const a = (content) => ({ type: 'assistant', timestamp: ts, requestId: id + content.length + Math.random(), message: { model: 'claude-sonnet', usage: { input_tokens: 10, output_tokens: 5 }, content } });
+  const L = [{ type: 'user', timestamp: ts, message: { role: 'user', content: brief } }];
+  for (let i = 0; i < bash; i++) {
+    L.push(a([{ type: 'tool_use', id: `${id}-b${i}`, name: 'Bash', input: { command: 'x' } }]));
+    if (i < refusals) L.push({ type: 'user', timestamp: ts, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `${id}-b${i}`, is_error: true, content: 'This agent is isolated in the worktree W, but this command is too complex to verify' }] } });
+  }
+  if (text) L.push(a([{ type: 'text', text }]));
+  if (handback) L.push(a([{ type: 'tool_use', id: id + '-hb', name: 'SubagentHandback', input: { message: handback } }]));
+  L.push(...extra.map((t) => a([{ type: 'text', text: t }])));
+  const fp = join(sd, `agent-${id}.jsonl`);
+  writeFileSync(fp, L.map((l) => JSON.stringify(l)).join('\n'));
+  writeFileSync(fp.replace(/\.jsonl$/, '.meta.json'), JSON.stringify({ agentType: atype || 'agent-companion:ac-sonnet-low', finished }));
+  return fp;
+}
+const wk = (m) => m.workers.since;
+
+test('standing-metrics: STATUS is read from the SubagentHandback call and from earlier in the transcript', () => {
+  worker('C--pa', 'hb1', { handback: 'STATUS: partial\nBLOCKERS: none' });
+  worker('C--pa', 'hb2', { handback: 'no status here' });
+  worker('C--pa', 'wake', { text: 'STATUS: blocked\nneeds a credential', extra: ['The monitor expired; the report above stands.'] });
+  worker('C--pa', 'plain', { text: 'STATUS: done' });
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(wk(m).finished, 4);
+  assert.equal(wk(m).noStatusPct, 25, 'only the handback without a STATUS line');
+  assert.equal(wk(m).partialPct, 25); assert.equal(wk(m).blockedPct, 25);
+});
+
+test('standing-metrics: off-contract types and hook-verification probes are left out of status and Bash metrics and named', () => {
+  worker('C--pb', 'ok', { text: 'STATUS: done', bash: 10, refusals: 1 });
+  worker('C--pb', 'ex1', { atype: 'Explore', text: 'findings only', bash: 10, refusals: 5 });
+  worker('C--pb', 'ex2', { atype: 'web-fetch', text: 'page text' });
+  worker('C--pb', 'pr1', { brief: 'TYPE: x\n\nHook verification spawn, not real work: reply FOUND: no', text: 'FOUND: no', bash: 10, refusals: 5 });
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(wk(m).n, 4); assert.equal(wk(m).finished, 1); assert.equal(wk(m).noStatusPct, 0);
+  assert.deepEqual(wk(m).excluded, { probes: 1, byType: { Explore: 1, 'web-fetch': 1 } });
+  assert.equal(m.bash.since.n, 10); assert.equal(m.bash.since.refusals, 1); assert.equal(m.bash.since.refusalPer100, 10);
+});
+
+test('standing-metrics: files are chosen by mtime inside the window, every project represented; the cap drops the oldest', () => {
+  const a = worker('C--aaa', 'old', { text: 'STATUS: done' });
+  const b = worker('C--zzz', 'mid', { text: 'STATUS: done' });
+  const c = worker('C--zzz', 'new', { text: 'STATUS: done' });
+  const t = (s) => new Date(Date.now() - s * 1000);
+  utimesSync(a, t(300), t(300)); utimesSync(b, t(200), t(200)); utimesSync(c, t(100), t(100));
+  assert.equal(wk(W.analyze({ T, nowMs: T + 3 * HOUR })).n, 3, 'default cap covers a busy week');
+  assert.equal(wk(W.analyze({ T, nowMs: T + 3 * HOUR, scanCap: 2 })).n, 2, 'a safety cap keeps the newest two, not alphabetical order');
+  assert.ok(W.WORKER_SCAN_CAP >= 6000);
+});
+
+test('standing-metrics: blocked-share needs 5 blocked workers before it can flag', () => {
+  const mk = (blockedPct, finished) => { const m = metrics(); m.workers.since = { ...m.workers.since, finished, blockedPct }; return names(m).includes('blocked-share'); };
+  assert.equal(W.TH.blockedMinEv, 5);
+  assert.equal(mk(8, 39), false, '3 blocked of 39 stays quiet');
+  assert.equal(mk(10, 40), false, '4 blocked of 40 stays quiet');
+  assert.equal(mk(12.5, 40), true, '5 blocked of 40 flags');
 });
 
 // ---- state, hold, clear ----

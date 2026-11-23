@@ -60,6 +60,25 @@ Every metric has a minimum event count (numerator) and a minimum denominator. Be
 **inconclusive**; above it but below the event floor it is **ok**. Release-window floors: 30 spawns for spawn-rate
 metrics, 20 worker transcripts for worker-share metrics, 200 worker Bash calls for Bash metrics; event floors 3 to 10
 by metric (spec table). Queue denials are judged against max(20, 2x the 7-day rate) per 100 spawns, not a fixed 20.
+Floors that differ from the general rule (0.31.65):
+
+| Metric | Denominator floor | Event floor |
+|---|---|---|
+| `blocked-share` | 20 finished workers | **5 blocked workers** (was 3: three blocked of 39, all brief or environment problems of other projects, started a hold) |
+| `no-final-status`, `partial-share` | 30 / 20 finished workers | 5 |
+| `harness-refusals` | 200 worker Bash calls | 10 |
+| `worker-bash-fail` | 200 worker Bash calls | 10 |
+
+The worker metrics read worker transcripts chosen by file mtime inside the window (newest first, a safety cap of 12000
+files above a full busy week; before 0.31.65 the first 2000 in directory order, which dropped about 65% of a week and
+whole projects). A worker's STATUS is the latest `STATUS:` line of its assistant text or of its `SubagentHandback`
+call (`input.message`), so a report delivered through the handback tool, or given before the worker was woken again,
+counts. Agent types off the reporting contract (`Explore`, `Plan`, `web-fetch`, `claude-code-guide`,
+`statusline-setup`) and hook-verification probe spawns (brief opens with "Hook verification spawn, not real work")
+stay out of `no-final-status`, `partial-share`, `blocked-share`, `worker-bash-fail` and `harness-refusals`; their
+counts are named in `workers.excluded` (and in the standing file), never dropped silently. Usage and context metrics
+still count every worker.
+
 `runaway` is the one metric with no floor, on purpose: a runaway session is a real fault even once, so a single
 `runaway:fired` event in the window flags it.
 
