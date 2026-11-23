@@ -64,3 +64,23 @@ export function buildWriterClause(type, role, brief = '') {
   const staged = countDeliverables(text) > STAGING_THRESHOLD;
   return `\n\n${WRITER_MARKER} ${HANDOFF_SENTENCE} ${TEST_SENTENCE}${staged ? ` ${STAGING_SENTENCE}` : ''}`;
 }
+
+// --- worktree command clause --------------------------------------------------------------------
+// Claude Code itself refuses some commands from a worktree-isolated agent as too complex to verify
+// (`cd X && ... <<EOF` compounds, `git -C` aimed outside its own tree). A spawn with isolation
+// "worktree" gets one short clause naming the shapes that pass. One sentence per entry, so a later
+// addition (a per-project standard command list) is one more entry. Keep the whole clause near 300 chars.
+export const WORKTREE_MARKER = '[agent-companion: worktree]';
+export const WORKTREE_SENTENCES = [
+  'Commands already run in your worktree: do not cd into it.',
+  'Use git -C only on your own tree.',
+  'Write files with Write, never with heredocs.',
+  'Run a heavy command (install, build, test suite) as one plain command so the queue can wrap it.',
+];
+
+// The text to append, or '' (not a worktree spawn, or the brief already carries the clause).
+export function buildWorktreeClause(isolation, brief = '') {
+  if (isolation !== 'worktree') return '';
+  if (String(brief ?? '').includes(WORKTREE_MARKER)) return '';
+  return `\n\n${WORKTREE_MARKER} ${WORKTREE_SENTENCES.join(' ')}`;
+}
