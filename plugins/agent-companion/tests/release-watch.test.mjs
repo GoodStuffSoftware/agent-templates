@@ -639,5 +639,264 @@ test('status-lines', () => {
   assert.match(out, /queue-denied/);
 });
 
+// ---- stage 2: chain of releases, finish and extension, flag migration, standing health ----
+const none = () => null;
+const instV = (version, at) => ({ plugins: { 'agent-companion@x': [{ version, lastUpdated: iso(at) }] } });
+const runFile = () => JSON.parse(readFileSync(file('release-watch-run.json'), 'utf8'));
+const allRows = () => S.readRows();
+const flagged = () => metrics({ telemetry: { 'gate:denied': t(25, 40, 25, 6) } });
+
+test('migrate-v1: a run file from before v2 becomes a one-release chain and keeps its done checks', () => {
+  const old = { version: '1.2.3', T, due: W.CHECK_HOURS.map((h) => T + h * HOUR), done: [0], lastAt: T + HOUR, lastConclusiveAt: T + HOUR, closed: false };
+  writeFileSync(file('release-watch-run.json'), JSON.stringify(old));
+  const m = W.migrateRun(old);
+  assert.equal(m.v, 2); assert.equal(m.baseAnchor, T); assert.equal(m.status, 'watching'); assert.equal(m.releases.length, 1);
+  assert.deepEqual(m.releases[0].done, [0]); assert.equal(m.releases[0].lastConclusiveAt, T + HOUR);
+  assert.equal(W.migrateRun({ ...old, closed: true }).status, 'finished');
+  assert.equal(W.migrateRun({ nope: 1 }), null);
+  const r = W.tick({ at: T + 2 * HOUR + 1, installed: installed(), run: () => metrics(), standingRun: none });
+  assert.deepEqual(r.checks, [2]);
+  const s = runFile();
+  assert.equal(s.v, 2); assert.deepEqual(s.releases[0].done, [0, 1]); assert.equal(s.baseAnchor, T);
+});
+
+test('chain-baseline-fixed: every check of a chain reads the same baseline, the 7 days before the FIRST install', () => {
+  const seen = []; const run = (o) => { seen.push(o); return metrics(); };
+  const T2 = T + 10 * HOUR;
+  W.tick({ at: T + HOUR, installed: installed(), run, standingRun: none });
+  W.tick({ at: T2 + HOUR, installed: installed(T2), run, standingRun: none });
+  assert.equal(seen.length, 2);
+  for (const o of seen) { assert.equal(o.baseTo, T); assert.equal(o.baseFrom, T - 7 * 24 * HOUR); }
+  assert.equal(seen[1].T, T2, 'the analysis anchor is the newest release');
+  assert.equal(seen[1].winFrom, T + HOUR, 'the window starts at the last conclusive check');
+  assert.equal(runFile().baseAnchor, T);
+});
+
+test('chain-flag-survives-install: an open flag stays open when a newer release joins the chain', () => {
+  const T2 = T + 10 * HOUR;
+  W.tick({ at: T + HOUR, installed: installed(), run: flagged, standingRun: none });
+  assert.equal(S.flagIsOpen(S.readFlag()), true);
+  const r = W.tick({ at: T2 + HOUR, installed: installed(T2), run: () => metrics(), standingRun: none });
+  assert.equal(r.verdict, 'clean');
+  const f = S.readFlag();
+  assert.equal(S.flagIsOpen(f), true, 'a clean check never closes a flag');
+  assert.deepEqual(f.flags.map((x) => x.name), ['queue-denied']);
+  assert.equal(Date.parse(f.T), T, 'the flag stays anchored on the chain start');
+  assert.equal(runFile().releases.length, 2);
+});
+
+test('per-version-split: with two releases the analysis splits the since side by the release that produced each row', () => {
+  const T2 = T + 3 * HOUR;
+  const tdir = join(claude, 'agent-companion', 'telemetry'); mkdirSync(tdir, { recursive: true });
+  const rows = [
+    ...[1, 2, 3].map((i) => rowj({ at: T + 20 * MIN * i, guard_version: '1.0.0' })),
+    ...[1, 2, 3, 4, 5].map((i) => rowj({ at: T2 + 20 * MIN * i, guard_version: '1.1.0' })),
+    rowj({ at: T - 2 * HOUR }),
+  ];
+  writeFileSync(join(tdir, 'spawns.jsonl'), rows.join(''));
+  const rel = [{ version: '1.0.0', T }, { version: '1.1.0', T: T2 }];
+  const m = W.analyze({ T: T2, nowMs: T2 + 6 * HOUR, winFrom: T, baseFrom: T - 7 * 24 * HOUR, baseTo: T, releases: rel });
+  assert.equal(m.spawns.since, 8); assert.equal(m.spawns.base, 1);
+  assert.equal(m.byVersion['1.0.0'].spawns.since, 3); assert.equal(m.byVersion['1.1.0'].spawns.since, 5);
+  assert.equal(m.byVersion['1.1.0'].spawns.base, 1, 'the baseline side is shared');
+  assert.equal(W.analyze({ T, nowMs: T2 + 6 * HOUR, baseFrom: T - 7 * 24 * HOUR, baseTo: T }).byVersion, undefined, 'one release has no split');
+  // through a tick the check row carries both versions
+  W.tick({ at: T + HOUR, installed: instV('1.0.0', T), run: none, standingRun: none });
+  W.tick({ at: T2 + 4 * HOUR, installed: instV('1.1.0', T2), standingRun: none });
+  const row = allRows().filter((r) => r.event === 'check').pop();
+  assert.deepEqual(Object.keys(row.byVersion).sort(), ['1.0.0', '1.1.0']);
+  assert.deepEqual(row.releases.map((x) => x.version).sort(), ['1.0.0', '1.1.0']);
+});
+
+test('chain-finishes-together: every release of the chain finishes at once, with one finished row', () => {
+  W.tick({ at: T + HOUR, installed: instV('1.0.0', T), run: () => rich(), standingRun: none });
+  const T2 = T + 3 * HOUR;
+  W.tick({ at: T + 28 * HOUR, installed: instV('1.1.0', T2), run: () => rich(), standingRun: none });
+  const s = runFile();
+  assert.equal(s.status, 'finished');
+  assert.deepEqual(s.releases.map((r) => r.status), ['finished', 'finished']);
+  assert.deepEqual(s.releases.map((r) => r.done.length), [8, 8]);
+  const fin = allRows().filter((r) => r.event === 'finished');
+  assert.equal(fin.length, 1); assert.deepEqual(fin[0].releases, ['1.0.0', '1.1.0']);
+  assert.equal(fin[0].T, iso(T2), 'the finished row names the newest release');
+  // a finished chain is quiet; a later install starts a new chain with its own baseline
+  assert.equal(W.tick({ at: T + 29 * HOUR, installed: instV('1.1.0', T2), run: () => rich(), standingRun: none }).ran, false);
+  const T3 = T + 40 * HOUR;
+  W.tick({ at: T3 + HOUR, installed: instV('1.2.0', T3), run: () => rich(), standingRun: none });
+  assert.equal(runFile().baseAnchor, T3); assert.equal(runFile().releases.length, 1);
+});
+
+test('finish-needs-activity: too little activity adds a check 4 h later, and 72 h after the install stops as insufficient-data with a flag that never holds', () => {
+  // metrics() has 40 workers and 500 Bash calls since: under the finish floors (60 and 600).
+  let r = W.tick({ at: T + 24 * HOUR, installed: installed(), run: () => metrics(), holdMinutes: 30, standingRun: none });
+  assert.deepEqual(r.checks, [1, 2, 3, 4, 5, 6, 7, 8]);
+  let s = runFile();
+  assert.equal(s.status, 'watching'); assert.equal(s.extendedTo, T + 28 * HOUR); assert.equal(s.releases[0].due.length, 9);
+  assert.equal(allRows().filter((x) => x.event === 'check').pop().extendedTo, iso(T + 28 * HOUR));
+  assert.equal(S.flagIsOpen(S.readFlag()), false, 'a clean check with short activity opens nothing yet');
+  // the extension is due at +28 h and not before
+  assert.equal(W.tick({ at: T + 27 * HOUR, installed: installed(), run: () => metrics(), standingRun: none }).ran, false);
+  r = W.tick({ at: T + 28 * HOUR, installed: installed(), run: () => metrics(), standingRun: none });
+  assert.deepEqual(r.checks, [9]);
+  s = runFile(); assert.equal(s.extendedTo, T + 32 * HOUR); assert.equal(s.status, 'watching');
+  // a long silence: the next extension would pass the cap
+  r = W.tick({ at: T + 72 * HOUR, installed: installed(), run: () => metrics(), holdMinutes: 30, standingRun: none });
+  assert.equal(runFile().status, 'insufficient-data'); assert.equal(runFile().releases[0].status, 'insufficient-data');
+  const rows = allRows();
+  const ins = rows.find((x) => x.event === 'insufficient-data'); assert.ok(ins);
+  assert.equal(ins.floors.workers, 60); assert.equal(ins.activity.workers, 40);
+  const f = S.readFlag();
+  assert.equal(S.flagIsOpen(f), true); assert.deepEqual(f.flags.map((x) => x.name), ['insufficient-data']);
+  assert.match(f.flags[0].detail, /workers 40\/60 short/);
+  assert.equal(r.held, false);
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 72 * HOUR + 31 * MIN }), null); assert.equal(S.isHoldActive(), false);
+  assert.equal(W.tick({ at: T + 80 * HOUR, installed: installed(), run: () => metrics(), standingRun: none }).ran, false, 'the chain has stopped');
+  // enough activity at an extension finishes the chain instead
+});
+
+test('finish-needs-activity: activity that reaches the floors at an extension finishes the chain', () => {
+  let m = metrics();
+  W.tick({ at: T + 24 * HOUR, installed: installed(), run: () => m, standingRun: none });
+  assert.equal(runFile().status, 'watching');
+  m = rich();
+  W.tick({ at: T + 28 * HOUR, installed: installed(), run: () => m, standingRun: none });
+  assert.equal(runFile().status, 'finished');
+  assert.equal(allRows().filter((x) => x.event === 'finished').length, 1);
+});
+
+// A standing-health stub: 2116 spawns and 127 queue denials in the week is 6.0 per 100, over the ceiling of 5.
+const standingStub = (over = {}) => () => metrics({ spawns: { since: 2116, base: 8000, perHour: { since: 12.6, base: 7 } }, telemetry: { 'gate:denied': t(127, 400, 6, 5) }, activeDays: { since: 7, base: 28 }, ...over });
+const standingRows = () => allRows().filter((x) => x.event === 'standing');
+
+test('standing-ceiling: a metric over its fixed ceiling is a finding; it is only reported and never touches the flag, the hold or the chain', () => {
+  const r = W.tick({ at: T, installed: {}, standingRun: standingStub() });
+  assert.equal(r.standing, 'findings');
+  const st = JSON.parse(readFileSync(file('release-watch-standing.json'), 'utf8'));
+  const q = st.findings.find((x) => x.name === 'queue-denied');
+  assert.ok(q); assert.equal(q.kind, 'ceiling'); assert.equal(q.value, 6); assert.equal(q.ceiling, 5);
+  assert.equal(st.shownOn, null);
+  assert.equal(standingRows().length, 1); assert.equal(standingRows()[0].findings[0].name, 'queue-denied');
+  assert.equal(existsSync(file('release-watch-flag.json')), false, 'no flag');
+  assert.equal(S.readFlag(), null); assert.equal(S.isHoldActive(), false); assert.equal(r.held, false);
+  assert.equal(existsSync(file('release-watch-run.json')), false, 'no chain started');
+  // with a flag and a hold already there they stay exactly as they were
+  W.tick({ at: T + HOUR, installed: installed(), run: flagged, holdMinutes: 30, standingRun: none });
+  const before = readFileSync(file('release-watch-flag.json'), 'utf8');
+  const hb = S.maybeHold({ holdMinutes: 30, at: T + HOUR + 31 * MIN }); assert.ok(hb);
+  const holdBefore = existsSync(file('release-watch-hold.json')) ? readFileSync(file('release-watch-hold.json'), 'utf8') : null;
+  const st2 = W.standing({ at: T + 3 * 24 * HOUR, run: standingStub() });
+  assert.equal(st2.verdict, 'findings');
+  assert.equal(readFileSync(file('release-watch-flag.json'), 'utf8'), before);
+  if (holdBefore) assert.equal(readFileSync(file('release-watch-hold.json'), 'utf8'), holdBefore);
+  assert.equal(S.isHoldActive(), true);
+});
+
+test('standing-trend-short-history: a trend is judged only with 14 active days of history; a ceiling is judged regardless', () => {
+  const b = (since, base) => ({ since: { n: 1500, realFails: since, realFailPct: +(100 * since / 1500).toFixed(1), refusals: 0, refusalPer100: 0 }, base: { n: 1500, realFails: base, realFailPct: +(100 * base / 1500).toFixed(1), refusals: 0, refusalPer100: 0 } });
+  // worker-bash-fail 4% against 2% before: over 1.5x, under the ceiling of 5, 60 and 30 events
+  const short = W.standing({ at: T, run: () => metrics({ bash: b(60, 30), activeDays: { since: 7, base: 5 } }) });
+  assert.equal(short.verdict, 'inconclusive'); assert.equal(short.trend, 'inconclusive (history short)'); assert.deepEqual(short.findings, []);
+  const none14 = W.standing({ at: T + HOUR, run: () => metrics({ bash: b(60, 30) }) });
+  assert.equal(none14.verdict, 'inconclusive', 'no history information at all counts as short');
+  const long = W.standing({ at: T + 2 * HOUR, run: () => metrics({ bash: b(60, 30), activeDays: { since: 7, base: 20 } }) });
+  assert.equal(long.verdict, 'findings'); assert.equal(long.trend, 'judged');
+  const f = long.findings.find((x) => x.name === 'worker-bash-fail');
+  assert.ok(f); assert.equal(f.kind, 'trend'); assert.equal(f.value, 4); assert.equal(f.prior, 2);
+  const quiet = W.standing({ at: T + 3 * HOUR, run: () => metrics({ bash: b(60, 50), activeDays: { since: 7, base: 20 } }) });
+  assert.equal(quiet.verdict, 'ok'); assert.deepEqual(quiet.findings, []);
+  const few = W.standing({ at: T + 4 * HOUR, run: () => metrics({ bash: b(60, 10), activeDays: { since: 7, base: 20 } }) });
+  assert.equal(few.verdict, 'ok', 'a prior side under 20 events is no trend');
+  // a ceiling still shows on a short history
+  const ceil = W.standing({ at: T + 5 * HOUR, run: standingStub({ activeDays: { since: 7, base: 3 } }) });
+  assert.equal(ceil.verdict, 'findings'); assert.equal(ceil.trend, 'inconclusive (history short)');
+});
+
+test('standing-daily: one standing check per day; the same day writes no second row, the next day does', () => {
+  let calls = 0; const sr = () => { calls++; return metrics({ activeDays: { since: 7, base: 20 } }); };
+  W.tick({ at: T, installed: {}, standingRun: sr });
+  assert.equal(calls, 1); assert.equal(standingRows().length, 1);
+  W.tick({ at: T + 2 * HOUR, installed: {}, standingRun: sr });
+  assert.equal(calls, 1); assert.equal(standingRows().length, 1, 'same day: no second row');
+  W.tick({ at: T + 25 * HOUR, installed: {}, standingRun: sr });
+  assert.equal(calls, 2); assert.equal(standingRows().length, 2, 'next day: a new row');
+  // the same rule holds with a chain running, and the run file remembers when
+  W.tick({ at: T + 26 * HOUR, installed: installed(T + 26 * HOUR), run: none, standingRun: sr });
+  W.tick({ at: T + 27 * HOUR, installed: installed(T + 26 * HOUR), run: none, standingRun: sr });
+  assert.equal(calls, 2);
+  assert.equal(W.standingDue(runFile(), T + 25 * HOUR + 23 * HOUR), false);
+  assert.equal(W.standingDue(runFile(), T + 25 * HOUR + 25 * HOUR), true);
+});
+
+// A flag written by hand the way a pre-v2 build wrote it (no `v`).
+const legacyFlag = (over = {}) => ({ version: '1.2.3', T: iso(T), check: '+1h', flags: [{ name: 'queue-denied', value: 20, n: 40, level: 3, detail: 'x' }], openedAt: iso(T + HOUR), notifiedAt: iso(T + HOUR), ackedAt: null, shownTo: {}, candidates: [], ack: null, clearedAt: null, cooldown: {}, ...over });
+const putFlag = (f) => writeFileSync(file('release-watch-flag.json'), JSON.stringify(f));
+
+test('legacy-flag-superseded: a pre-v2 flag whose sample is under the v2 floor is closed, the ack stays and nothing restarts', () => {
+  const ackedAt = iso(T + 2 * HOUR);
+  putFlag(legacyFlag({ flags: [{ name: 'queue-denied', value: 20, n: 10, detail: 'x' }, { name: 'hook-error-share', value: 60, n: 8 }], ackedAt }));
+  const r = W.tick({ at: T + 3 * HOUR, installed: {}, standingRun: none });
+  assert.deepEqual(r.migrated, { superseded: true });
+  const f = S.readFlag();
+  assert.equal(f.v, 2); assert.equal(f.clearedBy, 'v2-migration'); assert.equal(f.clearedAt, iso(T + 3 * HOUR));
+  assert.match(f.supersededReason, /superseded by v2 evidence rules/);
+  assert.equal(f.ackedAt, ackedAt, 'the ack is kept'); assert.equal(f.notifiedAt, iso(T + HOUR), 'the countdown is not restarted');
+  assert.equal(S.flagIsOpen(f), false);
+  const row = allRows().find((x) => x.event === 'flag-superseded');
+  assert.ok(row); assert.equal(row.ackKept, true); assert.deepEqual(row.flags, ['queue-denied', 'hook-error-share']);
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 5 * HOUR }), null, 'a closed flag starts no hold');
+  // the migration runs once
+  assert.equal(W.tick({ at: T + 4 * HOUR, installed: {}, standingRun: none }).migrated, undefined);
+  assert.equal(allRows().filter((x) => x.event === 'flag-superseded').length, 1);
+});
+
+test('legacy-flag-superseded: an item of unknown size or of a name in no class is kept', () => {
+  putFlag(legacyFlag({ flags: [{ name: 'queue-denied', value: 20, n: 10 }, { name: 'mystery', value: 1 }] }));
+  const r = W.migrateFlag({ at: T + 3 * HOUR });
+  assert.deepEqual(r.kept, ['mystery']);
+  assert.deepEqual(S.readFlag().flags.map((x) => x.name), ['mystery']);
+  putFlag(legacyFlag({ flags: [{ name: 'queue-denied', value: 20 }] }));
+  assert.deepEqual(W.migrateFlag({ at: T + 3 * HOUR }).kept, ['queue-denied'], 'unknown n: kept');
+});
+
+test('legacy-flag-still-flags-revoked: a flag still over the v2 floor keeps its items, and an ack without a typed record is revoked with the countdown restarted', () => {
+  putFlag(legacyFlag({ ackedAt: iso(T + 2 * HOUR), shownTo: { s1: iso(T + HOUR) }, candidates: [{ x: 1 }] }));
+  const at = T + 3 * HOUR;
+  const r = W.tick({ at, installed: {}, standingRun: none });
+  assert.deepEqual(r.migrated, { kept: ['queue-denied'], revoked: true });
+  const f = S.readFlag();
+  assert.equal(f.v, 2); assert.equal(S.flagIsOpen(f), true);
+  assert.equal(f.ackedAt, null); assert.equal(f.ack, null); assert.equal(f.notifiedAt, iso(at)); assert.deepEqual(f.candidates, []);
+  const row = allRows().find((x) => x.event === 'ack-revoked'); assert.ok(row);
+  assert.match(S.flagLine() || '', /queue-denied/, 'the flag is shown again');
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: at + 10 * MIN }), null, 'the countdown restarted from the migration');
+  assert.ok(S.maybeHold({ holdMinutes: 30, at: at + 31 * MIN }), 'and a hold follows if still unanswered');
+});
+
+test('legacy-ack-revoked: an ack written by a build without human records is revoked; an unacked flag only gets the v2 marker', () => {
+  putFlag(legacyFlag());
+  assert.deepEqual(W.migrateFlag({ at: T + 3 * HOUR }), { kept: ['queue-denied'] });
+  const f = S.readFlag();
+  assert.equal(f.v, 2); assert.equal(f.notifiedAt, iso(T + HOUR), 'no ack to revoke: countdown untouched');
+  assert.equal(allRows().filter((x) => x.event === 'ack-revoked').length, 0);
+  assert.equal(W.migrateFlag({ at: T + 4 * HOUR }), null, 'a v2 flag is never migrated again');
+});
+
+test('legacy-ack-kept: a legacy ack with a typed record at its time stays, as an ack object naming the session', () => {
+  const ackedAt = T + 2 * HOUR;
+  putFlag(legacyFlag({ ackedAt: iso(ackedAt), shownTo: { sess1: iso(T + HOUR) } }));
+  const projects = join(tmp, 'projects'); mkdirSync(join(projects, 'p'), { recursive: true });
+  writeFileSync(join(projects, 'p', 'sess1.jsonl'), [urec(T, 'old'), humanRec(ackedAt + 500, 'looks fine')].join('\n') + '\n');
+  const r = W.migrateFlag({ at: T + 3 * HOUR, projectsDir: projects });
+  assert.deepEqual(r, { kept: ['queue-denied'] });
+  const f = S.readFlag();
+  assert.equal(f.ackedAt, iso(ackedAt)); assert.equal(f.notifiedAt, iso(T + HOUR));
+  assert.equal(f.ack.session, 'sess1'); assert.equal(f.ack.signal, 'transcript-origin-human'); assert.equal(f.ack.shownAt, iso(T + HOUR));
+  assert.equal(allRows().filter((x) => x.event === 'ack-revoked').length, 0);
+  assert.equal(S.flagLine(), null, 'answered: silent');
+  // a typed record far from the ack time does not count
+  putFlag(legacyFlag({ ackedAt: iso(ackedAt + 10 * MIN) }));
+  assert.equal(W.migrateFlag({ at: T + 3 * HOUR, projectsDir: projects }).revoked, true);
+});
+
 test('cleanup', () => { rmSync(tmp, { recursive: true, force: true }); });
 void tel;
