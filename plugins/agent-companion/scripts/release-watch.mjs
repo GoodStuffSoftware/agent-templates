@@ -37,8 +37,8 @@ export function newestInstall(installed) {
   return best;
 }
 
-export function buildSchedule(T, version, prev) {
-  return { T, version, prevT: prev && prev.T !== T ? prev.T : prev?.prevT ?? null, due: CHECK_HOURS.map((h) => T + h * HOUR), done: [], closed: false, lastConclusiveAt: null };
+export function buildSchedule(T, version) {
+  return { version: version ?? null, T, due: CHECK_HOURS.map((h) => T + h * HOUR), done: [], lastAt: null, lastConclusiveAt: null, verdicts: [], status: 'watching' };
 }
 
 // Indexes of checks due at `at` and not done.
@@ -388,19 +388,38 @@ export function evaluate(m, opts = {}) {
   return { verdict: flags.length ? 'flag' : conclusive ? 'clean' : 'inconclusive', metrics, flags };
 }
 
-// ---------- tick ----------
-// The window a check measures starts at the last CONCLUSIVE check (an inconclusive window rolls forward into the next one). A run file
-// written before 0.31.64 has no lastConclusiveAt property: its lastAt keeps the window start, so the run in flight does not restart at T.
-const windowStart = (sch) => sch.lastConclusiveAt || (('lastConclusiveAt' in sch) ? sch.T : (sch.lastAt || sch.T));
+// ---------- run state v2 ----------
+// release-watch-run.json: { v: 2, baseAnchor, status: 'watching'|'finished'|'insufficient-data', extendedTo, everFlagged, standing: { lastAt },
+//   releases: [{ version, T, due[], done[], lastAt, lastConclusiveAt, verdicts[], status: 'watching'|'waiting-chain'|'finished'|'insufficient-data' }] }.
+// A chain is the run of releases installed while the last one was still being watched: one baseline (the 7 days before the FIRST install,
+// baseAnchor), one analysis per tick. A run file written before 0.31.64 (one release, no v) is read as a chain of one and written back on the next tick.
+export function migrateRun(old) {
+  if (!old || typeof old !== 'object') return null;
+  if (old.v === 2 && Array.isArray(old.releases) && old.baseAnchor > 0) return old;
+  if (!(old.T > 0) || !Array.isArray(old.due) || !Array.isArray(old.done)) return null;
+  const status = old.closed ? 'finished' : 'watching';
+  return { v: 2, baseAnchor: old.T, status, extendedTo: null, everFlagged: !!old.everFlagged, standing: { lastAt: null },
+    releases: [{ version: old.version ?? null, T: old.T, due: old.due, done: old.done, lastAt: old.lastAt ?? null,
+      lastConclusiveAt: 'lastConclusiveAt' in old ? (old.lastConclusiveAt ?? null) : (old.lastAt ?? null), verdicts: [], status }] };
+}
+const newestOf = (rs) => rs.releases.reduce((a, b) => (b.T > a.T ? b : a));
+// The window a check measures starts at the last CONCLUSIVE check of any release of the chain (an inconclusive window rolls forward into the next one).
+const chainWinFrom = (rs) => Math.max(0, ...rs.releases.map((r) => r.lastConclusiveAt || 0)) || rs.baseAnchor;
 const iso = (t) => new Date(t).toISOString();
+const D7 = 7 * 24 * HOUR;
+const hoursOf = (r, i) => Math.round((r.due[i] - r.T) / HOUR);
+const mrow = (x) => ({ name: x.name, value: x.value, limit: x.limit, base: x.base, n: x.n, events: x.events, status: x.status, unit: x.unit, hold: x.hold, ...(x.status === 'flag' && x.detail ? { detail: x.detail } : {}) });
+// Per-version rows keep only what carries a signal: a conclusive metric with events or a flag, never the watch-health or noisy-by-nature ones.
+const keepForVersion = (x) => x.status !== 'inconclusive' && (x.events > 0 || x.status === 'flag') && x.name !== 'usage-source-empty' && x.name !== 'queue-clears' && !x.name.startsWith('hook-signature:');
 
-function checkRow({ at, sch, last, due, late, verdict, flags, evald, metrics, winFrom }) {
-  const row = { at: iso(at), event: 'check', T: iso(sch.T), version: sch.version, check: last + 1, covered: due.map((i) => i + 1), late, verdict, flags,
-    window: { from: iso(winFrom), to: iso(at) } };
-  if (evald) row.metrics = evald.metrics.map((x) => ({ name: x.name, value: x.value, limit: x.limit, base: x.base, n: x.n, events: x.events, status: x.status, unit: x.unit, hold: x.hold, ...(x.status === 'flag' && x.detail ? { detail: x.detail } : {}) }));
+function checkRow({ at, rs, newest, lead, last, due, late, verdict, flags, evald, metrics, winFrom, byVersion }) {
+  const row = { at: iso(at), event: 'check', T: iso(newest.T), chain: iso(rs.baseAnchor), version: newest.version, check: last + 1, label: `+${hoursOf(lead, last)}h`, covered: due.find((d) => d.r === lead).idx.map((i) => i + 1), late, verdict, flags,
+    releases: due.map((d) => ({ version: d.r.version, covered: d.idx.map((i) => i + 1) })), window: { from: iso(winFrom), to: iso(at) } };
+  if (byVersion) row.byVersion = byVersion;
+  if (evald) row.metrics = evald.metrics.map(mrow);
   if (metrics && metrics.spawns) {
     row.sample = { spawns: metrics.spawns.since, workers: metrics.workers && metrics.workers.since && metrics.workers.since.n, bash: metrics.bash && metrics.bash.since && metrics.bash.since.n };
-    row.baseline = { from: iso(metrics.span ? sch.T - metrics.span.base * HOUR : sch.T - 7 * 24 * HOUR), to: iso(sch.T), spawns: metrics.spawns.base };
+    row.baseline = { from: iso(metrics.span ? rs.baseAnchor - metrics.span.base * HOUR : rs.baseAnchor - D7), to: iso(rs.baseAnchor), spawns: metrics.spawns.base };
     try {
       const u = metrics.usage || usageOf(metrics);
       row.usage = { pctPerHour: { since: u.since.pctPerHour, base: u.base.pctPerHour }, pctWindow: +(u.since.pctPerHour * metrics.span.since).toFixed(3) };
@@ -409,7 +428,90 @@ function checkRow({ at, sch, last, due, late, verdict, flags, evald, metrics, wi
   return row;
 }
 
-export function tick({ at = S.now(), installed, holdMinutes, run = analyze } = {}) {
+// The finish rule (design 2.3), run once the newest release has all its checks done: the chain finishes together when the last verdict is
+// clean, no flag is open and the activity since the newest install reached the floors; otherwise one more check is added 4 h later, up to 72 h
+// after that install, and then the chain stops as insufficient-data (a flag that never holds).
+export function finishFloors() {
+  return { spawns: nOpt('release_watch_finish_spawns', 100), workers: nOpt('release_watch_finish_workers', 60), bash: nOpt('release_watch_finish_bash', 600), activeHours: nOpt('release_watch_finish_active_hours', 6) };
+}
+function finishStep({ rs, at, verdict, analyzeFn }) {
+  const N = newestOf(rs);
+  for (const r of rs.releases) if (r !== N && r.status === 'watching' && r.done.length >= r.due.length) r.status = 'waiting-chain';
+  if (N.status !== 'watching' || N.done.length < N.due.length) return { event: null };
+  const FL = finishFloors();
+  let act = null;
+  try {
+    const fm = analyzeFn({ T: N.T, nowMs: at, baseFrom: rs.baseAnchor - D7, baseTo: rs.baseAnchor, winFrom: N.T });
+    act = { spawns: fm.spawns.since, workers: fm.workers.since.n, bash: fm.bash.since.n, activeHours: fm.activeHours ? fm.activeHours.since : 0 };
+  } catch { /* no activity read: not enough to finish */ }
+  const met = !!act && act.spawns >= FL.spawns && act.workers >= FL.workers && act.bash >= FL.bash && act.activeHours >= FL.activeHours;
+  if (met && verdict === 'clean' && !S.flagIsOpen(S.readFlag())) {
+    for (const r of rs.releases) r.status = 'finished';
+    rs.status = 'finished';
+    return { event: 'finished', act, FL, N };
+  }
+  const hours = nOpt('release_watch_extend_hours', 4) * HOUR; const cap = N.T + nOpt('release_watch_cap_hours', 72) * HOUR;
+  const lastDue = N.due[N.due.length - 1];
+  const newDue = lastDue + hours <= at ? at + hours : lastDue + hours;
+  if (newDue <= cap) { N.due.push(newDue); rs.extendedTo = newDue; return { event: null, extendedTo: newDue }; }
+  for (const r of rs.releases) r.status = 'insufficient-data';
+  rs.status = 'insufficient-data';
+  return { event: 'insufficient-data', act, FL, N };
+}
+const lackText = (act, FL) => (act
+  ? [['spawns', act.spawns, FL.spawns], ['workers', act.workers, FL.workers], ['Bash calls', act.bash, FL.bash], ['active hours', act.activeHours, FL.activeHours]].map(([k, a, f]) => `${k} ${a}/${f}${a >= f ? '' : ' short'}`).join(', ')
+  : 'activity could not be read');
+
+function chainChecks({ rs, P, at, analyzeFn, res }) {
+  if (rs.status !== 'watching') return;
+  const due = rs.releases.filter((r) => r.status === 'watching').map((r) => ({ r, idx: dueIndexes(r, at) })).filter((x) => x.idx.length);
+  if (!due.length) return;
+  const lead = due.reduce((a, b) => (b.r.T > a.r.T ? b : a)).r;
+  const last = Math.max(...due.find((d) => d.r === lead).idx);
+  const newest = newestOf(rs);
+  const winFrom = chainWinFrom(rs);
+  const split = rs.releases.length >= 2;
+  let metrics = null; let evald = { verdict: 'inconclusive', metrics: [], flags: [] };
+  const verOf = {}; let byVersion = null;
+  try {
+    // Window = since the last conclusive check (a rate per window); baseline = always the 7 days before the chain's FIRST install.
+    metrics = analyzeFn({ T: newest.T, nowMs: at, baseFrom: rs.baseAnchor - D7, baseTo: rs.baseAnchor, winFrom, ...(split ? { releases: rs.releases.map((r) => ({ version: r.version, T: r.T })) } : {}) });
+    evald = evaluate(metrics);
+    if (split && metrics && metrics.byVersion) {
+      byVersion = {};
+      for (const [v, m] of Object.entries(metrics.byVersion)) {
+        const e = evaluate(m);
+        byVersion[v] = { verdict: e.verdict, metrics: e.metrics.filter(keepForVersion).map(mrow) };
+        for (const x of e.metrics) if (x.status !== 'inconclusive') (verOf[x.name] ??= {})[v] = x.value;
+      }
+    }
+  } catch (e) { evald = { verdict: 'inconclusive', metrics: [], flags: [] }; metrics = { error: String(e && e.message || e) }; byVersion = null; }
+  const flags = evald.flags.map((f) => (verOf[f.name] ? { ...f, versions: verOf[f.name] } : f)); const verdict = evald.verdict;
+  const late = at - lead.due[last] > LATE_MS;
+  for (const { r, idx } of due) {
+    r.done = [...r.done, ...idx]; r.lastAt = at;
+    r.lastConclusiveAt = verdict === 'inconclusive' ? (r.lastConclusiveAt ?? null) : at;
+    (r.verdicts ??= []).push({ at: iso(at), check: Math.max(...idx) + 1, verdict });
+  }
+  rs.everFlagged = !!rs.everFlagged || flags.length > 0;
+  const fin = finishStep({ rs, at, verdict, analyzeFn });
+  S.writeJson(P.run, rs);
+  const row = checkRow({ at, rs, newest, lead, last, due, late, verdict, flags, evald, metrics, winFrom, byVersion });
+  if (fin.extendedTo) row.extendedTo = iso(fin.extendedTo);
+  S.appendRow(row);
+  res.ran = true; res.checks = due.find((d) => d.r === lead).idx.map((i) => i + 1); res.flagged = flags.map((x) => x.name); res.verdict = verdict;
+  if (flags.length) S.openFlag({ version: newest.version, T: iso(rs.baseAnchor), check: row.label, flags, at });
+  if (fin.event === 'finished') {
+    S.appendRow({ at: iso(at), event: 'finished', T: iso(fin.N.T), chain: iso(rs.baseAnchor), version: fin.N.version, releases: rs.releases.map((r) => r.version), activity: fin.act });
+  } else if (fin.event === 'insufficient-data') {
+    S.appendRow({ at: iso(at), event: 'insufficient-data', T: iso(fin.N.T), chain: iso(rs.baseAnchor), version: fin.N.version, activity: fin.act, floors: fin.FL });
+    const detail = `no finish by +${Math.round((at - fin.N.T) / HOUR)}h: ${lackText(fin.act, fin.FL)}`;
+    if (!S.flagIsOpen(S.readFlag())) S.openFlag({ version: newest.version, T: iso(rs.baseAnchor), check: `+${Math.round((at - fin.N.T) / HOUR)}h`, at,
+      flags: [{ name: 'insufficient-data', value: 0, level: 0, limit: 0, detail, n: fin.act ? fin.act.spawns : 0, events: 1, base: null }] });
+  }
+}
+
+export function tick({ at = S.now(), installed, holdMinutes, run: analyzeFn = analyze } = {}) {
   const res = { ran: false, checks: [], flagged: [], held: false, installed: false, verdict: null };
   try {
     const P = S.paths();
@@ -417,31 +519,16 @@ export function tick({ at = S.now(), installed, holdMinutes, run = analyze } = {
     const inst = newestInstall(installed);
     if (!inst) return res;
     res.installed = true;
-    let sch = S.readJson(P.run);
-    if (!sch || sch.T !== inst.T || !Array.isArray(sch.due) || !Array.isArray(sch.done)) { sch = buildSchedule(inst.T, inst.version, sch); S.writeJson(P.run, sch); }
-    const due = dueIndexes(sch, at);
-    if (due.length) {
-      const last = due[due.length - 1];
-      let metrics = null; let evald = { verdict: 'inconclusive', metrics: [], flags: [] };
-      const winFrom = windowStart(sch);
-      try {
-        // Window = since the last conclusive check (a rate per window); baseline = always the 7 days before the install time T.
-        metrics = run({ T: sch.T, nowMs: at, winFrom });
-        evald = evaluate(metrics);
-      } catch (e) { evald = { verdict: 'inconclusive', metrics: [], flags: [] }; metrics = { error: String(e && e.message || e) }; }
-      const flags = evald.flags; const verdict = evald.verdict;
-      const late = at - sch.due[last] > LATE_MS;
-      sch.done = [...sch.done, ...due];
-      sch.lastAt = at;
-      sch.lastConclusiveAt = verdict === 'inconclusive' ? (sch.lastConclusiveAt ?? null) : at;
-      const everFlagged = sch.everFlagged || flags.length > 0;
-      sch.everFlagged = everFlagged;
-      if (sch.done.length >= sch.due.length && verdict === 'clean') sch.closed = true;
-      S.writeJson(P.run, sch);
-      S.appendRow(checkRow({ at, sch, last, due, late, verdict, flags, evald, metrics, winFrom }));
-      res.ran = true; res.checks = due.map((i) => i + 1); res.flagged = flags.map((x) => x.name); res.verdict = verdict;
-      if (flags.length) S.openFlag({ version: sch.version, T: iso(sch.T), check: `+${CHECK_HOURS[last]}h`, flags, at });
-    }
+    const raw = S.readJson(P.run);
+    let rs = migrateRun(raw);
+    if (!rs || !rs.releases.some((r) => r.T === inst.T)) {
+      const rel = buildSchedule(inst.T, inst.version);
+      // An install while the chain is still being watched joins it (same baseline); after a finish it starts a new chain.
+      if (rs && rs.status === 'watching') rs.releases.push(rel);
+      else rs = { v: 2, baseAnchor: inst.T, status: 'watching', extendedTo: null, everFlagged: false, standing: (rs && rs.standing) || { lastAt: null }, releases: [rel] };
+      S.writeJson(P.run, rs);
+    } else if (!raw || raw.v !== 2) S.writeJson(P.run, rs);
+    chainChecks({ rs, P, at, analyzeFn, res });
     const hm = holdMinutes ?? opt('release_watch_hold_minutes', 30);
     res.held = !!S.maybeHold({ holdMinutes: hm, at });
   } catch { /* never throws */ }
@@ -455,27 +542,36 @@ const metricLine = (x) => {
   const why = x.status === 'inconclusive' ? 'INCONCLUSIVE (n<min)' : x.status === 'flag' ? 'FLAG' : 'ok';
   return `       ${String(x.name).padEnd(20)} ${f1(x.value)}${x.unit && x.unit !== 'flag' ? ' ' + x.unit : ''}  limit ${f1(x.limit)}  base ${f1(x.base)}  n=${x.n} ev=${x.events}  ${why}`;
 };
-const checkRows = (T) => S.readRows().filter((r) => r.event === 'check' && (T == null || Date.parse(r.T) === T));
+const checkRows = (anchor) => S.readRows().filter((r) => r.event === 'check' && (anchor == null || Date.parse(r.chain || r.T) === anchor));
 const verdictWord = (r) => String(r.verdict || (r.flags && r.flags.length ? 'flag' : 'clean')).toUpperCase();
 
 export function status(at = S.now(), { all = false, json = false } = {}) {
-  const sch = S.readJson(S.paths().run); const flag = S.readFlag(); const hold = S.readHold();
-  const rows = sch ? checkRows(sch.T) : [];
-  const standing = S.readJson(join(S.paths().run, '..', 'release-watch-standing.json'));
-  if (json) return JSON.stringify({ run: sch, checks: rows.slice(-20), flag: S.flagIsOpen(flag) ? flag : null, hold: hold && !hold.clearedAt ? hold : null, standing: standing || null }, null, 1);
+  const rs = migrateRun(S.readJson(S.paths().run)); const flag = S.readFlag(); const hold = S.readHold();
+  const rows = rs ? checkRows(rs.baseAnchor) : [];
+  const standing = S.readJson(S.paths().standing);
+  if (json) return JSON.stringify({ run: rs, checks: rows.slice(-20), flag: S.flagIsOpen(flag) ? flag : null, hold: hold && !hold.clearedAt ? hold : null, standing: standing || null }, null, 1);
   const lines = [];
-  if (!sch) lines.push('no watch armed (no tick has seen an install yet)');
+  if (!rs) lines.push('no watch armed (no tick has seen an install yet)');
   else {
     const lastRow = rows[rows.length - 1];
     if (lastRow && lastRow.baseline) lines.push(`chain base ${lastRow.baseline.from.slice(0, 16)}Z..${lastRow.baseline.to.slice(0, 16)}Z (7 d, ${lastRow.baseline.spawns} spawns)`);
-    const nextI = sch.due.findIndex((d, i) => !sch.done.includes(i));
-    const state = sch.closed ? 'closed' + (sch.everFlagged ? ', flags were raised' : ', clean') : nextI < 0 ? 'watching (all checks done, no clean verdict yet)' : `watching (check ${nextI + 1} of ${sch.due.length} next at ${iso(sch.due[nextI]).slice(0, 16)}Z)`;
-    lines.push(`release ${sch.version || '?'} installed ${iso(sch.T)}: ${state}`);
+    for (const r of rs.releases) {
+      const nextI = r.due.findIndex((d, i) => !r.done.includes(i));
+      const state = r.status === 'finished' ? 'closed' + (rs.everFlagged ? ', flags were raised' : ', clean')
+        : r.status === 'insufficient-data' ? 'closed, insufficient data (the activity floors were not reached in time)'
+          : r.status === 'waiting-chain' ? 'checks done, waiting for the newer release of its chain to finish'
+            : nextI < 0 ? 'watching (all checks done, no clean verdict yet)' : `watching (check ${nextI + 1} of ${r.due.length} next at ${iso(r.due[nextI]).slice(0, 16)}Z)`;
+      lines.push(`release ${r.version || '?'} installed ${iso(r.T)}: ${state}`);
+    }
     for (const r of rows) {
       const s = r.sample || {}; const u = r.usage;
       const us = u ? `  usage ${f1(u.pctPerHour.since)} %/h (base ${f1(u.pctPerHour.base)}), ${(+u.pctWindow).toFixed(2)} % window` : '';
-      lines.push(`  +${CHECK_HOURS[r.check - 1] ?? '?'}h  ${hhmm(Date.parse(r.at))}  ${verdictWord(r).padEnd(12)} spawns ${s.spawns ?? '-'}  workers ${s.workers ?? '-'}  bash ${s.bash ?? '-'}${us}${r.late ? '  (late)' : ''}`);
+      lines.push(`  ${r.label || `+${CHECK_HOURS[r.check - 1] ?? '?'}h`}  ${hhmm(Date.parse(r.at))}  ${verdictWord(r).padEnd(12)} spawns ${s.spawns ?? '-'}  workers ${s.workers ?? '-'}  bash ${s.bash ?? '-'}${us}${r.late ? '  (late)' : ''}`);
       for (const x of (r.metrics || []).filter((y) => all || y.status !== 'ok' || y.events > 0)) lines.push(metricLine(x));
+      for (const [v, b] of Object.entries(r.byVersion || {})) {
+        const sig = (b.metrics || []).filter((y) => y.status === 'flag');
+        lines.push(`     ${v}: ${String(b.verdict).toUpperCase()}${sig.length ? ' ' + sig.map((y) => `${y.name}=${f1(y.value)}`).join(', ') : ''}`);
+      }
     }
   }
   if (S.flagIsOpen(flag)) {

@@ -49,7 +49,7 @@ test('newestInstall picks the newest copy and ignores other plugins', () => {
 });
 
 test('tick: nothing due is a quiet no-op; catch-up covers all due checks once', () => {
-  let calls = 0; const run = () => { calls++; return metrics(); };
+  let calls = 0; const run = () => { calls++; return rich(); };
   let r = W.tick({ at: T + 10 * 60e3, installed: installed(), run, holdMinutes: 30 });
   assert.equal(r.ran, false); assert.equal(calls, 0);
   r = W.tick({ at: T + 11 * HOUR, installed: installed(), run, holdMinutes: 30 });
@@ -58,17 +58,19 @@ test('tick: nothing due is a quiet no-op; catch-up covers all due checks once', 
   assert.equal(r.ran, false);
   r = W.tick({ at: T + 30 * HOUR, installed: installed(), run, holdMinutes: 30 });
   assert.deepEqual(r.checks, [5, 6, 7, 8]);
-  assert.equal(JSON.parse(readFileSync(file('release-watch-run.json'), 'utf8')).closed, true);
+  const fin = JSON.parse(readFileSync(file('release-watch-run.json'), 'utf8'));
+  assert.equal(fin.v, 2); assert.equal(fin.status, 'finished'); assert.equal(fin.releases[0].status, 'finished');
   const rows = readFileSync(file('release-watch-checks.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
   assert.equal(rows[0].late, true);
 });
 
-test('tick: a new install re-arms the schedule and keeps the previous T as base', () => {
+test('tick: an install while the chain is watched joins it and keeps the first install as the baseline anchor', () => {
   W.tick({ at: T + 1, installed: installed(), run: () => null });
   const T2 = T + 48 * HOUR;
   W.tick({ at: T2 + 1, installed: installed(T2), run: () => null });
   const s = JSON.parse(readFileSync(file('release-watch-run.json'), 'utf8'));
-  assert.equal(s.T, T2); assert.equal(s.prevT, T); assert.deepEqual(s.done, []);
+  assert.equal(s.baseAnchor, T); assert.equal(s.releases.length, 2); assert.equal(s.releases[1].T, T2); assert.deepEqual(s.releases[1].done, []);
+  assert.equal(s.releases[0].status, 'waiting-chain', 'the older release has all its checks done and waits for the chain');
 });
 
 test('tick: fail-open on missing install, corrupt run file and a throwing analysis', () => {
@@ -98,6 +100,8 @@ function metrics(over = {}) {
     workers: { since: { ...w }, base: { ...w } }, hookSignatures: { since: {}, base: {} }, ...over,
   };
 }
+// Enough activity since the install to finish the chain (finish floors: 100 spawns, 60 workers, 600 Bash calls, 6 active hours).
+const rich = () => { const m = metrics(); m.workers.since.n = 60; m.workers.since.finished = 60; m.bash.since.n = 600; return m; };
 const names = (m) => W.evaluate(m).flags.map((f) => f.name);
 const t = (since, base, ps, pb) => ({ since, base, per100spawns: { since: ps, base: pb } });
 
@@ -610,7 +614,7 @@ test('few-events-ok', () => {
 test('inconclusive-rolls', () => {
   const seen = []; let next = metrics();
   const run = (o) => { seen.push(o); return next; };
-  const run1 = () => JSON.parse(readFileSync(file('release-watch-run.json'), 'utf8'));
+  const run1 = () => JSON.parse(readFileSync(file('release-watch-run.json'), 'utf8')).releases[0];
   W.tick({ at: T + HOUR, installed: installed(), run, holdMinutes: 30 });
   W.tick({ at: T + 2 * HOUR, installed: installed(), run, holdMinutes: 30 });
   assert.equal(run1().lastConclusiveAt, T + 2 * HOUR);

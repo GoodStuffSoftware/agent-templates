@@ -28,6 +28,7 @@ export const paths = () => {
     flag: join(d, 'release-watch-flag.json'),
     hold: join(d, 'release-hold.json'),
     checks: join(d, 'release-watch-checks.jsonl'),
+    standing: join(d, 'release-watch-standing.json'),
   };
 };
 
@@ -93,6 +94,7 @@ export function openFlag({ version, T, check, flags, at = now() } = {}) {
     const renotify = !open || holdable(fresh).some((f) => { const o = oldByName.get(f.name); const lo = o && levelOf(o); const l = levelOf(f); return !o || (lo > 0 && l > lo * WORSEN_FACTOR); });
     const merged = open ? [...old.flags.filter((o) => !fresh.some((f) => f.name === o.name)), ...fresh] : fresh;
     const next = {
+      v: 2,
       version: version ?? old?.version ?? null,
       T: T ?? old?.T ?? null,
       check: check ?? old?.check ?? null,
