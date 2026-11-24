@@ -142,23 +142,40 @@ export function resolveRange(cwd, range) {
 
 // A lead in its own worktree reviews a branch it has not checked out: the review runs from a temporary detached worktree at the
 // range head (0.31.67). Returns { dir, remove } or throws when git cannot make it.
+// The first line of git's error text for a refusal reason: credentials in URLs removed, control characters dropped, 160 characters at most.
+export function gitErrorLine(e) {
+  const raw = String((e && (e.stderr || e.message)) || '').split(/\r?\n/).find((l) => l.trim()) || '';
+  return raw.replace(/(:\/\/)[^\s/@]+@/g, '$1[redacted]@').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 160);
+}
+
 export function tempWorktreeAt(cwd, sha) {
-  const dir = join(mkdtempSync(join(tmpdir(), 'ac-review-')), 'wt');
-  execFileSyncHidden('git', ['worktree', 'add', '--detach', dir, sha], { cwd, encoding: 'utf8', stdio: 'pipe' });
+  const parent = mkdtempSync(join(tmpdir(), 'ac-review-'));
+  const dir = join(parent, 'wt');
+  // `worktree remove --force` on a tree this code created itself; rmSync retries (on Windows a shell child may still hold the cwd); prune last.
   const remove = () => {
     try { execFileSyncHidden('git', ['worktree', 'remove', '--force', dir], { cwd, encoding: 'utf8', stdio: 'pipe' }); } catch { /* fall through to the file removal */ }
-    try { rmSync(join(dir, '..'), { recursive: true, force: true }); } catch { /* best effort */ }
+    try { rmSync(parent, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch { /* best effort */ }
     try { execFileSyncHidden('git', ['worktree', 'prune'], { cwd, encoding: 'utf8', stdio: 'pipe' }); } catch { /* best effort */ }
   };
+  try {
+    execFileSyncHidden('git', ['worktree', 'add', '--detach', dir, sha], { cwd, encoding: 'utf8', stdio: 'pipe' });
+  } catch (e) {
+    remove(); // a half-registered worktree and the mkdtemp parent
+    throw new Error(gitErrorLine(e) || 'git worktree add failed');
+  }
   return { dir, remove };
 }
 
 // The change risk the writer states (the table of project tiers): low, mid or high.
 export const RISKS = ['low', 'mid', 'high'];
 // Said once, after the instruction, which lets a reviewer start the project's own run command: this reviewer cannot.
-const NO_SHELL = 'You have no shell, so you cannot start the app or any command, whatever the instruction above allows: if the change needs a check in the running app, list the checks you would have run.';
+// A temporary checkout has no node_modules and no untracked or ignored files, and linking the original's node_modules in would let a
+// reviewer's command run code from outside the range and make cleanup follow a link: so the check that needs them is skipped, and said so.
+export const TEMP_TREE_REASON = 'temporary checkout at the range head: no node_modules or ignored files, so a check that needs installed dependencies or the project\'s own run command was skipped';
+const TEMP_TREE_NOTE = `This is a temporary checkout of the range head (${TEMP_TREE_REASON.replace(/^temporary checkout at the range head: /, '')}). List such a check under the checks you would have run; do not report its failing here as a finding.`;
+const NO_SHELL ='You have no shell, so you cannot start the app or any command, whatever the instruction above allows: if the change needs a check in the running app, list the checks you would have run.';
 
-export function buildPrompt({ brief, diffRef, writer, risk = '', stat = '', diff = '', note = '', shell = false }) {
+export function buildPrompt({ brief, diffRef, writer, risk = '', stat = '', diff = '', note = '', shell = false, tempTree = false }) {
   return [
     'TYPE: code-review',
     `WRITER: ${writer || 'unknown'}`,
@@ -173,6 +190,7 @@ export function buildPrompt({ brief, diffRef, writer, risk = '', stat = '', diff
       : `Diff range under review: ${diffRef}. Your read_file, grep and glob tools see the repository at the head of that range; you have no shell and run nothing, not even targeted tests (name the ones you would have run): a review is a read of the code.`,
     INSTRUCTION,
     NO_SHELL,
+    ...(tempTree ? [TEMP_TREE_NOTE] : []),
     'Add nothing that narrows the review.',
     '',
     'git diff --stat:',
@@ -226,16 +244,18 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   let brief;
   try { brief = readFileSync(o['brief-file'], 'utf8'); } catch (e) { const why = `cannot read the brief file (${e.code || 'error'})`; out(`API review failed: ${why}`); routeRow(false, EXIT_FAILED, null, why); return EXIT_FAILED; }
   briefText = brief;
-  if (briefIsOnlyAPath(brief)) { out('API review failed: the brief file holds a file path or no text, not the lead\'s brief itself (the reviewer cannot read outside the repository); put the brief text in the file'); routeRow(false, EXIT_FAILED); return EXIT_FAILED; }
+  if (briefIsOnlyAPath(brief)) { out('API review failed: the brief file holds a file path or no text, not the lead\'s brief itself (the reviewer cannot read outside the repository); put the brief text in the file'); routeRow(false, EXIT_FAILED, null, 'the brief file holds a file path or no text, not the brief itself'); return EXIT_FAILED; }
   // The reviewer reads the files in its cwd, so a cwd that is not at the range head gets a temporary detached worktree at the head.
   let cwd = o.cwd;
   let temp = null;
   let diffRange = o['diff-ref'];
   if (headMismatch(o.cwd, o['diff-ref'])) {
     const sha = rangeHead(o.cwd, o['diff-ref']);
-    const why = sha ? null : 'cannot resolve the range head in the working directory';
-    if (!why) { try { diffRange = resolveRange(o.cwd, o['diff-ref']) || diffRange; temp = tempWorktreeAt(o.cwd, sha); cwd = temp.dir; } catch (e) { temp = null; } }
-    const fail = why || (temp ? null : `cannot create a temporary worktree at the range head ${sha.slice(0, 9)}`);
+    // A single ref is not a range (its temporary tree would show an empty diff): refused, as it was before the temporary worktree.
+    const why = !sha ? 'cannot resolve the range head in the working directory' : (/\.{2,3}/.test(String(o['diff-ref'])) ? null : `the diff ref ${String(o['diff-ref']).slice(0, 60)} is one ref, not a range: give <base>..<head>`);
+    let gitWhy = '';
+    if (!why) { try { diffRange = resolveRange(o.cwd, o['diff-ref']) || diffRange; temp = tempWorktreeAt(o.cwd, sha); cwd = temp.dir; } catch (e) { temp = null; gitWhy = String((e && e.message) || ''); } }
+    const fail = why || (temp ? null : `cannot create a temporary worktree at the range head ${sha.slice(0, 9)}${gitWhy ? ` (${gitWhy})` : ''}`);
     if (fail) { out(`API review failed: ${fail}; use the subagent reviewer`); routeRow(false, EXIT_FAILED, null, fail); return EXIT_FAILED; }
   }
   try {
@@ -259,7 +279,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   let r = null;
   if (runner === 'sdk') {
     r = await runApiSdk({
-      prompt: buildPrompt({ brief, diffRef: o['diff-ref'], writer: o.writer, risk: o.risk, shell: true, ...d }),
+      prompt: buildPrompt({ brief, diffRef: o['diff-ref'], writer: o.writer, risk: o.risk, shell: true, tempTree: !!temp, ...d }),
       model: o.model, effort: o.effort || null, cwd, category: 'review', meta,
       maxUsd, softUsd, reviewId,
       ...(o['max-turns'] ? { maxTurns: Number(o['max-turns']) } : {}),
@@ -271,7 +291,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     if (r.sdkUnavailable) { err(`${r.reason}; using the fetch engine`); r = null; }
   }
   if (!r) r = await runApi({
-    prompt: buildPrompt({ brief, diffRef: o['diff-ref'], writer: o.writer, risk: o.risk, ...d }),
+    prompt: buildPrompt({ brief, diffRef: o['diff-ref'], writer: o.writer, risk: o.risk, tempTree: !!temp, ...d }),
     system: fetchSystem(REVIEW_SYSTEM, readProjectRules(cwd)),
     model: o.model, effort: o.effort || null, cwd, category: 'review', meta,
     maxUsd, softUsd, reviewId,
@@ -294,7 +314,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     try { writeFileSync(o['review-file'], `${text}\n`); } catch (e) { out(`API review failed: cannot write the review file (${e.code || 'error'})`); return EXIT_FAILED; }
   }
   out(text);
-  routeRow(true, EXIT_OK, r.text);
+  routeRow(true, EXIT_OK, r.text, temp ? TEMP_TREE_REASON : null);
   return EXIT_OK;
   }
 }

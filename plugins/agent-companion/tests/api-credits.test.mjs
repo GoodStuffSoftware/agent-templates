@@ -7,6 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, readFileSync, mkdirSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { makeFixture, runScript, PLUGIN_ROOT } from './helpers.mjs';
 import {
   DEFAULT_SHARES, reviewShareLines, decide, record, recordFailure, recordFallback, reviewStats, summarizeReviews, reviewSummaryLine, status, summaryLine, cycleOf,
@@ -873,6 +874,68 @@ test('S2b: a range head that cannot be resolved is refused before any API call; 
     assert.equal(rows[0].brief_hash, briefHash(readFileSync(t.brief, 'utf8')), 'the guard repeat check keys on this');
     const p = runnerPrompt({ briefFile: 'b', reviewFile: 'r', range: 'a..b', cwd: 'c' });
     assert.match(p, /API review failed \(<reason>\); spawn the review again/);
+  } finally { t.fx.cleanup(); }
+});
+
+// The temporary review trees (ac-review-*) in the OS temp dir whose a.txt holds `marker`: ours, whatever else runs in parallel.
+function tempTreesWith(marker) {
+  const found = [];
+  try {
+    for (const e of readdirSync(tmpdir())) {
+      if (!e.startsWith('ac-review-')) continue;
+      try { if (readFileSync(join(tmpdir(), e, 'wt', 'a.txt'), 'utf8').replace(/\r\n/g, '\n') === marker) found.push(join(tmpdir(), e)); } catch { /* not ours */ }
+    }
+  } catch { /* none */ }
+  return found;
+}
+
+test('S2c: the review tools read the temporary tree at the range head (a non-empty range), the prompt says so, and the tree is gone after a pass and after a failing run', async () => {
+  const t = rig();
+  try {
+    const g = (...a) => assert.equal(spawnSyncHidden('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', '-c', 'core.autocrlf=false', ...a], { cwd: t.repo, encoding: 'utf8' }).status, 0);
+    writeFileSync(join(t.repo, 'a.txt'), 'one\ntwo\nthree\n');
+    g('add', '-A'); g('commit', '-q', '--no-verify', '-m', 'third'); // the cwd is at "three"; the range head is the commit before: "one\ntwo"
+    const seen = { dirs: [], toolText: '' };
+    const script = (k, body) => {
+      if (k === 1) { seen.dirs = tempTreesWith('one\ntwo\n'); return msg([toolUse('t1', 'read_file', { path: 'a.txt' })], USAGE, 'tool_use'); }
+      seen.toolText = JSON.stringify(body.messages);
+      return msg([text(`VERDICT: PASS${NL}ok`)]);
+    };
+    const f = stubFetch(script);
+    const r = await t.run(f, { extra: ['--diff-ref', 'HEAD~2..HEAD~1'] });
+    assert.equal(r.code, 0, r.out);
+    assert.equal(seen.dirs.length, 1, 'the review ran in a temporary tree at the range head');
+    assert.match(seen.toolText, /two/);
+    assert.doesNotMatch(seen.toolText, /three/, 'the tool read the range head, not the cwd');
+    assert.match(f.calls[0].raw, /temporary checkout of the range head/);
+    assert.equal(existsSync(seen.dirs[0]), false, 'the temporary directory is gone');
+    assert.match(verdictRows().pop().reason, /temporary checkout at the range head/);
+    // a failing run (no verdict) cleans up too
+    let dirs2 = [];
+    const bad = stubFetch((k) => { dirs2 = tempTreesWith('one\ntwo\n'); return msg([text('no verdict here')]); });
+    const r2 = await t.run(bad, { extra: ['--diff-ref', 'HEAD~2..HEAD~1'] });
+    assert.equal(r2.code, 4);
+    assert.equal(dirs2.length, 1);
+    assert.equal(existsSync(dirs2[0]), false, 'cleaned up after a failing run');
+    const listed = spawnSyncHidden('git', ['worktree', 'list', '--porcelain'], { cwd: t.repo, encoding: 'utf8' }).stdout;
+    assert.equal(listed.split(/\r?\n/).filter((l) => l.startsWith('worktree ')).length, 1);
+    // a single ref is refused (its temporary tree would show an empty diff), with a recorded reason
+    const one = await t.run(stubFetch([msg([text('VERDICT: PASS')])]), { extra: ['--diff-ref', 'HEAD~1'] });
+    assert.equal(one.code, 4);
+    assert.match(one.out, /one ref, not a range/);
+    assert.match(verdictRows().pop().reason, /one ref, not a range/);
+    // a git error is kept (first line, credentials removed) and the half-made directory is removed
+    const { gitErrorLine } = await import('../scripts/api-review.mjs');
+    assert.equal(gitErrorLine({ stderr: 'fatal: bad https://user:pw@host/x\nsecond' }), 'fatal: bad https://[redacted]@host/x');
+    // a path-only brief records its reason
+    writeFileSync(t.brief, 'TYPE: bounded-feature\nThe lead\'s brief: C:/Users/me/.claude/tasks/x/brief.md\n');
+    const po = await t.run(stubFetch([msg([text('VERDICT: PASS')])]));
+    assert.equal(po.code, 4);
+    assert.match(verdictRows().pop().reason, /file path or no text/);
+    // the relay text the runner prompt gives the spawn guard's runner: the reason goes back to the lead
+    const p = runnerPrompt({ briefFile: 'b', reviewFile: 'r', range: 'a..b', cwd: 'c' });
+    assert.match(p, /with <reason> the reason printed after `API review failed: ` or `API review unavailable: ` \(without the review id\)/);
+    assert.match(p, /spawn the review again with the line `API: no` added to the brief/);
   } finally { t.fx.cleanup(); }
 });
 

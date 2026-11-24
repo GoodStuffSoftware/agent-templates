@@ -169,7 +169,8 @@ test('fail-open: missing transcript, a cwd that is not a git repo, an unwritable
     // missing transcript: the record is still written
     const f1 = writeAutoHandoff(p, { transcript: join(fx.dir, 'nope.jsonl'), sig: { ctx: 118000 }, threshold: 110000, hard: 150000, brief: BRIEF(dir) });
     assert.ok(f1 && existsSync(f1));
-    assert.match(readFileSync(f1, 'utf8'), /not available/);
+    assert.match(readFileSync(f1, 'utf8'), /ZETA-42/, 'the brief the caller holds is used when the transcript cannot be read');
+    assert.match(buildRecord(p, { transcript: join(fx.dir, 'nope.jsonl'), sig: { ctx: 1 }, threshold: 1, hard: 2 }), /not available: the transcript could not be read/);
     // not a git repository
     const b = buildRecord(p, { transcript: join(fx.dir, 'nope.jsonl'), sig: { ctx: 1 }, threshold: 1, hard: 2 });
     assert.match(b, /not a git repository/);
@@ -226,7 +227,13 @@ test('redaction: secret-looking values are not copied into the record', () => {
 test('path convention: the brief\'s directory, a tasks path, else the state directory; the stem from the brief or the agent type', () => {
   const p = { agent_id: 'zebra-quill-9', agent_type: 'agent-companion:ac-sonnet-high' };
   assert.equal(briefOutputDir('write C:/w/tasks/a/foo-detail.md'), 'C:/w/tasks/a');
-  assert.equal(briefOutputDir('files go in C:/w/tasks/b/ please'), 'C:/w/tasks/b');
+  const claudeTasks = ['D:', 'work', '.claude', 'tasks', 'b'].join('/');
+  assert.equal(briefOutputDir(`files go in ${claudeTasks}/ please`), claudeTasks);
+  assert.equal(briefOutputDir('write C:/w/tasks/a/foo-verdict.md'), 'C:/w/tasks/a');
+  // a bare `tasks` folder (a source tree) is never the output directory
+  assert.equal(briefOutputDir('read C:/repo/src/tasks/runner.mjs and fix it'), null);
+  assert.equal(briefOutputDir('files go in C:/w/tasks/b/ please'), null);
+  assert.equal(briefOutputDir('see C:/repo/src/tasks/x.ts'), null);
   assert.equal(briefOutputDir('see C:/w/tasks/../../etc/x-handoff.md'), null, 'no ..');
   assert.equal(briefOutputDir('relative/path/x-handoff.md and nothing else'), null);
   assert.equal(briefOutputDir(''), null);
@@ -263,5 +270,82 @@ test('option subagent_auto_handoff off: the 0.31.66 wording and no record', () =
     assert.equal(existsSync(join(stateDir(), 'auto-handoff')), false);
     assert.deepEqual(readdirSync(fx.dir).filter((n) => n === 'tasks'), []);
     assert.ok(dirname(dir));
+  } finally { fx.cleanup(); }
+});
+
+test('redaction stays linear: 200 KB of adversarial unbroken runs finishes well under a second, in redact() and in the record', () => {
+  const fx = makeFixture();
+  try {
+    for (const run1 of ['a-'.repeat(100000), 'ab.'.repeat(70000), 'A_B-'.repeat(50000)]) {
+      const t0 = Date.now();
+      redact(run1);
+      assert.ok(Date.now() - t0 < 1000, `redact took ${Date.now() - t0} ms`);
+    }
+    // the same through a transcript: a huge brief and a huge last message
+    const f = join(fx.dir, 'big.jsonl');
+    const blob = 'a-'.repeat(100000);
+    writeFileSync(f, user(`GOAL: x\n${blob}`) + say('a1', 1000, blob));
+    const t1 = Date.now();
+    const rec = buildRecord({ agent_id: AGENT, agent_type: 'ac-sonnet-high', cwd: fx.dir }, { transcript: f, sig: { ctx: 1 }, threshold: 1, hard: 2 });
+    assert.ok(Date.now() - t1 < 1000, `buildRecord took ${Date.now() - t1} ms`);
+    assert.match(rec, /GOAL: x/);
+    assert.ok(Buffer.byteLength(rec) <= AUTO_HANDOFF_MAX_BYTES);
+  } finally { fx.cleanup(); }
+});
+
+test('redaction covers Stripe, Slack app, GitLab, DigitalOcean tokens, _KEY names, --key, -u user:pass and X-Auth headers', () => {
+  const cases = [
+    ['sk_live_abcdefghij0123456789', 'abcdefghij0123456789'],
+    ['sk_test_abcdefghij0123456789', 'abcdefghij0123456789'],
+    ['rk_live_abcdefghij0123456789', 'abcdefghij0123456789'],
+    [['xapp', '1', 'Qwxzy' + 'KLMNPT', '4567', 'qrstuv'].join('-'), 'Qwxzy' + 'KLMNPT'],
+    ['glpat-abcdefghij0123456789', 'abcdefghij0123456789'],
+    ['dop_v1_' + 'q7w8e9r0' + 't1y2u3i4' + 'o5p6a1', 'q7w8e9r0' + 't1y2u3i4' + 'o5p6a1'],
+    ['STRIPE_KEY=whsec9981zz', 'whsec9981zz'],
+    ['deploy --key abc123zz now', 'abc123zz'],
+    ['curl -u admin:hunter2 https://x.example/api', 'hunter2'],
+    ['X-Auth: opensesame77', 'opensesame77'],
+    ['GITHUB_PAT=ghx77pat', 'ghx77pat'],
+  ];
+  for (const [input, secret] of cases) {
+    const out = redact(input);
+    assert.ok(!out.includes(secret), `leaked ${secret} in: ${out}`);
+    assert.match(out, /\[redacted/);
+  }
+  assert.equal(redact('keep the monkey and the key point'), 'keep the monkey and the key point');
+});
+
+test('a transcript too large to scan from the start: the brief comes from the caller, and the record says so honestly', () => {
+  const fx = makeFixture();
+  try {
+    const f = join(fx.dir, 'huge.jsonl');
+    const pad = Buffer.alloc(49 * 1024 * 1024, 'x');
+    pad[pad.length - 1] = 10;
+    writeFileSync(f, Buffer.concat([Buffer.from(user('GOAL: the real brief ZETA-77')), pad, Buffer.from(say('a1', 1000, 'late message here'))]));
+    const p = { agent_id: AGENT, agent_type: 'ac-sonnet-high', cwd: fx.dir };
+    const withBrief = buildRecord(p, { transcript: f, sig: { ctx: 1 }, threshold: 1, hard: 2, briefFallback: 'GOAL: the real brief ZETA-77' });
+    assert.match(withBrief, /ZETA-77/);
+    assert.match(withBrief, /late message here/);
+    const without = buildRecord(p, { transcript: f, sig: { ctx: 1 }, threshold: 1, hard: 2 });
+    assert.match(without, /too large to scan/);
+    assert.doesNotMatch(without, /transcript could not be read/);
+  } finally { fx.cleanup(); }
+});
+
+test('the record is not written into a source tree named tasks, and no .tmp file is left behind', () => {
+  const fx = makeFixture();
+  try {
+    const src = join(fx.dir, 'repo', 'src', 'tasks').replace(/\\/g, '/');
+    const p = { agent_id: AGENT, agent_type: 'ac-sonnet-high', cwd: fx.dir };
+    const file = autoHandoffPath(p, `fix ${src}/runner.mjs`);
+    assert.ok(!file.replace(/\\/g, '/').startsWith(src), file);
+    assert.equal(existsSync(src), false, 'the source tree directory was not created');
+    // a rename that fails (the target is a directory) leaves no .tmp file and returns null
+    const out = join(fx.dir, 'out').replace(/\\/g, '/');
+    const brief = `write ${out}/job-handoff.md`;
+    const target = autoHandoffPath(p, brief);
+    mkdirSync(target, { recursive: true });
+    assert.equal(writeAutoHandoff(p, { transcript: '', sig: { ctx: 1 }, threshold: 1, hard: 2, brief }), null);
+    assert.deepEqual(readdirSync(out).filter((n) => n.endsWith('.tmp')), []);
   } finally { fx.cleanup(); }
 });
