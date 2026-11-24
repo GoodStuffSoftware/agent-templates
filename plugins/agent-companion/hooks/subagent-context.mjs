@@ -22,6 +22,9 @@
 // commit, push, status, diff or log). Switch subagent_handoff_limits, exemptions subagent_handoff_exempt_types; rows in handoff-limit.jsonl.
 // Like the step-budget deny below, this is a deny only on that setting (on by default), and every error fails open.
 //
+// The AUTO HANDOFF RECORD (0.31.67, lib/auto-handoff.mjs): at the first hand-off notice the hook itself writes <agent>-<id>-auto-handoff.md
+// (brief, git state, edited files, test runs, last messages), refreshes it once at the first hard-stop deny, and the notices name it.
+//
 // The STEP BUDGET rides on the same hook (lib/step-budget.mjs). Since 0.31.50 it is not a cap by default: a brief with no `BUDGET: <n>` line
 // gets no step note; a brief with one gets a single checkpoint note at n (worded as a progress marker). Only with step_budget_deny on
 // (opt-in, default off) does the old cap return: the warning at 80% of the stop and a DENY of every call but a report or detail write past
@@ -53,6 +56,7 @@ import {
 } from './lib/context-ceiling.mjs';
 import { HANDOFF_LOG, handoffThreshold, warnThreshold, warnText, handoffConfig, handoffActive, noteFirst, repeatDue, hardCheck, handoffRow, denyText, noteDeny, clearDeny, streakPrefix } from './lib/handoff-limit.mjs';
 import { STEP_LOG, stepBudgetCheck, readBrief } from './lib/step-budget.mjs';
+import { writeAutoHandoff, existingAutoHandoff } from './lib/auto-handoff.mjs';
 import { longRunCheck, logLongRun } from './lib/long-run.mjs';
 import { allowanceNote, allowanceWatch } from './lib/plan-allowance.mjs';
 
@@ -94,13 +98,31 @@ try {
   if (warn) appendLog(HANDOFF_LOG, handoffRow(p, sig, 'warn', 'warn', warnAt));
   if (kinds.length || nudge || repeatNote || warn) pruneContextState();
 
+  // The auto handoff record (0.31.67, lib/auto-handoff.mjs): written once, at the first hand-off notice; the notices below and the hard-stop
+  // deny name it. Never throws; a failed write leaves the old notice wording.
+  let briefText = null;
+  const getBrief = () => { if (briefText === null) briefText = readBrief(path); return briefText; };
+  let autoPath = null;
+  try {
+    if (handoffOn && opt('subagent_auto_handoff', true) !== false && sig && (kinds.includes('size') || repeatNote)) {
+      if (kinds.includes('size') && claimOnce(`auto-handoff-${p.agent_id}`)) {
+        autoPath = writeAutoHandoff(p, { transcript: path, sig, threshold, hard: hcfg.hard, brief: getBrief() });
+      } else autoPath = existingAutoHandoff(p, getBrief());
+    }
+  } catch { /* advisory */ }
+
   // The hard limit: past it, only the handoff itself goes through (lib/handoff-limit.mjs allowedAtHard).
   const hard = hardCheck(p, sig, { ...hcfg, on: handoffOn });
   if (hard) {
+    let autoAtHard = null;
+    try { // once per agent: refresh the record (the worker's next-steps lines are kept), then name it in the reason
+      if (handoffOn && !hard.held && opt('subagent_auto_handoff', true) !== false && claimOnce(`auto-handoff-hard-${p.agent_id}`)) autoAtHard = writeAutoHandoff(p, { transcript: path, sig, threshold, hard: hcfg.hard, brief: getBrief(), refresh: true });
+      if (!autoAtHard && handoffOn && !hard.held && opt('subagent_auto_handoff', true) !== false) autoAtHard = existingAutoHandoff(p, getBrief());
+    } catch { /* advisory */ }
     appendLog(HANDOFF_LOG, hard.row);
     if (hard.held) { try { noteHeld(p); } catch { /* advisory */ } }
     recordDenial('handoff-hard-limit', p, hard.held ? `${p.tool_name} while the release hold is on` : `${p.tool_name} at ${sig.ctx} tokens, limit ${hcfg.hard}`);
-    deny(streakPrefix(noteDeny(p.agent_id)) + denyText(sig ? sig.ctx : 0, hcfg.hard, noticeVariant(readBrief(path), p.agent_type), hard.why, hard.held));
+    deny(streakPrefix(noteDeny(p.agent_id)) + denyText(sig ? sig.ctx : 0, hcfg.hard, noticeVariant(getBrief(), p.agent_type), hard.why, hard.held, autoAtHard));
   }
   if (handoffOn && sig && hcfg.hard > 0 && sig.ctx >= hcfg.hard) clearDeny(p.agent_id); // a call the limit let through ends the streak
 
@@ -128,8 +150,8 @@ try {
   const allowance = planOn ? allowanceNote(p, { transcript: path, sig, noticePct }) : null;
   const nearLimit = planOn && noticePct > 0 ? allowanceWatch(p, { noticePct }) : null;
 
-  const variant = (kinds.includes('size') || repeatNote) ? noticeVariant(readBrief(path), p.agent_type) : 'writer';
-  const info = { ctx: sig ? sig.ctx : undefined, hard: handoffOn ? hcfg.hard : 0, transcript: path };
+  const variant = (kinds.includes('size') || repeatNote) ? noticeVariant(getBrief(), p.agent_type) : 'writer';
+  const info = { ctx: sig ? sig.ctx : undefined, hard: handoffOn ? hcfg.hard : 0, transcript: path, auto: autoPath };
   const warnLine = warn ? warnText(sig.ctx, threshold, handoffOn ? hcfg.hard : 0, noticeVariant(readBrief(path), p.agent_type)) : '';
   const text = [warnLine, kinds.length ? subagentNoticeText(kinds, threshold, variant, info) : '', repeatNote ? subagentNoticeText(['size'], threshold, variant, info) : '', nudge ? nudge.text : '', step ? step.warn : '', longRun ? longRun.text : '', allowance || '', nearLimit || '']
     .filter(Boolean).join('\n');

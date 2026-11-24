@@ -69,6 +69,8 @@ export function warnThreshold(agentType) {
 export function warnText(ctx, handoff, hard, variant = 'writer') {
   const lines = `handoff notice at ${kTokens(handoff)}${hard ? `, hard stop at ${kTokens(hard)}` : ''}`;
   if (variant === 'readonly') return `[agent-companion] Context at ${kTokens(ctx)} (${lines}): keep your findings so far in your detail file, so a handoff at any moment loses nothing.`;
+  // 0.31.67: the plugin writes the handoff record itself at the notice (lib/auto-handoff.mjs; option subagent_auto_handoff); commit and push as you go.
+  if (opt('subagent_auto_handoff', true) !== false) return `[agent-companion] Context at ${kTokens(ctx)} (${lines}): commit and push as you go; at the notice the plugin writes the handoff record for you, so you need not keep a handoff file.`;
   return `[agent-companion] Context at ${kTokens(ctx)} (${lines}): keep your handoff file <task>-handoff.md next to your detail file current (${HANDOFF_FIELDS}), so a handoff at any moment loses nothing.`;
 }
 
@@ -122,13 +124,18 @@ export const DENY_STREAK_TEXT = 5; // denied calls in a row from which the reaso
 export const streakPrefix = (n) => (n >= DENY_STREAK_TEXT ? `${n} calls refused: write the handoff now or give your final reply. ` : '');
 
 // `why`: for a refused Bash/PowerShell command, the specific reason (gitCheck); null for every other tool.
-export function denyText(ctx, hard, variant = 'writer', why = null, held = false) {
+export function denyText(ctx, hard, variant = 'writer', why = null, held = false, auto = null) {
   const head = held
     ? '[agent-companion] A post-release hold is on: work is paused and this call is blocked, and so is every call except the handoff. '
       + holdWaitText('subagent')
       + (why ? `Bash and PowerShell allow only plain git add/commit/push/status/diff/log; this command was refused: ${why}. ` : '')
     : `[agent-companion] Context at ${kTokens(ctx)} is past the hard limit of ${kTokens(hard)}: this call is blocked, and so is every call except the handoff. `
     + (why ? `Bash and PowerShell allow only plain git add/commit/push/status/diff/log (no pipe, redirect, backtick, $(...) or other command, and only the listed options); this command was refused: ${why}. ` : '');
+  // 0.31.67: the plugin already wrote the record: append next steps to it (Edit of a .md with "handoff" in its name is allowed) and return.
+  const rec = typeof auto === 'string' && auto && !/[\r\n`]/.test(auto) ? auto : '';
+  if (rec) {
+    return `${head}The record is at ${rec}: append at most 10 lines of next steps under its heading${variant === 'readonly' ? '' : ' and push anything safe (git add, commit, push, status, diff and log are allowed)'}, then end with "${HANDOFF_RETURN.replace('<path>', rec)}". Everything else, including starting agents, stays blocked.`;
+  }
   if (variant === 'readonly') {
     return `${head}Write what you have to a file with "handoff" in its name next to your detail file (<task>-handoff.md), or put it in your final reply, then end with "${HANDOFF_RETURN}". Allowed: Write, Edit or Read of a .md file whose name contains "handoff". Everything else, including starting agents, stays blocked.`
     + (held ? ' If a push is refused because a pre-push gate runs through the shared queue (it is held too), commit, write the handoff file and say the push is pending.' : '');
@@ -398,7 +405,9 @@ export function handoffFileWritten(path) {
   } catch { return false; } finally { if (fd !== undefined) { try { closeSync(fd); } catch { /* ignore */ } } }
 }
 
-export function endGuardText(variant = 'writer') {
+export function endGuardText(variant = 'writer', auto = null) {
+  const rec = typeof auto === 'string' && auto && !/[\r\n`]/.test(auto) ? auto : '';
+  if (rec) return `[agent-companion] Your context is past the handoff line and you have not handed off. Before you end: the record is at ${rec}; append at most 10 lines of next steps under its heading${variant === 'readonly' ? '' : ', push anything safe'}, then end with "${HANDOFF_RETURN.replace('<path>', rec)}".`;
   if (variant === 'readonly') {
     return `[agent-companion] Your context is past the handoff line and you have not handed off. Before you end: write what you have (findings so far, what is left, the exact next step) to a file with "handoff" in its name next to your detail file (<task>-handoff.md), then end with "${HANDOFF_RETURN}".`;
   }

@@ -121,7 +121,7 @@ export function runnerPrompt({ briefFile, reviewFile, range, writer, risk, cwd, 
     `2. When it finishes, if the exit code is 0, reply with its stdout exactly as printed, nothing added or removed from it (it starts with a review and has a VERDICT line), then add one last line: (full review file: ${reviewFile})`,
     '3. If the exit code is nonzero (stdout starts `API review unavailable` or `API review failed`): when the stdout ends with `(review id: <id>)`, first run',
     `   node ${q(`${PLUGIN_ROOT}/scripts/api-credits.mjs`)} record-fallback <id> --reason "<the reason printed>"`,
-    '   then reply with exactly this sentence and nothing else: API review failed; spawn the review again with the line `API: no` added to the brief.',
+    '   then reply with exactly this sentence and nothing else, with <reason> the reason printed after `API review failed: ` or `API review unavailable: ` (without the review id): API review failed (<reason>); spawn the review again with the line `API: no` added to the brief.',
   ].join('\n');
 }
 

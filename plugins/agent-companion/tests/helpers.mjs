@@ -147,7 +147,7 @@ export function childEnv(env = {}) {
   // context. Children get an empty ledger of their own unless a test passes CI_BUDGET_DIR.
   // opus_writer_policy defaults to sonnet (it silently rewrites an Opus writer); the older spawn-guard tests spawn opus rungs on purpose, so children run with it allowed unless a test sets it (tests/opus-writer.test.mjs).
   // subagent_context_notice_repeat_tokens (15000) is likewise 0 here: the older tests pin "once per worker". subagent_context_hard_tokens defaults to 150000 and denies every call but the handoff past it; the many hook tests that run a worker at a large context are not about that, so children run with it off unless a test sets it (tests/handoff-limit.test.mjs).
-  return { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_HARD_TOKENS: '0', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_REPEAT_TOKENS: '0', CLAUDE_PLUGIN_OPTION_TYPE_LINE_REQUIRED: 'off', CLAUDE_PLUGIN_OPTION_RESOURCE_GATE: 'off', CLAUDE_PLUGIN_OPTION_OPUS_WRITER_POLICY: 'allow', ...base, CI_BUDGET_DIR: emptyLedger(), ...env };
+  return { CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_HARD_TOKENS: '0', CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_REPEAT_TOKENS: '0', CLAUDE_PLUGIN_OPTION_TYPE_LINE_REQUIRED: 'off', CLAUDE_PLUGIN_OPTION_RESOURCE_GATE: 'off', CLAUDE_PLUGIN_OPTION_OPUS_WRITER_POLICY: 'allow', CLAUDE_PLUGIN_OPTION_SUBAGENT_AUTO_HANDOFF: 'false' /* 0.31.67: the older tests pin the worker-written handoff wording; tests/auto-handoff.test.mjs turns the record on */, ...base, CI_BUDGET_DIR: emptyLedger(), ...env };
 }
 
 let emptyLedgerDir = null;
