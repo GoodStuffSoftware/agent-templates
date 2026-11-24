@@ -2,6 +2,11 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.68 — 2026-11-23
+
+- **Plugin text trims.** The leg tier clause no longer repeats the hand-off sentence the writer brief already carries (about 75 characters less per leg spawn), and the first event-turn quiet text drops two sentences the "one line at most" rule already covers (about 55 characters).
+- **New option `standing_rules_session_start_max_chars`.** Opt-in cap for the standing-rules text injected at session start (lead and lead-child audiences). Default 0 keeps `standing_rules_max_chars`; spawn text keeps its own cap. `rules.mjs budget` prints the cap and its source per audience.
+
 ## 0.31.67 — 2026-11-23
 
 - **Auto handoff record.** When a subagent first crosses its hand-off line, the hook itself writes `<agent>-<id>-auto-handoff.md` next to the directory the brief names for outputs (the state dir otherwise): the brief verbatim, git state, files edited, test and CI commands with their last result, the last assistant messages, and an empty Next steps section. The worker only appends up to 10 lines of next steps and returns `DONE: partial, handoff at <path>`. New option `subagent_auto_handoff` (default on; off restores the 0.31.66 behaviour where the worker writes its own file). Capped at 12 KB; token-shaped values are redacted by a linear-time pass (no backtracking), including common API-key, token and basic-auth shapes. The brief is clipped before redaction, and if the brief cannot be found the record falls back to the tail of the transcript and says so. The `.claude/tasks` fallback location applies only under a `/.claude/tasks/` directory. The hook finishes within a 2 s deadline (git calls 1 s, the diff stat is skipped past half the deadline) and removes its temp file on failure.
