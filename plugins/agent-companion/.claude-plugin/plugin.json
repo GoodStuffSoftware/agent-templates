@@ -630,6 +630,12 @@
       "description": "Ceiling on the rendered rule block per injection. Rules past the ceiling are dropped and the count is stated, so a budget overrun is visible rather than silent.",
       "default": 3000
     },
+    "standing_rules_session_start_max_chars": {
+      "type": "number",
+      "title": "Standing rules session-start budget (characters)",
+      "description": "Ceiling on the rendered rule block at session start only. Unset (or 0), it equals standing_rules_max_chars, so nothing changes; spawn and prompt blocks always use standing_rules_max_chars.",
+      "default": 0
+    },
     "knowledge_check": {
       "type": "boolean",
       "title": "Knowledge check",

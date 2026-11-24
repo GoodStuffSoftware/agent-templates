@@ -173,7 +173,7 @@ const PLUGIN_ROOT = (process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL('..
 export const PR_WAIT_HINT_WORDING = 'PR/CI wait: run_in_background (foreground dies at 2m), no gh/sleep loops: node "@/scripts/pr-wait.mjs" <pr|branch|sha>';
 export const PR_WAIT_HINT_TEXT = PR_WAIT_HINT_WORDING.replace('@', () => PLUGIN_ROOT); // a function, so a `$` in the path is literal, not a replace pattern
 
-export const EVENT_TURN_QUIET_FULL = 'Event turn: nothing here was typed by the operator (a worker result, a peer message, a CI event or a timer started it). Do not write a report. Update your task list to the current state: the list is the status. Write one line at most, only for something new the operator needs (a failure, a result that changes the plan, a decision that is theirs; a blocker in full, once). No recap, nothing already said, no pasted worker or peer output. Keep working; give one full report when the job is done or the operator next writes.';
+export const EVENT_TURN_QUIET_FULL = 'Event turn: nothing here was typed by the operator (a worker result, a peer message, a CI event or a timer started it). Update your task list to the current state: the list is the status. Write one line at most, only for something new the operator needs (a failure, a result that changes the plan, a decision that is theirs; a blocker in full, once). No pasted worker or peer output. Keep working; give one full report when the job is done or the operator next writes.';
 export const EVENT_TURN_QUIET_SHORT = 'Event turn: update the task list; one line at most and only if new. The full report waits for the end.';
 
 function builtinRules() {
@@ -888,8 +888,18 @@ export function matchRules({ scope, text, sessionId, subagent = false, assumeChi
 
 // The hook's hard output cap: the option `standing_rules_max_chars` when it is a positive number (so the option can
 // raise the limit as well as lower it), else DEFAULT_OUTPUT_CAP; never above OUTPUT_CAP_CEILING.
-export function outputCap() {
-  const n = opt('standing_rules_max_chars', 0);
+// `sessionStart`: the session-start block alone reads standing_rules_session_start_max_chars first (when it is a
+// positive number) and falls back to standing_rules_max_chars, so an unset option changes nothing.
+export function sessionStartMaxChars() {
+  const n = opt('standing_rules_session_start_max_chars', 0);
+  if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  const m = opt('standing_rules_max_chars', DEFAULT_MAX_CHARS);
+  return Number.isFinite(m) && m > 0 ? Math.floor(m) : DEFAULT_MAX_CHARS;
+}
+
+export function outputCap({ sessionStart = false } = {}) {
+  const sn = sessionStart ? opt('standing_rules_session_start_max_chars', 0) : 0;
+  const n = Number.isFinite(sn) && sn > 0 ? sn : opt('standing_rules_max_chars', 0);
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_OUTPUT_CAP;
   return Math.min(Math.floor(n), OUTPUT_CAP_CEILING);
 }
@@ -949,7 +959,7 @@ export function cutToCap(text, cap = outputCap()) {
 }
 
 // ---- the session-start budget (0.31.57) -----------------------------------------------------------------------------
-// The session-start block is cut at the standing_rules_max_chars budget in rule order (built-ins, then the operator's
+// The session-start block is cut at the standing_rules_session_start_max_chars budget (default: standing_rules_max_chars) in rule order (built-ins, then the operator's
 // rules), and a rule that does not fit is dropped with only a note inside the block itself. This renders the block the
 // way hooks/standing-rules.mjs does, for the audiences it serves, and reports what would drop: `rules.mjs` warns after
 // an edit, `rules.mjs budget` prints it, and the daily scout raises standing_rules_overflow from it.
@@ -961,12 +971,12 @@ export const BUDGET_AUDIENCES = ['lead', 'lead-child', 'subagent'];
 export function sessionStartBudget(audience = 'lead') {
   const subagent = audience === 'subagent';
   const matched = matchRules({ scope: 'session-start', subagent, assumeChild: audience === 'lead-child' });
-  const rawCap = opt('standing_rules_max_chars', DEFAULT_MAX_CHARS);
-  const cap = Math.min(Number.isFinite(rawCap) && rawCap > 0 ? Math.floor(rawCap) : DEFAULT_MAX_CHARS, outputCap());
+  const cap = Math.min(sessionStartMaxChars(), outputCap({ sessionStart: true }));
   const laid = layoutRules(matched, cap);
   return {
     audience,
     cap,
+    capOption: Number(opt('standing_rules_session_start_max_chars', 0)) > 0 ? 'standing_rules_session_start_max_chars' : 'standing_rules_max_chars',
     used: laid.used,
     wanted: laid.wanted,
     headroom: cap - laid.wanted,

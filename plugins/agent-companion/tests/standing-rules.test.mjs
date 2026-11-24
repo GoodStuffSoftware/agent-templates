@@ -782,9 +782,37 @@ test('hook --event session-start: with a small standing_rules_max_chars and seve
   }
 });
 
+test('standing_rules_session_start_max_chars: unset equals max_chars; set, only the session-start block uses it', () => {
+  const SS = 'CLAUDE_PLUGIN_OPTION_STANDING_RULES_SESSION_START_MAX_CHARS';
+  const MX = 'CLAUDE_PLUGIN_OPTION_STANDING_RULES_MAX_CHARS';
+  const was = [process.env[SS], process.env[MX]];
+  try {
+    delete process.env[SS];
+    process.env[MX] = '3500';
+    assert.equal(sessionStartMaxChars(), 3500, 'unset follows max_chars');
+    assert.equal(outputCap({ sessionStart: true }), outputCap());
+    assert.equal(sessionStartBudget('lead').cap, 3500);
+    assert.equal(sessionStartBudget('lead').capOption, 'standing_rules_max_chars');
+    process.env[SS] = '0';
+    assert.equal(sessionStartMaxChars(), 3500, '0 means unset');
+    process.env[SS] = '2200';
+    assert.equal(sessionStartMaxChars(), 2200);
+    assert.equal(outputCap({ sessionStart: true }), 2200);
+    assert.equal(outputCap(), 3500, 'spawn and prompt blocks keep max_chars');
+    const b = sessionStartBudget('lead');
+    assert.equal(b.cap, 2200);
+    assert.equal(b.capOption, 'standing_rules_session_start_max_chars');
+    const rules = [{ id: 'a', then: 'a'.repeat(1500) }, { id: 'b', then: 'b'.repeat(1500) }];
+    assert.match(renderRules(rules), /b{1500}/, 'spawn-style render (no explicit cap) fits both under 3500');
+    assert.doesNotMatch(renderRules(rules, { maxChars: sessionStartMaxChars() }), /b{1500}/, 'session-start render drops the second');
+  } finally {
+    for (const [k, v] of [[SS, was[0]], [MX, was[1]]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
+});
+
 // --- event turns ---------------------------------------------------------------------------------------------
 
-import { isEventTurn, pickEventTurnText } from '../hooks/lib/rules.mjs';
+import { isEventTurn, pickEventTurnText, sessionStartMaxChars } from '../hooks/lib/rules.mjs';
 import { runScript } from './helpers.mjs';
 
 const EVENT_PROMPTS = {
@@ -1419,8 +1447,8 @@ test('B1: rules.mjs budget prints both audiences with each rule\'s length, and a
     const env = { CLAUDE_PLUGIN_OPTION_STANDING_RULES_MAX_CHARS: '4200' };
     let r = runScript('scripts/rules.mjs', ['budget'], { env });
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /^lead: used \d+ \/ cap 4200, headroom \d+$/m);
-    assert.match(r.stdout, /^subagent \(a worker that compacts\): used \d+ \/ cap 4200, headroom \d+$/m);
+    assert.match(r.stdout, /^lead: used \d+ \/ cap 4200 \(standing_rules_max_chars\), headroom \d+$/m);
+    assert.match(r.stdout, /^subagent \(a worker that compacts\): used \d+ \/ cap 4200 \(standing_rules_max_chars\), headroom \d+$/m);
     assert.match(r.stdout, /^\s+\d+\s+delegate-first$/m);
     const before = readRules().rules.length;
     writeFileSync(rulesPath(), JSON.stringify([BIG_RULE, { id: 'big-two', scope: 'session-start', then: `C${'y'.repeat(900)}` }]));

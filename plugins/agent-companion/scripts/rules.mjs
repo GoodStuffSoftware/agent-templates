@@ -199,10 +199,10 @@ try {
         console.log(JSON.stringify({ audiences: budgets }, null, 2));
         break;
       }
-      console.log('Session-start block budget (characters; the option is standing_rules_max_chars):');
+      console.log('Session-start block budget (characters; the cap is standing_rules_session_start_max_chars, else standing_rules_max_chars):');
       for (const b of budgets) {
         const note = b.audience === 'lead-child' ? ' (a lead started by another session: the worst case)' : b.audience === 'subagent' ? ' (a worker that compacts)' : '';
-        console.log(`\n${b.audience}${note}: used ${b.used} / cap ${b.cap}, ${b.headroom >= 0 ? `headroom ${b.headroom}` : `OVER by ${-b.headroom}`}`);
+        console.log(`\n${b.audience}${note}: used ${b.used} / cap ${b.cap} (${b.capOption}), ${b.headroom >= 0 ? `headroom ${b.headroom}` : `OVER by ${-b.headroom}`}`);
         for (const r of b.rules) console.log(`  ${String(r.chars).padStart(5)}  ${r.id}${r.dropped ? '  (DROPPED)' : ''}`);
         if (b.dropped.length) console.log(`  ${overflowLine(b)}`);
       }

@@ -231,7 +231,7 @@ export function writerClause(tier, project, opts = {}) {
   // these two kinds do not name the tier), worded to fit the 300 and 450 character limits of these two kinds.
   const short = project ? `Project ${project}, project_tier ${(TIERS[tier] || TIERS[DEFAULT_ID]).id}.` : NO_PROJECT_SHORT;
   if (kind === 'leg') {
-    return `${short} You are one leg of a larger job: you spawn no reviewer; the lead applies the review table once to the whole change. Finish the task; at the handoff notice, hand off per the writer clause. Run unit tests for what you touch, no full suite, e2e, CI or full build: the lead runs one pass after all legs. Commit, push, then report ${RISK_REPORT}.`;
+    return `${short} You are one leg of a larger job: you spawn no reviewer; the lead applies the review table once to the whole change. Run unit tests for what you touch, no full suite, e2e, CI or full build: the lead runs one pass after all legs. Commit, push, then report ${RISK_REPORT}.`;
   }
   // No landing sentence outside a git repo (no project): the session line is silent there too.
   const landSentence = project ? landingSentence(opts.landing) : '';
