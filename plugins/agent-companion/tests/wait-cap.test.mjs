@@ -91,19 +91,22 @@ test('real run: the capped loop ends at the deadline in this shell, prints the l
   const r = waitCapRewrite('until [ -f /nonexistent/never ]; do sleep 1; done; echo AFTER', 2 / 60); // 2 seconds
   assert.equal(r.count, 1);
   assert.match(r.command, /SECONDS\+2\)/);
-  const t0 = Date.now();
-  const ran = spawnSync(BASH, ['-c', r.command], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
-  const secs = (Date.now() - t0) / 1000;
+  // Time inside the shell (bash SECONDS), not around spawnSync: process start-up on a loaded box is
+  // unbounded (a full parallel suite starves it), the cap's own clock is not. Unloaded, the loop takes
+  // 2.10 s every time (12 of 12), so the old wall-clock `< 20` and 30 s spawn limits only ever tripped
+  // on spawn latency. The spawn timeout stays as a hang guard only.
+  const ran = spawnSync(BASH, ['-c', '(' + r.command + '); rc=$?; echo "__SECS=$SECONDS"; exit $rc'], { encoding: 'utf8', windowsHide: true, timeout: 120000 });
+  const secs = Number(/__SECS=(\d+)/.exec(ran.stdout)?.[1]);
   assert.equal(ran.status, 124, ran.stderr);
   assert.match(ran.stdout, /wait-cap: gave up after 0\.0\d+ min; condition never met/);
   assert.doesNotMatch(ran.stdout, /AFTER/);
-  assert.ok(secs >= 1.5 && secs < 20, `took ${secs}s`);
+  assert.ok(secs >= 2 && secs < 60, `took ${secs}s`);
 });
 
 test('real run: a loop whose condition comes true before the cap behaves as before', () => {
   const r = waitCapRewrite('n=0; until [ "$n" = x ] || [ -f /nonexistent/x ] || { n=x; false; }; do sleep 1; done; echo OK-$n', 1);
   // `n=x` makes the second pass see it; the loop body must not trip the cap in a minute.
-  const ran = spawnSync(BASH, ['-c', r.command], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  const ran = spawnSync(BASH, ['-c', r.command], { encoding: 'utf8', windowsHide: true, timeout: 120000 });
   assert.equal(ran.status, 0, ran.stderr);
   assert.match(ran.stdout, /OK-x/);
   assert.doesNotMatch(ran.stdout, /wait-cap/);
