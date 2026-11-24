@@ -231,9 +231,11 @@ export function gitState(cwd, started = Date.now()) {
   const lines = [];
   if (!cwd || !existsSync(cwd)) return `- cwd unavailable (${cwd || 'none'}): no git state\n`;
   const git = makeGit(cwd, started);
-  const head = git(['rev-parse', '--abbrev-ref', 'HEAD', 'HEAD']);
+  const head = git(['rev-parse', '--abbrev-ref', 'HEAD']);
   if (!head.ok) return `- not a git repository or git unavailable at ${cwd} (${oneLine(head.why).slice(0, 120)})\n`;
-  const [branch, sha] = head.out.split('\n');
+  const branch = head.out.split('\n')[0];
+  const shaR = git(['rev-parse', 'HEAD']);
+  const sha = shaR.ok ? shaR.out : '?';
   lines.push(`- cwd: ${cwd}`, `- branch: ${branch}`, `- HEAD: ${sha}`);
   const up = git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
   if (up.ok) {
