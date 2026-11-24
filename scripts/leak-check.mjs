@@ -969,13 +969,28 @@ export function lessonDigest(text) {
   return hex.replace(/[0-9a-f]/g, (c) => String.fromCharCode(103 + parseInt(c, 16)));
 }
 
-function loadLessonBaseline(root) {
+export function loadLessonBaseline(root) {
   try {
     const j = JSON.parse(readFileSync(join(root, LESSON_BASELINE_REL), "utf8"));
     return j && typeof j === "object" && j.lessons && typeof j.lessons === "object" ? j.lessons : {};
   } catch {
     return {};
   }
+}
+
+// The lesson brevity rule, one place: leak-check (CI and a full local run) and
+// push-scan (the pre-push gate, on the pushed commits) both call it, so the
+// 150-word cap cannot be checked by one and missed by the other. Returns
+// { hit } above the new/changed cap, { warning } above the loose cap, else null.
+export function lessonCapFinding(rel, text, baseline = {}) {
+  if (!/^lessons\/.+\.md$/.test(rel) || /(^|\/)(README|INDEX)\.md$/i.test(rel)) return null;
+  const words = lessonBody(text).split(/\s+/).filter(Boolean).length;
+  const unchanged = baseline[rel] === lessonDigest(text);
+  if (!unchanged && words > LESSON_NEW_CAP) {
+    return { hit: { rel, line: 1, label: `new or changed lesson over ${LESSON_NEW_CAP} words`, token: `${words} words`, text: "trim to the rule, trigger, how to apply and a one-line incident" } };
+  }
+  if (words > LESSON_WORD_CAP) return { warning: { rel, line: 1, label: `lesson body over ~${LESSON_WORD_CAP} words`, token: `${words} words` } };
+  return null;
 }
 
 export function main(argv = process.argv.slice(2), env = process.env) {
@@ -1012,15 +1027,9 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     hits.push(...r.hits);
     warnings.push(...r.warnings);
     // Brevity cap for lesson bodies (see CONTRIBUTING.md "Fold gates").
-    if (/^lessons\/.+\.md$/.test(rel) && !/(^|\/)(README|INDEX)\.md$/i.test(rel)) {
-      const words = lessonBody(text).split(/\s+/).filter(Boolean).length;
-      const unchanged = lessonBaseline[rel] === lessonDigest(text);
-      if (!unchanged && words > LESSON_NEW_CAP) {
-        hits.push({ rel, line: 1, label: `new or changed lesson over ${LESSON_NEW_CAP} words`, token: `${words} words`, text: "trim to the rule, trigger, how to apply and a one-line incident" });
-      } else if (words > LESSON_WORD_CAP) {
-        warnings.push({ rel, line: 1, label: `lesson body over ~${LESSON_WORD_CAP} words`, token: `${words} words` });
-      }
-    }
+    const cap = lessonCapFinding(rel, text, lessonBaseline);
+    if (cap?.hit) hits.push(cap.hit);
+    else if (cap?.warning) warnings.push(cap.warning);
   }
 
   if (warnings.length) {

@@ -77,10 +77,26 @@ test('run: a command that cannot start is 127 with one line, and the lease is re
 test('run: usage errors are exit 2 and never start the command', () => {
   const b = box();
   try {
-    for (const args of [[], ['run'], ['run', '--resource', 'box:1'], ['run', '--resource', 'box:1', '--'], ['run', '--', 'x'], ['run', '--bogus', '--', 'x'], ['frobnicate'], ['run', '--class', 'nope', '--', 'x'], ['run', '--resource', 'a b', '--', 'x']]) {
+    for (const args of [[], ['run'], ['run', '--resource', 'box:1'], ['run', '--resource', 'box:1', '--'], ['run', '--bogus', '--', 'x'], ['frobnicate'], ['run', '--class', 'nope', '--', 'x'], ['run', '--resource', 'a b', '--', 'x']]) {
       const r = b.run(args);
       assert.equal(r.status, 2, JSON.stringify(args));
       assert.match(r.stderr, /usage:/);
+    }
+  } finally { b.done(); }
+});
+
+test('run: --resource defaults to box:1, and a run mistake prints the correct invocation as one usage line', () => {
+  const b = box();
+  try {
+    const ok = b.run(['run', '--', NODE, '-e', 'process.exit(0)']);
+    assert.equal(ok.status, 0, ok.stderr);
+    for (const args of [['run', '--class', 'node-test', '--', 'x'], ['run', '--bogus', '--', 'x']]) {
+      const r = b.run(args);
+      assert.equal(r.status, 2, JSON.stringify(args));
+      const usage = r.stderr.split(/\r?\n/).filter((l) => /usage:/.test(l));
+      assert.equal(usage.length, 1);
+      assert.match(usage[0], /run \[--resource box:N \(default box:1\)\]/);
+      assert.doesNotMatch(r.stderr, /reserve <resource>/, 'only the run line, not the whole usage block');
     }
   } finally { b.done(); }
 });

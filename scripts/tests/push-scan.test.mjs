@@ -26,7 +26,7 @@ import {
   resolvePublicTips, decodeEscapes, compressedKind, utf16leOf, scanGitEnv,
   REDACTED, REDACTED_PATH, REDACTED_REF,
 } from '../push-scan.mjs';
-import { buildScanContext } from '../leak-check.mjs';
+import { buildScanContext, lessonDigest } from '../leak-check.mjs';
 import { prePushGate, scrubHomeDir, parsePrePushStdin } from '../ci-local.mjs';
 import { cleanGitEnv } from '../../plugins/agent-companion/scripts/lib/git-env.mjs';
 
@@ -784,6 +784,30 @@ test('a real-looking home path (synthetic user) is a leak-check hit, printed wit
   assert.equal(r.status, 1);
   assert.match(r.output, /x\.md:1 {2}\[leak-check: private-path:posix-home\]/);
   assert.ok(!r.output.includes(user), 'the user was printed');
+});
+
+test('a pushed lesson over the 150-word cap is a hit (the CI word cap, locally); a short one and a baselined long one pass', () => {
+  const lesson = (n) => `---
+title: t
+---
+${'word '.repeat(n)}
+`;
+  const { repo, commit } = makeRepo();
+  const long = commit({ 'lessons/universal/too-long.md': lesson(151) });
+  const r = scan(repo, { stateDir: stateDirWith([synth()]), commits: [long] });
+  assert.equal(r.status, 1);
+  assert.match(r.output, /too-long\.md:1 {2}\[leak-check: new or changed lesson over 150 words\]/);
+
+  const short = commit({ 'lessons/universal/short.md': lesson(150) });
+  assert.equal(scan(repo, { stateDir: stateDirWith([synth()]), commits: [short] }).status, 0);
+
+  // A long lesson recorded in scripts/lesson-baseline.json (content digest) is unchanged: no hit.
+  const old = lesson(300);
+  const base = commit({
+    'scripts/lesson-baseline.json': JSON.stringify({ lessons: { 'lessons/universal/was-long.md': lessonDigest(old) } }),
+    'lessons/universal/was-long.md': old,
+  });
+  assert.equal(scan(repo, { stateDir: stateDirWith([synth()]), commits: [base] }).status, 0);
 });
 
 test('author and committer identity are exempt: a denylisted author name alone is not a hit', () => {
