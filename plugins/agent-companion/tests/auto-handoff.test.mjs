@@ -226,19 +226,22 @@ test('redaction: secret-looking values are not copied into the record', () => {
 
 test('path convention: the brief\'s directory, a tasks path, else the state directory; the stem from the brief or the agent type', () => {
   const p = { agent_id: 'zebra-quill-9', agent_type: 'agent-companion:ac-sonnet-high' };
-  assert.equal(briefOutputDir('write C:/w/tasks/a/foo-detail.md'), 'C:/w/tasks/a');
-  const claudeTasks = ['D:', 'work', '.claude', 'tasks', 'b'].join('/');
+  // /tmp paths are absolute and recognised as paths on both Linux and Windows (a drive-letter path is not absolute on Linux)
+  const W = '/tmp/w';
+  const R = '/tmp/repo';
+  assert.equal(briefOutputDir('write ' + W + '/tasks/a/foo-detail.md'), W + '/tasks/a');
+  const claudeTasks = ['', 'tmp', 'work', '.claude', 'tasks', 'b'].join('/');
   assert.equal(briefOutputDir(`files go in ${claudeTasks}/ please`), claudeTasks);
-  assert.equal(briefOutputDir('write C:/w/tasks/a/foo-verdict.md'), 'C:/w/tasks/a');
+  assert.equal(briefOutputDir('write ' + W + '/tasks/a/foo-verdict.md'), W + '/tasks/a');
   // a bare `tasks` folder (a source tree) is never the output directory
-  assert.equal(briefOutputDir('read C:/repo/src/tasks/runner.mjs and fix it'), null);
-  assert.equal(briefOutputDir('files go in C:/w/tasks/b/ please'), null);
-  assert.equal(briefOutputDir('see C:/repo/src/tasks/x.ts'), null);
-  assert.equal(briefOutputDir('see C:/w/tasks/../../etc/x-handoff.md'), null, 'no ..');
+  assert.equal(briefOutputDir('read ' + R + '/src/tasks/runner.mjs and fix it'), null);
+  assert.equal(briefOutputDir('files go in ' + W + '/tasks/b/ please'), null);
+  assert.equal(briefOutputDir('see ' + R + '/src/tasks/x.ts'), null);
+  assert.equal(briefOutputDir('see ' + W + '/tasks/../../etc/x-handoff.md'), null, 'no ..');
   assert.equal(briefOutputDir('relative/path/x-handoff.md and nothing else'), null);
   assert.equal(briefOutputDir(''), null);
   const norm = (s) => s.replace(/\\/g, '/');
-  assert.equal(norm(autoHandoffPath(p, 'write C:/w/tasks/a/foo-handoff.md')), 'C:/w/tasks/a/foo-zebra-qu-auto-handoff.md');
+  assert.equal(norm(autoHandoffPath(p, 'write ' + W + '/tasks/a/foo-handoff.md')), W + '/tasks/a/foo-zebra-qu-auto-handoff.md');
   const fb = norm(autoHandoffPath(p, 'no paths here'));
   assert.ok(fb.startsWith(norm(join(stateDir(), 'auto-handoff'))) && fb.endsWith('/ac-sonnet-high-zebra-qu-auto-handoff.md'), fb);
   assert.equal(autoHandoffPath({ agent_type: 'x' }, ''), null, 'no agent id');
