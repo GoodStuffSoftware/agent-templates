@@ -71,6 +71,10 @@ export const NON_CONTRACT_TYPES = new Set(['Explore', 'Plan', 'web-fetch', 'clau
 export const PROBE_RE = /^[\s\S]{0,400}?hook verification spawn, not real work/i;
 const STATUS_RE = /STATUS:\s*(done|partial|blocked)/i;
 const STATUS_LINE_RE = /^[\s>*_`#-]*STATUS:\s*(done|partial|blocked)/im;
+// Claude Code's own PreToolUse blocks arrive in the SAME transcript shape as a hook's ("PreToolUse:Edit hook error: <text>", the record's
+// permissionDecision says source hook, and no attachment names the command), so the record cannot tell ours from the harness's; the harness
+// messages are known by their wording and are never counted as a hook error or a new signature (the worktree-isolation block is the one seen).
+export const HARNESS_HOOK_ERROR_RE = /^This session is running in an isolated git workt/i; // the signature keeps 48 characters, which end inside "worktree"
 export const HARNESS_REFUSAL_RE =/isolated in the worktree|too complex to verify|names git in a form too complex|changes directory to the shared tree/i;
 
 // Queue clears that mean something went wrong: a lease whose holder died or went stale, a holder past the ceiling, a stuck release.
@@ -172,7 +176,7 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
         if (b.type === 'tool_result' && b.is_error) {
           terr++; const t = typeof b.content === 'string' ? b.content : JSON.stringify(b.content);
           const m = /^(PreToolUse:[\w:]+) hook error: (.{0,48})/.exec(t);
-          if (m && !/post-release hold/i.test(t) && !inHold(Date.parse(o.timestamp))) { hook++; sigs.push(`${m[1]} ${m[2]}`); }
+          if (m && !/post-release hold/i.test(t) && !HARNESS_HOOK_ERROR_RE.test(m[2]) && !inHold(Date.parse(o.timestamp))) { hook++; sigs.push(`${m[1]} ${m[2]}`); }
         }
       }
     }

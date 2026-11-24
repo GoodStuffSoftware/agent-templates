@@ -1338,6 +1338,19 @@ test('count-once: a tool_result repeated in an api-request-blob record counts on
   assert.equal(m.hookSignatures.since['PreToolUse:Bash invented boom'], 1);
 });
 
+test('hook-error noise: the harness worktree-isolation block is never a signature or a hook error; one event of a new signature is a note, not a FLAG', () => {
+  const sd = join(claude, 'projects', 'C--pnoise', 'sess', 'subagents'); mkdirSync(sd, { recursive: true });
+  const ts = new Date(T + HOUR).toISOString();
+  const line = (id, text) => JSON.stringify({ type: 'user', timestamp: ts, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: true, content: text }] } });
+  const first = JSON.stringify({ type: 'user', timestamp: ts, message: { role: 'user', content: 'Do the invented task.' } });
+  writeFileSync(join(sd, 'agent-noise.jsonl'), [first, line('n-1', 'PreToolUse:Edit hook error: This session is running in an isolated git worktree at `/w/invented`, but `/w/other/x` is outside it.'), line('n-2', 'PreToolUse:Bash hook error: invented single boom')].join('\n'));
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.deepEqual(Object.keys(m.hookSignatures.since), ['PreToolUse:Bash invented single boom'], 'the harness block is not a signature');
+  const one = names(metrics({ hookSignatures: { since: { 'PreToolUse:Bash invented single boom': 1 }, base: {} } }));
+  assert.ok(!one.some((x) => x.startsWith('hook-signature')), 'one event is a note, not a flag');
+  assert.ok(names(metrics({ hookSignatures: { since: { 'PreToolUse:Bash invented single boom': 5 }, base: {} } })).some((x) => x.startsWith('hook-signature')), 'five events flag');
+});
+
 test('count-once: two hard denials from one worker are one worker, and the row count stays in the detail', () => {
   putRows('handoff-limit.jsonl', [{ at: T + HOUR, limit: 'hard', action: 'deny', agent_id: 'wA', session_id: 's1' }, { at: T + 2 * HOUR, limit: 'hard', action: 'deny', agent_id: 'wA', session_id: 's1' },
     { at: T + 2 * HOUR, limit: 'hard', action: 'deny', session_id: 's2' }]);
