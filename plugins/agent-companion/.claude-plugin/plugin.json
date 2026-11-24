@@ -722,7 +722,7 @@
     "diff_cap": {
       "type": "boolean",
       "title": "Diff cap",
-      "description": "Rewrite a Bash git diff, git show or git log -p call so one call returns at most 400 lines of diff: more goes to a file and the stat, the first 300 lines and the file path come back to read by range. Exit status is kept. Stat, name-only, piped, redirected and background calls are never touched. Off = diffs print as written.",
+      "description": "Rewrite a Bash git diff, git show or git log -p call so one call returns at most 400 lines of diff: more goes to a file and the stat, the first 300 lines and the file path come back to read by range. Exit status is kept. Stat, name-only, piped, redirected and background calls are never touched. Applies only in the permission modes of bash_tail_permission_modes (default bypassPermissions): in other modes an allow rule stops matching the rewritten command. Off = diffs print as written.",
       "default": true
     },
     "git_brief": {

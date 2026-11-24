@@ -60,7 +60,7 @@ test('wording: one template, xhigh and high variants, no max raise, no lowering'
   assert.equal(LEAD_EFFORT_CHECK_TEXT_HIGH, leadEffortCheckText('high'));
   for (const [text, lv] of [[LEAD_EFFORT_CHECK_TEXT, 'xhigh'], [LEAD_EFFORT_CHECK_TEXT_HIGH, 'high']]) {
     assert.ok(text.includes(`A lead runs at ${lv};`));
-    assert.ok(text.includes(`Interactive and below ${lv}: state once, in your first report, the effort you run at and that orchestration is tuned for ${lv}.`));
+    assert.ok(text.includes(`Interactive and below ${lv}: state once, in your first report, the effort you run at and that orchestration is tuned for ${lv}; nothing is asked or held.`));
     assert.ok(text.includes(`state the effort once, only if below ${lv}.`));
     assert.ok(text.includes(`at ${lv} or above, say nothing about effort.`));
     assert.ok(text.endsWith('Never raise to max, never lower, never suggest lowering.'));

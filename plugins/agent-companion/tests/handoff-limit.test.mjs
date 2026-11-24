@@ -528,8 +528,15 @@ test('0.31.65 the options override the defaults', () => {
   try {
     const { lead, agentFile } = layout(fy);
     // high 0 falls back to the lower line (110K): the handoff notice at 111K
-    assert.match(text(at(lead, agentFile, 111000, 'ac-opus-high', env({ [HI]: '0' }))), /Context at 111K, limit 150K/);
+    assert.match(text(at(lead, agentFile, 111000, 'ac-sonnet-high', env({ [HI]: '0' }))), /Context at 111K, limit 150K/);
   } finally { fy.cleanup(); }
+  const fo = makeFixture();
+  try {
+    const { lead, agentFile } = layout(fo);
+    // 0.31.66: an opus rung keeps its own line (120K) when the high option is 0 or less: no handoff notice at 111K, the notice at 121K
+    assert.doesNotMatch(text(at(lead, agentFile, 111000, 'ac-opus-high', env({ [HI]: '0' }))), /limit 150K/);
+    assert.match(text(at(lead, agentFile, 121000, 'ac-opus-high', env({ [HI]: '0' }))), /Context at 121K, limit 150K/);
+  } finally { fo.cleanup(); }
   const fz = makeFixture();
   try {
     const { lead, agentFile } = layout(fz);
@@ -574,4 +581,36 @@ test('0.31.65 threshold library: high rungs never hand off before the lower ones
   } finally {
     keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
   }
+});
+
+test('0.31.66 the opus option holds when subagent_context_notice_high_tokens is 0 or less; a high rung that is not opus falls back to the base line', async () => {
+  const lib = await import('../hooks/lib/handoff-limit.mjs');
+  const keys = ['CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_HIGH_TOKENS', 'CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_OPUS_TOKENS'];
+  const saved = keys.map((k) => process.env[k]);
+  try {
+    process.env[keys[0]] = '0';
+    delete process.env[keys[1]];
+    assert.equal(lib.handoffThreshold('ac-opus-high'), 120000, 'high 0: the opus rung keeps the opus default');
+    assert.equal(lib.handoffThreshold('ac-sonnet-high'), 110000, 'high 0: a sonnet high rung stands at the base line');
+    process.env[keys[0]] = '-1';
+    assert.equal(lib.handoffThreshold('ac-opus-xhigh'), 120000, 'high below 0 behaves the same');
+    process.env[keys[1]] = '125000';
+    assert.equal(lib.handoffThreshold('ac-opus-high'), 125000, 'an explicit opus option overrides');
+    process.env[keys[1]] = '0';
+    assert.equal(lib.handoffThreshold('ac-opus-high'), 110000, 'both 0: the base line stands');
+  } finally {
+    keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
+  }
+});
+
+test('0.31.66 bashWritesHandoff matches the file NAME only: a directory called handoff does not count', async () => {
+  const { bashWritesHandoff } = await import('../hooks/lib/handoff-limit.mjs');
+  assert.equal(bashWritesHandoff('cat > docs/handoff/design.md <<EOF'), false, 'directory named handoff');
+  assert.equal(bashWritesHandoff('echo x >> /w/handoff/notes.md'), false);
+  assert.equal(bashWritesHandoff('tee C:\\w\\handoff\\design.md'), false, 'a Windows path with a handoff directory');
+  assert.equal(bashWritesHandoff('cat > docs/handoff/task-handoff.md <<EOF'), true, 'file name matches');
+  assert.equal(bashWritesHandoff('echo x >> fix-round-handoff.md'), true);
+  assert.equal(bashWritesHandoff('tee -a "/w/x/api-handoff.md"'), true);
+  assert.equal(bashWritesHandoff('cat > notes.md'), false);
+  assert.equal(bashWritesHandoff(undefined), false);
 });

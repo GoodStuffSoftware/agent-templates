@@ -211,7 +211,9 @@ try {
 
   // ---- step 1b: diff cap (hooks/lib/diff-cap.mjs) -----------------------------------------
   // One git diff / show / log -p call returns at most 400 lines: more goes to a file, and the stat, the first 300 lines and the
-  // file's path come back (read the rest by range). Silent; exit status kept. Option diff_cap (default true).
+  // file's path come back (read the rest by range). Silent; exit status kept. Option diff_cap (default true). Only in the permission modes of
+  // bash_tail_permission_modes (default bypassPermissions): the permission rules are checked against the REWRITTEN command, so in other modes an allow
+  // rule (Bash(git diff:*)) would stop matching it. Not widened on purpose.
   try {
     if (opt('diff_cap', true) && !gateCommand && !input.run_in_background && diffCapTarget(input.command)
       && modeAllowed(p.permission_mode, opt('bash_tail_permission_modes', 'bypassPermissions'))) {

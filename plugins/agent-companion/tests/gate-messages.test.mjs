@@ -38,8 +38,8 @@ test('standing rules: a compacting subagent gets no orchestration rule, the lead
   try {
     const lead = runHook('hooks/standing-rules.mjs', LEAD, { args: SS });
     const leadText = lead.json.hookSpecificOutput.additionalContext;
-    assert.match(leadText, /You are an orchestrator/);
-    assert.match(leadText, /Continue a worker only while its cache is warm \(under 5 minutes\) and the follow-on is short \(about 10 calls or fewer\)\. Otherwise spawn fresh with a short handoff/);
+    assert.match(leadText, /Orchestrator: reads, searches, shell, tests and self-contained edits go to subagents/);
+    assert.match(leadText, /Continue a worker only while its cache is warm \(under 5 min\) and the follow-on is short \(about 10 calls or fewer\); else spawn fresh with a short handoff/);
     assert.match(leadText, /One completion wait/);
 
     const worker = runHook('hooks/standing-rules.mjs', WORKER, { args: SS });
