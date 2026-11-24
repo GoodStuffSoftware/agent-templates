@@ -8,6 +8,7 @@ All notable changes to the `agent-companion` plugin. Dates are UTC.
 - **Release watch counting.** A tool_result repeated in api-request-blob records counts once; handoff-hard-deny counts distinct workers; `status` names an install the 10-minute job has not armed yet (and `--json` gains `pending`).
 - **Handoff guard.** A handoff written with Bash (`cat >`, `>>`, `tee`) counts, and `DONE: partial, handoff at <path>` is accepted anywhere in the final message (no more false end-blocks); the hand-off notice asks the worker to put `transcript: <path>` at the top of its handoff file; the opus rungs hand off at 120K (new option `subagent_context_notice_opus_tokens`) instead of 130K.
 - **Diff cap.** A Bash `git diff`, `git show` or `git log -p` call now returns at most 400 lines (stat, first 300 lines and the path of the full output to read by range; exit status kept; option `diff_cap`). Built-in session-start rule wording is tightened so the lead-child block fits the 4200 cap again.
+- **CI runs pre-release only and fast.** `agent-companion-tests` runs on a push to `release/**`, a pull request into `main` and by hand, on Linux only (three shard jobs, `CI_LOCAL_SHARD=<i>/<n>` in `scripts/ci-local.mjs`; the desktop budget, slices and 2-worker default are off on the runner); the Windows run is the local release run (CONTRIBUTING.md, Release gate). `leak-check` runs on `release/**`, `main`, PRs and by hand. One resource-queue test no longer waits out its 60 s timeout.
 
 ## 0.31.65 — 2026-11-23
 

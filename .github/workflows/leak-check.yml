@@ -4,12 +4,26 @@ name: leak-check
 # Fails the check if scripts/leak-check.mjs finds any project/product name,
 # domain, user path, handle, name, email, or git-SHA-like hex run.
 
+# Pre-release only (0.31.66), like agent-companion-tests: a push to release/** or
+# main (the library also lands direct commits on main), a pull request into
+# main, and by hand. Not every branch push: the pre-push hook already runs the
+# leak and private-names scan on the machine before anything is pushed (a
+# branch pushed to this public repo is public from that moment, so a post-push
+# check cannot undo a leak), and this job is the backstop for what reaches a
+# release or main. It takes about 40 s.
 on:
   push:
-    branches-ignore:
-      - 'wip/**'
-      - 'backup/**'
+    branches:
+      - main
+      - 'release/**'
   pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
   leak-check:
