@@ -12,12 +12,17 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync, re
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { stateDir, opt } from './context.mjs';
-import { withFileLock } from './file-lock.mjs';
+import { createRequire } from 'node:module';
 
 // Every read-modify-write of release-hold-sessions.json and release-hold-message-pending.json runs under the shared lock helper
 // (lib/file-lock.mjs): a lead's noteHeld and a worker's denied-call noteHeld, or two clears, would otherwise lose one update.
 // Fails open: a lock not taken in 1.5 s runs the write unlocked.
-const locked = (file, fn) => withFileLock(`${file}.lock`, fn, { waitMs: 1500, staleMs: 5000, failOpen: true });
+// The helper loads on the first locked write, not at import: every spawn imports this module for the hold check, and a plain spawn must not load the lock helper (tests/premium-window-lock.test.mjs).
+let lockHelper;
+const locked = (file, fn) => {
+  if (!lockHelper) { try { lockHelper = createRequire(import.meta.url)('./file-lock.mjs').withFileLock; } catch { lockHelper = (_f, f) => f(); } }
+  return lockHelper(`${file}.lock`, fn, { waitMs: 1500, staleMs: 5000, failOpen: true });
+};
 
 export const COOLDOWN_MS = 4 * 3600e3;
 export const WORSEN_FACTOR = 2;

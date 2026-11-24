@@ -47,7 +47,7 @@ export function handoffThreshold(agentType) {
   if (!(base > 0)) return 0;
   if (!isHighRung(agentType)) return base;
   let high = Number(opt('subagent_context_notice_high_tokens', HANDOFF_HIGH_DEFAULT));
-  // The opus option overrides the high one for the opus rungs even when the high option is 0 or less; with neither set the base line stands.
+  // The opus option replaces the high one for the opus rungs even when the high option is 0 or less; with neither set the base line stands.
   if (isOpusRung(agentType)) { const o = Number(opt('subagent_context_notice_opus_tokens', HANDOFF_OPUS_DEFAULT)); if (o > 0) high = o; } // 0 or less: the high rungs' line
   if (!(high > 0)) return base;
   // The higher rungs never hand off earlier than the lower ones (a raised base lifts them too), and a notice line at or past the hard

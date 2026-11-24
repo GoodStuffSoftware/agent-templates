@@ -1251,7 +1251,9 @@ test('clear: prints the held list, stores it with clearedAt in the history row; 
   assert.equal(S.clearedNotice('stranger', T + 6 * HOUR), null, 'a session that was never held');
   assert.equal(S.clearedNotice('sub-1', T + 6 * HOUR), null, 'a subagent id is not a lead');
   assert.match(S.clearedNotice('lead-b', T + 6 * HOUR), /cleared/);
-  assert.match(cli('held').stdout, /none recorded/);
+  assert.match(cli('held').stdout, /still owed a local message/, 'a clear nobody has claimed: the sessions are still owed a message');
+  S.takeOwedMessages('lead-z', T + 7 * HOUR);
+  assert.match(cli('held').stdout, /none recorded/, 'claimed: nothing owed');
 });
 
 test('a new hold starts a new list, and a stale cleared notice is not shown during it', () => {
