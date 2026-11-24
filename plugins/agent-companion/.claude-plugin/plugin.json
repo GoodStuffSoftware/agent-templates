@@ -1133,6 +1133,12 @@
       "description": "On (default): the PreToolUse hook inside each subagent (never the lead) enforces the worker handoff. At subagent_context_notice_tokens (the soft limit, 110000) the worker is told to finish the step, commit and push its WIP to its branch, write <task>-handoff.md (done, remaining, files touched, branch and sha, the exact next step) and end with \"DONE: partial, handoff at <path>\"; the notice repeats every subagent_context_notice_repeat_tokens while the context keeps growing; at subagent_context_hard_tokens (the hard limit, 150000) every tool call except the handoff is DENIED. Off: none of that happens (the compaction note is separate and unchanged). Each notice and each deny is a row in handoff-limit.jsonl, counted in the Efficiency block of the daily usage report. Note: subagent_context_notice_tokens 0 (an explicit value in your settings) switches the notice off; the hard limit still applies unless this switch is off or subagent_context_hard_tokens is 0.",
       "default": true
     },
+    "subagent_auto_handoff": {
+      "type": "boolean",
+      "title": "Worker handoff: the plugin writes the record",
+      "description": "On (default): when a subagent first crosses its hand-off line the hook itself writes <agent>-<id>-auto-handoff.md next to the directory its brief names for outputs (state dir otherwise): the brief verbatim, git state (branch, HEAD, pushed or not, commits ahead of origin/main, diff --stat, uncommitted files), files edited, test and CI commands with their last result, the last assistant messages, and an empty Next steps section. The worker is told to append at most 10 lines of next steps and return DONE: partial, handoff at <path>; the lead notice names the same path. Capped at 12 KB; token-shaped values are redacted. Off: the worker writes its own handoff file as in 0.31.66. Only used while subagent_handoff_limits is on.",
+      "default": true
+    },
     "subagent_context_notice_repeat_tokens": {
       "type": "number",
       "title": "Worker handoff: repeat the notice every N tokens",

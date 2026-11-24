@@ -31,6 +31,7 @@ import {
 } from './lib/handoff-limit.mjs';
 import { noticeVariant } from './lib/subagent-context.mjs';
 import { readBrief } from './lib/step-budget.mjs';
+import { existingAutoHandoff } from './lib/auto-handoff.mjs';
 import {
   measureTranscript, runawayReasons, claimAgentOnce, queueNotice, resolveAgentTranscript, pruneRunawayState,
   RUNAWAY_DEFAULT_TURNS, RUNAWAY_DEFAULT_USD,
@@ -111,7 +112,10 @@ function contextCheck(p, path) {
     return;
   }
   const told = fresh.every((e) => e.phase === 'mid-run') ? 'it was told mid-run to hand off' : 'it was not reached mid-run';
-  queueNotice(p.session_id, `[agent-companion] subagent context: ${who} ${parts.join(' and ')}; ${told}. `
+  let rec = null; // 0.31.67: the plugin-written record (lib/auto-handoff.mjs): the continuation is briefed from it even when the worker wrote nothing
+  try { rec = existingAutoHandoff(p, readBrief(path)); } catch { /* advisory */ }
+  const recLine = rec && !/[\r\n`]/.test(rec) ? ` The auto handoff record is at ${rec}: brief the continuation from it (its brief, git state, edited files and test runs, plus the worker's next steps if it added any).` : '';
+  queueNotice(p.session_id, `[agent-companion] subagent context: ${who} ${parts.join(' and ')}; ${told}.${recLine} `
     + 'If it returned "DONE: partial, handoff at <path>", start a fresh worker on the same rung from that file (not a resume); otherwise brief ONE fresh same-rung worker with the whole remaining build scope (code, tests, fixes, landing), told to read only what the handoff or brief names; never split the remaining build across several writers. Review stays its own separate agent. Row in subagent-context.jsonl.');
 }
 
@@ -143,7 +147,8 @@ function handoffStopGuard(p, path) {
   if (!sig || typeof sig.ctx !== 'number' || sig.ctx < soft) return null;
   if (handoffFileWritten(path) || !claimOnce(`handoff-end-block-${p.agent_id}`)) return null;
   appendLog(HANDOFF_LOG, handoffRow(p, sig, 'soft', 'end-block', soft));
-  return { decision: 'block', reason: endGuardText(noticeVariant(readBrief(path), p.agent_type)) };
+  const brief = readBrief(path);
+  return { decision: 'block', reason: endGuardText(noticeVariant(brief, p.agent_type), existingAutoHandoff(p, brief)) };
 }
 
 try {

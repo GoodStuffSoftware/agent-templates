@@ -258,10 +258,15 @@ export function subagentNoticeText(kinds, threshold, variant = 'writer', info = 
   }
   const ctx = Number.isFinite(info.ctx) ? info.ctx : threshold;
   const hard = Number(info.hard) > 0 ? Number(info.hard) : 0;
-  const lead = `[agent-companion] ${kinds.includes('compaction') ? 'You just compacted. ' : ''}Context at ${kTokens(ctx)}${hard ? `, limit ${kTokens(hard)}` : ''}: finish the current step, `;
+  const ctxHead = `[agent-companion] ${kinds.includes('compaction') ? 'You just compacted. ' : ''}Context at ${kTokens(ctx)}${hard ? `, limit ${kTokens(hard)}` : ''}: `;
+  const lead = `${ctxHead}finish the current step, `;
+  // 0.31.67: the plugin has already written the record (brief, git state, edited files, test runs, last messages): the worker only adds next steps.
+  const auto = typeof info.auto === 'string' && info.auto && !/[\r\n`]/.test(info.auto) ? info.auto : '';
   if (variant === 'readonly') {
+    if (auto) return `${ctxHead}the record is at ${auto}; append at most 10 lines of findings and what is left under its heading, and return "${HANDOFF_RETURN.replace('<path>', auto)}".`;
     return `${lead}write your findings so far to your detail file (or the plan file your brief names) and return them with what is left; you edit nothing in the repo, so there is nothing to hand off but the findings.`;
   }
+  if (auto) return `${ctxHead}the record is at ${auto}; append at most 10 lines of next steps under its heading, push anything safe, and return "${HANDOFF_RETURN.replace('<path>', auto)}".`;
   // 0.31.66: the handoff file starts with the worker's own transcript path, so a successor can search it instead of asking.
   const tr = typeof info.transcript === 'string' && info.transcript && !/[\r\n`]/.test(info.transcript)
     ? ` Put the line \`transcript: ${info.transcript}\` at the top of the handoff file (your own transcript: the next worker searches it instead of asking you).` : '';
