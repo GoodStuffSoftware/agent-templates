@@ -43,7 +43,7 @@ export { resourceStatus, formatResourceStatus, acquireResources, reserveResource
 
 const SELF = fileURLToPath(import.meta.url);
 const USAGE = [
-  'usage: resource-queue.mjs run --resource box:N [--resource <name>[:N]] [--class <id>] [--ram 4G] [--label <text>] [--max-wait <s>] [--group <name>] [--bind-pid <pid>] [--shell bash|powershell] -- <cmd...>',
+  'usage: resource-queue.mjs run [--resource box:N (default box:1)] [--resource <name>[:N]] [--class <id>] [--ram 4G] [--label <text>] [--max-wait <s>] [--group <name>] [--bind-pid <pid>] [--shell bash|powershell] -- <cmd...>',
   '       resource-queue.mjs run --resource <name> --bind-pid <pid>          (hold for a running daemon, no command)',
   '       resource-queue.mjs reserve <resource> --for <group> --until <30m|2h|14:30|ISO> [--reason <text>]    (at most 4 h)',
   '       resource-queue.mjs unreserve <resource> [--for <group>]',
@@ -110,7 +110,7 @@ export function buildRequest({ resources = [], ram = null, cls = null }, rules, 
   if (seenBox) box = seenBox.units;
   for (const r of resources) if (r.name !== BOX) named[r.name] = r.units;
   if (ram !== null) ramMb = ram;
-  if (!box && !Object.keys(named).length) throw new Error('nothing to wait for: give --resource box:N, --resource <name> or --class <id>');
+  if (!box && !Object.keys(named).length) box = 1; // nothing given: one unit of the box, the one invocation workers keep guessing
   const idle = ruleOf(rules, 'idle');
   const lim = limitsFor(rules, { kind: 'run', units: box, resources: named, limits });
   const monitored = Boolean(idle && idle.enabled !== false && (idle.appliesTo ?? ['run']).includes('run') && lim.idleMs);
@@ -653,7 +653,7 @@ export async function cli(argv, io = {}) {
     return 2;
   } catch (e) {
     err(`resource-queue: ${e.message}`);
-    err(USAGE);
+    err(cmd === 'run' ? USAGE.split(/\r?\n/)[0] : USAGE); // a run mistake: the one correct invocation, one line
     return 2;
   }
 }

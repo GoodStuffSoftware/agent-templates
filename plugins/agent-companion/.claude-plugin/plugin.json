@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.65",
+  "version": "0.31.66",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -719,6 +719,12 @@
       "description": "Rewrite a known long-running Bash command (test, build, install) so its full output goes to a file and only the tail plus that file's path returns to context. Exit code and failures are preserved; short output prints in full; piped, redirected, backgrounded, watch-mode and git commands are never touched. Off = commands run exactly as written. See docs/adr/0004-bash-output-tail.md.",
       "default": true
     },
+    "diff_cap": {
+      "type": "boolean",
+      "title": "Diff cap",
+      "description": "Rewrite a Bash git diff, git show or git log -p call so one call returns at most 400 lines of diff: more goes to a file and the stat, the first 300 lines and the file path come back to read by range. Exit status is kept. Stat, name-only, piped, redirected and background calls are never touched. Applies only in the permission modes of bash_tail_permission_modes (default bypassPermissions): in other modes an allow rule stops matching the rewritten command. Off = diffs print as written.",
+      "default": true
+    },
     "git_brief": {
       "type": "boolean",
       "title": "Git brief",
@@ -1094,13 +1100,19 @@
     "subagent_context_notice_high_tokens": {
       "type": "number",
       "title": "Subagent context notice: tokens (handoff line, higher rungs)",
-      "description": "The handoff line for ac-sonnet-high, ac-sonnet-xhigh and the ac-opus-* rungs (the lower rungs keep subagent_context_notice_tokens). Our value, shipped default 130000 since 0.31.65: these rungs carry more per step and their calls between 110K and 130K were still productive in the 2026-11 long-run sample; the hard stop stays at subagent_context_hard_tokens. 0 or less falls back to subagent_context_notice_tokens. Raise or lower it for your own workers.",
+      "description": "The handoff line for ac-sonnet-high and ac-sonnet-xhigh (the ac-opus-* rungs use subagent_context_notice_opus_tokens since 0.31.66; the lower rungs keep subagent_context_notice_tokens). Our value, shipped default 130000 since 0.31.65: these rungs carry more per step and their calls between 110K and 130K were still productive in the 2026-11 long-run sample; the hard stop stays at subagent_context_hard_tokens. 0 or less falls back to subagent_context_notice_tokens. Raise or lower it for your own workers.",
       "default": 130000
+    },
+    "subagent_context_notice_opus_tokens": {
+      "type": "number",
+      "title": "Subagent context notice: tokens (handoff line, opus rungs)",
+      "description": "The handoff line for the ac-opus-* rungs, overriding subagent_context_notice_high_tokens for them. Our value, shipped default 120000 since 0.31.66: an opus planner grew 40K in 6.5 minutes and overran the 20K gap between a 130K line and the 150K hard stop. 0 or less falls back to subagent_context_notice_high_tokens. Raise or lower it for your own workers.",
+      "default": 120000
     },
     "subagent_context_warn_tokens": {
       "type": "number",
       "title": "Subagent context warning: tokens",
-      "description": "Once per worker, below its handoff line: the worker is told to keep its <task>-handoff.md current so a handoff at any moment loses nothing. Our value, shipped default 110000 since 0.31.65. It shows only for a rung whose handoff line is higher (the higher rungs, 130000); where the two lines coincide only the handoff notice fires. 0 = no warning.",
+      "description": "Once per worker, below its handoff line: the worker is told to keep its <task>-handoff.md current so a handoff at any moment loses nothing. Our value, shipped default 110000 since 0.31.65. It shows only for a rung whose handoff line is higher (the higher rungs, 130000 or 120000 for the opus rungs); where the two lines coincide only the handoff notice fires. 0 = no warning.",
       "default": 110000
     },
     "subagent_ceiling_tokens": {

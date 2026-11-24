@@ -47,7 +47,8 @@ const pre = (lead, extra = {}) => ({
   agent_id: AGENT, agent_type: 'ac-sonnet-high', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 'toolu_1', ...extra,
 });
 const run = (lead, env = ON, extra = {}) => runHook('hooks/subagent-context.mjs', pre(lead, extra), { env });
-const ctxText = (r) => r.json?.hookSpecificOutput?.additionalContext || '';
+const noTranscript = (s) => String(s).replace(/ Put the line `transcript: [^`]*` at the top of the handoff file .*$/m, ''); // 0.31.66 sentence, pinned in subagent-context.test.mjs
+const ctxText = (r) => noTranscript(r.json?.hookSpecificOutput?.additionalContext || '');
 const logged0 = () => rows()[0];
 const rows = () => readJsonl(join(telemetryDir(), 'context-ceiling.jsonl'));
 

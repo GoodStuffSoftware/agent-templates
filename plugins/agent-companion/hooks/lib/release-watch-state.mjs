@@ -4,6 +4,7 @@
 //   release-watch-run.json    the schedule for the newest install: T, version, due[], done[], prevT
 //   release-watch-flag.json   the open flag: flags[], notifiedAt, ackedAt, clearedAt, cooldown{}
 //   release-hold.json         the hold: { since, version, reason, flags, workers, clearedAt }
+//   release-hold-sessions.json  sessions shown the hold notice or refused by it: { holdSince, sessions[], clearedAt, noticed{} }
 //   release-watch-checks.jsonl  one row per check and per clear
 // AGENT_COMPANION_FAKE_NOW moves the clock for tests. Nothing here throws.
 
@@ -11,6 +12,17 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync, re
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { stateDir, opt } from './context.mjs';
+import { createRequire } from 'node:module';
+
+// Every read-modify-write of release-hold-sessions.json and release-hold-message-pending.json runs under the shared lock helper
+// (lib/file-lock.mjs): a lead's noteHeld and a worker's denied-call noteHeld, or two clears, would otherwise lose one update.
+// Fails open: a lock not taken in 1.5 s runs the write unlocked.
+// The helper loads on the first locked write, not at import: every spawn imports this module for the hold check, and a plain spawn must not load the lock helper (tests/premium-window-lock.test.mjs).
+let lockHelper;
+const locked = (file, fn) => {
+  if (!lockHelper) { try { lockHelper = createRequire(import.meta.url)('./file-lock.mjs').withFileLock; } catch { lockHelper = (_f, f) => f(); } }
+  return lockHelper(`${file}.lock`, fn, { waitMs: 1500, staleMs: 5000, failOpen: true });
+};
 
 export const COOLDOWN_MS = 4 * 3600e3;
 export const WORSEN_FACTOR = 2;
@@ -29,6 +41,8 @@ export const paths = () => {
     hold: join(d, 'release-hold.json'),
     checks: join(d, 'release-watch-checks.jsonl'),
     standing: join(d, 'release-watch-standing.json'),
+    heldSessions: join(d, 'release-hold-sessions.json'),
+    messagePending: join(d, 'release-hold-message-pending.json'),
   };
 };
 
@@ -280,7 +294,8 @@ export function confirmCandidates({ at = now(), readTail = defaultTail } = {}) {
       if (held && !c.clear) { keep.push(c); continue; }
       const ct = Date.parse(c.at);
       if (matchHumanPrompt(c.transcriptPath, c.sha, ct - MATCH_BEFORE_MS, ct + MATCH_AFTER_MS, readTail)) {
-        if (held) { clear({ by: 'prompt', at }); return { signal: HUMAN_SIGNAL.transcript, cleared: true }; }
+        // The lift records the sessions to message (clear -> markHoldCleared, owed); the next lead prompt claims them (takeOwedMessages).
+        if (held) { const lifted = clear({ by: 'prompt', at }); return { signal: HUMAN_SIGNAL.transcript, cleared: true, heldSessions: lifted.heldSessions }; }
         return ackWrite(f, { session: c.session, promptAt: ct, confirmedAt: at, signal: HUMAN_SIGNAL.transcript });
       }
       if (at - ct > ttl) appendRow({ at: iso(at), event: 'ack-rejected', session: c.session, reason: 'no human record' });
@@ -364,8 +379,9 @@ export function maybeHold({ holdMinutes, at = now() } = {}) {
 // Writes the cleared state first (atomic temp + rename) and checks it by reading it back; the file delete is best effort.
 // The hold reader honours clearedAt, so a failed delete cannot leave the hold stuck or bring it back.
 export function clear({ by = 'operator', at = now() } = {}) {
-  const out = { flagCleared: false, holdCleared: false };
+  const out = { flagCleared: false, holdCleared: false, heldSessions: [] };
   try {
+    out.heldSessions = withLocalIds(heldSessions());
     const f = readFlag();
     if (f && !f.clearedAt) {
       writeJson(paths().flag, { ...f, clearedAt: iso(at), clearedBy: by, cooldown: answerLevels(f, at, f.cooldown) });
@@ -381,10 +397,205 @@ export function clear({ by = 'operator', at = now() } = {}) {
     } else if (existsSync(paths().hold)) {
       try { unlinkSync(paths().hold); } catch { /* fail open */ }
     }
-    if (out.flagCleared || out.holdCleared) appendRow({ at: iso(at), event: 'clear', by, ...out });
+    if (out.holdCleared) markHoldCleared(at, by, out.heldSessions);
+    if (out.flagCleared || out.holdCleared) appendRow({ at: iso(at), event: 'clear', by, flagCleared: out.flagCleared, holdCleared: out.holdCleared, ...(out.holdCleared ? { clearedAt: iso(at), heldSessions: out.heldSessions } : {}) });
   } catch { /* fail open */ }
   return out;
 }
+
+// ---- sessions held by the hold ----
+// Every session shown the hold notice or refused by the hold is recorded (a lead by session id; a subagent by session id and agent id),
+// so the operator can message each one after the clear and each lead gets a one-time "cleared" notice on its next prompt.
+export const HELD_CAP = 200;
+const sessionKey = (x) => `${x.sessionId}|${x.agentId || ''}`;
+const readHeld = () => { const f = readJson(paths().heldSessions); return f && Array.isArray(f.sessions) ? f : null; };
+
+// p: the hook payload (session_id, cwd, transcript_path, agent_id). Fails open; false when not held or nothing to record.
+export function noteHeld(p, at = now()) {
+  try {
+    if (!p || !p.session_id || !isHoldActive()) return false;
+    const h = readHold();
+    return locked(paths().heldSessions, () => {
+      let f = readHeld();
+      if (!f || f.holdSince !== h.since || f.clearedAt) f = { holdSince: h.since, sessions: [], clearedAt: null, noticed: {} };
+      const rec = { sessionId: String(p.session_id), agentId: p.agent_id ? String(p.agent_id) : null, cwd: p.cwd || null, transcriptPath: p.transcript_path || null, firstSeen: iso(at), lastSeen: iso(at) };
+      const i = f.sessions.findIndex((x) => sessionKey(x) === sessionKey(rec));
+      if (i >= 0) f.sessions[i] = { ...f.sessions[i], cwd: rec.cwd || f.sessions[i].cwd, transcriptPath: rec.transcriptPath || f.sessions[i].transcriptPath, lastSeen: rec.lastSeen };
+      else f.sessions.push(rec);
+      f.sessions = capHeld(f.sessions);
+      return writeJson(paths().heldSessions, f);
+    });
+  } catch { return false; }
+}
+
+// Over the cap, subagent records go first (oldest lastSeen first): a lead that stopped is the one that needs its message.
+const byLastSeen = (a, b) => Date.parse(a.lastSeen) - Date.parse(b.lastSeen);
+export function capHeld(list, cap = HELD_CAP) {
+  if (list.length <= cap) return list;
+  const leads = list.filter((x) => !x.agentId).sort(byLastSeen).slice(-cap);
+  const room = cap - leads.length;
+  const subs = room > 0 ? list.filter((x) => x.agentId).sort(byLastSeen).slice(-room) : [];
+  return [...leads, ...subs].sort(byLastSeen);
+}
+
+// The sessions recorded for the hold now on ([] when none).
+export function heldSessions() {
+  try {
+    if (!isHoldActive()) return [];
+    const f = readHeld(); const h = readHold();
+    return f && f.holdSince === h.since && !f.clearedAt ? f.sessions : [];
+  } catch { return []; }
+}
+
+// ---- desktop session ids ----
+// The Claude desktop app keeps one JSON file per session under %APPDATA%/Claude/claude-code-sessions/<account>/<org>/local_<uuid>.json
+// ({ sessionId: "local_<uuid>", cliSessionId: <the Claude Code session id>, cwd, ... }). Read only. AGENT_COMPANION_DESKTOP_SESSIONS_DIR moves it for tests.
+export const desktopStoreDir = () => process.env.AGENT_COMPANION_DESKTOP_SESSIONS_DIR || (process.env.APPDATA ? join(process.env.APPDATA, 'Claude', 'claude-code-sessions') : null);
+
+// Map of Claude Code session id -> desktop session id (local_<uuid>); empty when the store is missing. Never throws.
+export function desktopSessionMap(dir = desktopStoreDir()) {
+  const m = new Map();
+  const walk = (d, depth) => {
+    let names; try { names = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of names) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) { if (depth < 3) walk(p, depth + 1); continue; }
+      if (!/^local_.+\.json$/.test(e.name)) continue;
+      const j = readJson(p);
+      if (j && typeof j.cliSessionId === 'string' && /^local_/.test(String(j.sessionId || ''))) m.set(j.cliSessionId, j.sessionId);
+    }
+  };
+  try { if (dir) walk(dir, 0); } catch { /* fail open */ }
+  return m;
+}
+
+// Each lead entry gets localSessionId (the desktop id, or null when the store has no such session). Subagent entries are left as they are.
+export function withLocalIds(list, map = desktopSessionMap()) {
+  return list.map((x) => (x.agentId ? x : { ...x, localSessionId: map.get(x.sessionId) || null }));
+}
+
+export const MESSAGE_LINE = 'Send each of these sessions a local message now: ';
+export const localIdsOf = (list) => list.filter((x) => !x.agentId && x.localSessionId).map((x) => x.localSessionId);
+
+// One text for `held` and `clear`: counts, one line per lead, then the local ids to message and the leads with no desktop id.
+export function heldText(list) {
+  if (!list.length) return 'held sessions: none recorded';
+  const leads = list.filter((x) => !x.agentId); const subs = list.filter((x) => x.agentId);
+  const lines = [`held sessions: ${leads.length} lead, ${subs.length} subagent`];
+  for (const x of leads) lines.push(`lead ${x.sessionId}  local ${x.localSessionId || 'unmapped'}  cwd ${x.cwd || '?'}  seen ${x.firstSeen} .. ${x.lastSeen}`);
+  const ids = localIdsOf(list);
+  const un = leads.filter((x) => !x.localSessionId);
+  if (ids.length) lines.push(`${MESSAGE_LINE}${ids.join(' ')}`);
+  if (un.length) lines.push(`No desktop session found for these (message by hand): ${un.map((x) => `${x.sessionId} (cwd ${x.cwd || '?'})`).join('; ')}`);
+  return lines.join('\n');
+}
+
+// ---- the local messages owed after a clear ----
+// Set by the PostToolUse hook on the clear (or the prompt that lifts the hold) for the session that ran it; the Stop hook reads it.
+// { [sessionId]: { ids[], offset (transcript size when set), blocked } }
+export function notePendingMessages(sessionId, transcriptPath, ids, at = now()) {
+  try {
+    if (!sessionId || !ids || !ids.length) return false;
+    let offset = 0; try { offset = statSync(transcriptPath).size; } catch { /* no transcript: scan from 0 */ }
+    return locked(paths().messagePending, () => {
+      const f = readJson(paths().messagePending) || {};
+      f[sessionId] = { ids: [...new Set(ids)], offset, blocked: false, at: iso(at) };
+      return writeJson(paths().messagePending, f);
+    });
+  } catch { return false; }
+}
+export const readPendingMessages = (sessionId) => { const f = readJson(paths().messagePending); return f && f[sessionId] ? f[sessionId] : null; };
+export function settlePendingMessages(sessionId, patch) {
+  try {
+    return locked(paths().messagePending, () => {
+      const f = readJson(paths().messagePending) || {};
+      if (!f[sessionId]) return false;
+      if (patch === null) delete f[sessionId]; else f[sessionId] = { ...f[sessionId], ...patch };
+      return writeJson(paths().messagePending, f);
+    });
+  } catch { return false; }
+}
+
+// The lift records who is owed a message (owed: ids = desktop ids of the leads, unmapped = leads with no desktop id, claimedBy = the lead that
+// was told to send them). Every path that lifts a hold goes through clear(), so the tick and a confirmed prompt record it like the CLI does.
+function markHoldCleared(at, by, list = []) {
+  locked(paths().heldSessions, () => {
+    const f = readHeld();
+    if (!f || f.clearedAt) return;
+    const leads = list.filter((x) => !x.agentId);
+    const owed = { ids: localIdsOf(list), unmapped: leads.filter((x) => !x.localSessionId).map((x) => ({ sessionId: x.sessionId, cwd: x.cwd || null })), claimedBy: null };
+    writeJson(paths().heldSessions, { ...f, clearedAt: iso(at), clearedBy: by, owed });
+  });
+}
+
+// The lead that claims the owed messages (a lead's next prompt, or the Bash hook that saw the CLI clear) is told to send them. Once only.
+// Returns { ids (minus the claimant's own), unmapped } or null (nothing owed, already claimed, still held, or older than OWED_TTL_MS).
+export const OWED_TTL_MS = 12 * 3600e3;
+export function takeOwedMessages(sessionId, at = now()) {
+  try {
+    if (!sessionId || isHoldActive()) return null;
+    return locked(paths().heldSessions, () => {
+      const f = readHeld();
+      const o = f && f.clearedAt && f.owed;
+      if (!o || o.claimedBy) return null;
+      if (at - Date.parse(f.clearedAt) > OWED_TTL_MS) return null;
+      if (!writeJson(paths().heldSessions, { ...f, owed: { ...o, claimedBy: String(sessionId), claimedAt: iso(at) } })) return null;
+      return { ids: withoutSelf(Array.isArray(o.ids) ? o.ids : [], sessionId), unmapped: (Array.isArray(o.unmapped) ? o.unmapped : []).filter((x) => x.sessionId !== sessionId) };
+    });
+  } catch { return null; }
+}
+
+// The sessions still owed a message after a clear nobody has claimed (for `release-watch.mjs held`); [] when none.
+export function owedSessions(at = now()) {
+  try {
+    if (isHoldActive()) return [];
+    const f = readHeld();
+    return f && f.clearedAt && f.owed && !f.owed.claimedBy && at - Date.parse(f.clearedAt) <= OWED_TTL_MS ? f.sessions : [];
+  } catch { return []; }
+}
+
+// The text a lead gets when it claims the owed messages: the send instruction for mapped leads, and the unmapped leads by Claude Code
+// session id (each still sees the cleared notice on its next prompt). '' when nothing is owed.
+export function owedText(o) {
+  if (!o) return '';
+  const parts = [];
+  if (o.ids.length) parts.push(clearInstruction(o.ids));
+  if (o.unmapped.length) parts.push(`These held leads have no desktop session to message (message by hand; each still sees the cleared notice on its next prompt): ${o.unmapped.map((x) => `${x.sessionId} (cwd ${x.cwd || '?'})`).join('; ')}.`);
+  return parts.join(' ');
+}
+
+// Mark a session as already told (the one whose prompt lifted the hold sees the lift line instead).
+export function markNoticed(sessionId, at = now()) {
+  try {
+    if (!sessionId) return false;
+    return locked(paths().heldSessions, () => {
+      const f = readHeld();
+      if (!f || !f.clearedAt) return false;
+      return writeJson(paths().heldSessions, { ...f, noticed: { ...(f.noticed || {}), [sessionId]: iso(at) } });
+    });
+  } catch { return false; }
+}
+
+// After a clear: once per recorded lead session, the line telling it to resume. null for any other session, a second call, or while held.
+export function clearedNotice(sessionId, at = now()) {
+  try {
+    if (!sessionId || isHoldActive()) return null;
+    const f = readHeld();
+    if (!f || !f.clearedAt) return null;
+    if (!f.sessions.some((x) => x.sessionId === sessionId && !x.agentId)) return null;
+    if (f.noticed && f.noticed[sessionId]) return null;
+    if (!markNoticed(sessionId, at)) return null; // not marked: never repeat
+    return `[agent-companion] The post-release hold was cleared at ${f.clearedAt} by the operator. Resume from your handoff or where you stopped.`;
+  } catch { return null; }
+}
+
+// What a held session is told to do. lead: stop and wait for the local message sent at the clear; subagent: write the handoff and stop; unknown caller: nothing extra.
+export function holdWaitText(kind) {
+  if (kind === 'lead') return ' Stop and wait: end your turn now. A local message arrives in this session when the hold clears; do not poll.';
+  if (kind === 'subagent') return ' Write your handoff and stop; your lead resumes you after the clear.';
+  return '';
+}
+const kindOf = (p) => (p && typeof p === 'object' ? (p.agent_id ? 'subagent' : 'lead') : null);
 
 // ---- standing health line ----
 // One line per day, only when the daily standing look has findings; the day it was shown is stored in the standing file (shownOn).
@@ -411,7 +622,7 @@ export function flagLine({ at = now() } = {}) {
       const ff = readFlag();
       const later = flagIsOpen(ff) ? ff.flags.filter((x) => x && x.name && !held.has(x.name)) : [];
       const laterTxt = later.length ? ` Later checks also flagged: ${later.map((x) => x.name + (x.detail ? ` (${x.detail})` : '')).join('; ')}.` : '';
-      return `[agent-companion] RELEASE HOLD since ${h.since}: ${h.reason}. New agents and heavy jobs are blocked and running workers hand off. Tell the operator now.${laterTxt} Only the operator lifts it, by saying "clear hold"; run \`node <plugin>/scripts/release-watch.mjs clear --by operator\` only after they have said so.`;
+      return `[agent-companion] RELEASE HOLD since ${h.since}: ${h.reason}. New agents and heavy jobs are blocked and running workers hand off. Tell the operator now.${laterTxt} Only the operator lifts it, by saying "clear hold"; run \`node <plugin>/scripts/release-watch.mjs clear --by operator\` only after they have said so.${holdWaitText('lead')}`;
     }
     const f = readFlag();
     if (!flagIsOpen(f) || f.ackedAt) return null;
@@ -431,12 +642,25 @@ export function flagLine({ at = now() } = {}) {
 
 // ---- the hold as seen by the guards ----
 // One message for every guard that refuses work while held. null when no hold (or on any read error: fail open).
-export function holdDenyMessage(what = 'new work') {
+export function holdDenyMessage(what = 'new work', p = null) {
   try {
     if (!isHoldActive()) return null;
+    noteHeld(p);
     const h = readHold() || {};
     const names = Array.isArray(h.flags) && h.flags.length ? h.flags.map((x) => x && x.name).filter(Boolean).join(', ') : 'unspecified';
     return `[agent-companion] A post-release hold is on since ${h.since || '?'} (release ${h.version || '?'}; flags: ${names}), so ${what} is refused. `
-      + 'Tell the operator at once. Only the operator lifts it, by saying "clear hold"; do not try to lift it yourself. The lead may still answer the operator; leases already granted keep running.';
+      + 'Tell the operator at once. Only the operator lifts it, by saying "clear hold"; do not try to lift it yourself. The lead may still answer the operator; leases already granted keep running.'
+      + holdWaitText(kindOf(p));
   } catch { return null; }
+}
+
+// ---- the lead's instruction after a clear ----
+export function clearInstruction(ids) {
+  return `[agent-companion] The hold is cleared. ${MESSAGE_LINE}${ids.join(' ')}. Send each one SendMessage {to: "<id>"} or mcp__ccd_session_mgmt__send_message {session_id: "<id>"} saying the hold is cleared and it should resume from its handoff. A stopped session never sees another prompt, so this message is how it wakes; your turn is blocked once if any of them is missing.`;
+}
+
+// The ids minus the session that ran the clear (it needs no message to itself).
+export function withoutSelf(ids, sessionId) {
+  const own = desktopSessionMap().get(sessionId);
+  return own ? ids.filter((x) => x !== own) : ids;
 }

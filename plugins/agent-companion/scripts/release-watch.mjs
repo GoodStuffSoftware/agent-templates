@@ -4,7 +4,8 @@
 //   release-watch.mjs tick                    run the checks that are due (a local-services job runs this every 10 min);
 //                                             also writes the hold when a flag went unanswered. Exits 0 always.
 //   release-watch.mjs status [--all] [--json]  print the schedule, each check's verdict and metrics, the flag and the hold
-//   release-watch.mjs clear [--by <who>]      clear the flag and lift the hold
+//   release-watch.mjs clear [--by <who>] [--json]  clear the flag and lift the hold; prints the sessions the hold held (message each)
+//   release-watch.mjs held [--json]          list the sessions shown the hold notice or refused by it
 //   release-watch.mjs check --since <ISO> [--base-from <ISO>] [--days 7] [--sample 500]   one-shot, prints JSON + flags
 //
 // Schedule: +1, +2, +4, +8, +12, +16, +20, +24 h after the install time (installed_plugins.json lastUpdated) of the
@@ -70,6 +71,10 @@ export const NON_CONTRACT_TYPES = new Set(['Explore', 'Plan', 'web-fetch', 'clau
 export const PROBE_RE = /^[\s\S]{0,400}?hook verification spawn, not real work/i;
 const STATUS_RE = /STATUS:\s*(done|partial|blocked)/i;
 const STATUS_LINE_RE = /^[\s>*_`#-]*STATUS:\s*(done|partial|blocked)/im;
+// Claude Code's own PreToolUse blocks arrive in the SAME transcript shape as a hook's ("PreToolUse:Edit hook error: <text>", the record's
+// permissionDecision says source hook, and no attachment names the command), so the record cannot tell ours from the harness's; the harness
+// messages are known by their wording and are never counted as a hook error or a new signature (the worktree-isolation block is the one seen).
+export const HARNESS_HOOK_ERROR_RE = /^This session is running in an isolated git workt/i; // the signature keeps 48 characters, which end inside "worktree"
 export const HARNESS_REFUSAL_RE =/isolated in the worktree|too complex to verify|names git in a form too complex|changes directory to the shared tree/i;
 
 // Queue clears that mean something went wrong: a lease whose holder died or went stale, a holder past the ceiling, a stuck release.
@@ -141,7 +146,7 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
   for (const fp of pick) {
     let L; try { L = readFileSync(fp, 'utf8').split('\n'); } catch { continue; }
     let first = null; let u = 0; let peak = 0; let hook = 0; let terr = 0; let api = null; let txt = ''; let stLine = null; let probe = false; let seenUser = false;
-    const bashIds = new Set(); let bash = 0; let refusal = 0; let bashFail = 0; const sigs = [];
+    const bashIds = new Set(); const resIds = new Set(); let bash = 0; let refusal = 0; let bashFail = 0; const sigs = [];
     for (const l of L) {
       if (!l) continue; let o; try { o = JSON.parse(l); } catch { continue; }
       if (o.timestamp && !first) first = Date.parse(o.timestamp);
@@ -156,6 +161,8 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
       }
       if (o.isApiErrorMessage) api = o.apiError || 'api';
       if (Array.isArray(c)) for (const b of c) {
+        // Transcripts repeat a tool_result inside api-request-blob records: one tool_use_id counts once, for every signature below.
+        if (b && b.type === 'tool_result' && b.tool_use_id) { if (resIds.has(b.tool_use_id)) continue; resIds.add(b.tool_use_id); }
         if (b.type === 'tool_use' && b.name === 'Bash' && o.type === 'assistant' && b.id && !bashIds.has(b.id)) { bashIds.add(b.id); if (!inHold(Date.parse(o.timestamp))) bash++; }
         if (b.type === 'tool_result' && b.is_error && bashIds.has(b.tool_use_id) && !inHold(Date.parse(o.timestamp))) {
           const t = typeof b.content === 'string' ? b.content : JSON.stringify(b.content);
@@ -169,7 +176,7 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
         if (b.type === 'tool_result' && b.is_error) {
           terr++; const t = typeof b.content === 'string' ? b.content : JSON.stringify(b.content);
           const m = /^(PreToolUse:[\w:]+) hook error: (.{0,48})/.exec(t);
-          if (m && !/post-release hold/i.test(t) && !inHold(Date.parse(o.timestamp))) { hook++; sigs.push(`${m[1]} ${m[2]}`); }
+          if (m && !/post-release hold/i.test(t) && !HARNESS_HOOK_ERROR_RE.test(m[2]) && !inHold(Date.parse(o.timestamp))) { hook++; sigs.push(`${m[1]} ${m[2]}`); }
         }
       }
     }
@@ -198,6 +205,12 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
     };
     add('denial', count('denials', (r) => `${r.guard}/${r.outcome}`));
     add('handoff', count('handoff-limit', (r) => `${r.limit}/${r.action}`));
+    {
+      // Hard denials as distinct workers (agent id, else session id): one worker refused 8 times is one worker.
+      const hw = { since: new Set(), base: new Set() };
+      for (const r of rd('handoff-limit')) { const w = win(r, vf); if (!w || r.limit !== 'hard' || r.action !== 'deny') continue; hw[w].add(String(r.agent_id || r.session_id || 'row')); }
+      out.handoffHardWorkers = { since: hw.since.size, base: hw.base.size };
+    }
     add('ctx', count('subagent-context', (r) => `${r.kind}/${r.phase}`));
     add('gate', count('resource-gate', (r) => r.event));
     add('wait', count('worker-wait', (r) => `${r.kind}/${r.action}`, (r) => r.action === 'deny'));
@@ -361,7 +374,11 @@ export function evaluate(m, opts = {}) {
     const cd = m.queueDenied ? m.queueDenied.since.cdPrefix : 0;
     add('queue-denied', { value: per(gd, sp.since), limit: +lim.toFixed(1), base: per(gb, sp.base), n: n30, minN: FL.spawns, events: gd, minEv: TH.gateDeniedMinEv, over: per(gd, sp.since) > lim, unit: '/100', detail: `${gd} denied${cd ? `, ${cd} cd-prefix` : ''}` });
   }
-  per100(sumTel(/^handoff:hard\/deny$/), TH.handoffHardMinEv, 'handoff-hard-deny', TH.handoffHardPer100, `${sumTel(/^handoff:hard\/deny$/)} hard denials`, sumTelBase(/^handoff:hard\/deny$/));
+  {
+    // Distinct workers when the analysis carries them (older stored analyses only have rows); the row count stays in the detail.
+    const hr = sumTel(/^handoff:hard\/deny$/); const hrb = sumTelBase(/^handoff:hard\/deny$/); const hw = m.handoffHardWorkers;
+    per100(hw ? hw.since : hr, TH.handoffHardMinEv, 'handoff-hard-deny', TH.handoffHardPer100, hw ? `${hw.since} workers hit a hard denial (${hr} denials)` : `${hr} hard denials`, hw ? hw.base : hrb);
+  }
   per100(sumTel(/^handoff:.*\/end-block$/), TH.handoffEndBlockMinEv, 'handoff-end-block', TH.handoffEndBlockPer100, `${sumTel(/^handoff:.*\/end-block$/)} end-blocks`, sumTelBase(/^handoff:.*\/end-block$/));
   per100(sumTel(/^struggle:/), TH.struggleMinEv, 'struggle', TH.struggle100, `${sumTel(/^struggle:/)} fired`, sumTelBase(/^struggle:/));
   per100(sumTel(/^wait:/), TH.pollMinEv, 'polling-waste', TH.pollDeny100, `${sumTel(/^wait:/)} worker-wait denials`, sumTelBase(/^wait:/));
@@ -727,12 +744,17 @@ const metricLine = (x) => {
 const checkRows = (anchor) => S.readRows().filter((r) => r.event === 'check' && (anchor == null || Date.parse(r.chain || r.T) === anchor));
 const verdictWord = (r) => String(r.verdict || (r.flags && r.flags.length ? 'flag' : 'clean')).toUpperCase();
 
-export function status(at = S.now(), { all = false, json = false } = {}) {
-  const rs = migrateRun(S.readJson(S.paths().run)); const flag = S.readFlag(); const hold = S.readHold();
+export function status(at = S.now(), { all = false, json = false, installed = null } = {}) {
+  const rs = migrateRun(S.readJson(S.paths().run));
+  // Read-only: an install the 10-minute job has not armed yet (tick is the only thing that arms).
+  const inst = newestInstall(installed || S.readJson(join(claudeDir(), 'plugins', 'installed_plugins.json')));
+  let pending = null;
+  if (inst && !(rs && rs.releases.some((r) => r.T === inst.T))) pending = { version: inst.version, T: iso(inst.T), armBy: iso(Math.floor(Math.max(at, inst.T) / 600e3) * 600e3 + 600e3) }; const flag = S.readFlag(); const hold = S.readHold();
   const rows = rs ? checkRows(rs.baseAnchor) : [];
   const standing = S.readJson(S.paths().standing);
-  if (json) return JSON.stringify({ run: rs, checks: rows.slice(-20), flag: S.flagIsOpen(flag) ? flag : null, hold: hold && !hold.clearedAt ? hold : null, standing: standing || null }, null, 1);
+  if (json) return JSON.stringify({ run: rs, checks: rows.slice(-20), flag: S.flagIsOpen(flag) ? flag : null, hold: hold && !hold.clearedAt ? hold : null, standing: standing || null, pending }, null, 1);
   const lines = [];
+  if (pending) lines.push(`release ${pending.version || '?'} installed ${pending.T}: not armed yet; the 10-minute job arms it by ${hhmm(Date.parse(pending.armBy))}`);
   if (!rs) lines.push('no watch armed (no tick has seen an install yet)');
   else {
     const lastRow = rows[rows.length - 1];
@@ -778,7 +800,19 @@ export function main(A = process.argv.slice(2)) {
   try {
     if (cmd === 'tick') { const r = tick(); if (A.includes('--json')) console.log(JSON.stringify(r)); return 0; }
     if (cmd === 'status') { console.log(status(S.now(), { all: A.includes('--all'), json: A.includes('--json') })); return 0; }
-    if (cmd === 'clear') { const r = S.clear({ by: argOf(A, '--by') || 'operator' }); console.log(r.flagCleared || r.holdCleared ? `cleared (flag ${r.flagCleared}, hold ${r.holdCleared})` : 'nothing to clear'); return 0; }
+    if (cmd === 'held') {
+      // While held: the sessions recorded so far. After a lift nobody has claimed yet (the tick lifted it, say): the sessions still owed a message.
+      const active = S.isHoldActive();
+      const l = S.withLocalIds(active ? S.heldSessions() : S.owedSessions());
+      console.log(A.includes('--json') ? JSON.stringify({ held: active, owed: !active && l.length > 0, sessions: l }, null, 1) : (!active && l.length ? 'hold cleared; these sessions are still owed a local message:\n' : '') + S.heldText(l));
+      return 0;
+    }
+    if (cmd === 'clear') {
+      const r = S.clear({ by: argOf(A, '--by') || 'operator' });
+      const head = r.flagCleared || r.holdCleared ? `cleared (flag ${r.flagCleared}, hold ${r.holdCleared})` : 'nothing to clear';
+      console.log(A.includes('--json') ? JSON.stringify({ flagCleared: r.flagCleared, holdCleared: r.holdCleared, heldSessions: r.heldSessions }, null, 1) : r.holdCleared ? `${head}\n${S.heldText(r.heldSessions)}` : head);
+      return 0;
+    }
     if (cmd === 'check') {
       const T = Date.parse(argOf(A, '--since')); if (!(T > 0)) { console.error('check needs --since <ISO>'); return 2; }
       const bf = argOf(A, '--base-from');
@@ -787,7 +821,7 @@ export function main(A = process.argv.slice(2)) {
       const verdict = e.verdict === 'flag' ? `FLAG ${e.flags.map((x) => x.name).join(', ')}` : e.verdict;
       console.log(JSON.stringify({ ...m, verdict, flags: e.flags, metrics: e.metrics }, null, 1)); return 0;
     }
-    console.error('usage: release-watch.mjs tick | status [--all] [--json] | clear [--by <who>] | check --since <ISO> [--base-from <ISO>] [--days N] [--sample N]');
+    console.error('usage: release-watch.mjs tick | status [--all] [--json] | clear [--by <who>] [--json] | held [--json] | check --since <ISO> [--base-from <ISO>] [--days N] [--sample N]');
     return 2;
   } catch (e) { console.error(String(e && e.message || e)); return cmd === 'tick' ? 0 : 1; }
 }

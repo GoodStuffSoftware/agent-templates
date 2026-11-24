@@ -246,3 +246,50 @@ test('a real run: the regular pass holds plain workers, the heavy pass holds hea
     assert.deepEqual(readdirSync(ledger).filter((n) => /^(lease|ticket)-/.test(n)), [], 'released at the end');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+// ---------------------------------------------------------------- shards
+
+test('resolveShard: <i>/<n> parses; unset is no shard; a malformed value warns and shards nothing', async () => {
+  const { resolveShard, shardFiles, SHARD_ENV } = await import('../ci-local.mjs');
+  assert.equal(resolveShard({}), null);
+  assert.equal(resolveShard({ [SHARD_ENV]: '  ' }), null);
+  assert.deepEqual(resolveShard({ [SHARD_ENV]: '2/3' }), { index: 2, total: 3 });
+  for (const bad of ['0/3', '4/3', '1/0', '2', 'a/b', '1/2/3', '-1/3']) {
+    assert.match(resolveShard({ [SHARD_ENV]: bad }).warning, /ignoring CI_LOCAL_SHARD/, bad);
+  }
+  const files = Array.from({ length: 10 }, (_, i) => `f${i}`);
+  assert.deepEqual(shardFiles(files, null), files);
+  const parts = [1, 2, 3].map((index) => shardFiles(files, { index, total: 3 }));
+  assert.deepEqual(parts.map((p) => p.length), [4, 3, 3]);
+  assert.deepEqual(parts.flat().sort(), [...files].sort(), 'every file lands in exactly one shard');
+});
+
+test('runBudgetedTests with CI_LOCAL_SHARD: each lane is sharded on its own, and an empty shard runs nothing', () => {
+  const files = ['t/a.test.mjs', 't/b.test.mjs', 't/c.test.mjs', 't/git-brief.test.mjs', 't/push-scan.test.mjs'];
+  const seen = [];
+  for (const index of [1, 2, 3]) {
+    const b = fakeBudget();
+    const s = createBudgetSession({ acquireLease: b.acquireLease, cfg: { heavyMax: 2, sliceFactor: 0 }, log: () => {} });
+    const runs = [];
+    const logs = [];
+    const r = runBudgetedTests({
+      files, cwd: '.', env: { CI_LOCAL_SHARD: `${index}/3` }, ciParity: false, budget: s, concurrency: 4,
+      run: (a) => { runs.push(...a.files); return { status: 0, outcome: 'pass', counts: null, flakyFiles: [], failedFiles: [] }; },
+      log: (m) => logs.push(m),
+    });
+    assert.equal(r.outcome, 'pass');
+    assert.match(logs.join('\n'), new RegExp(`shard ${index}/3`));
+    seen.push(...runs);
+  }
+  assert.deepEqual(seen.sort(), [...files].sort(), 'the three shards cover every file once');
+
+  let ran = false;
+  const b = fakeBudget();
+  const s = createBudgetSession({ acquireLease: b.acquireLease, cfg: { heavyMax: 2, sliceFactor: 0 }, log: () => {} });
+  const r = runBudgetedTests({
+    files: ['t/a.test.mjs'], cwd: '.', env: { CI_LOCAL_SHARD: '2/3' }, ciParity: false, budget: s, concurrency: 4,
+    run: () => { ran = true; return { status: 1 }; }, log: () => {},
+  });
+  assert.equal(ran, false);
+  assert.equal(r.outcome, 'pass');
+});

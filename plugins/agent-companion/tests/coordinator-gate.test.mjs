@@ -360,7 +360,7 @@ test('rule: the standing rule appears in a child session only, and not with the 
     const child = text(start(CHILD_CLI));
     assert.ok(child.includes(STANDING_RULE_TEXT), 'child gets the rule');
     assert.match(child, /QUESTION: .*BLOCKED: .*DONE: .*CHANGE: .*FINDING: .*ANSWER: /s);
-    assert.match(child, /task card if you use one, otherwise your task list; never message the coordinator just to report progress or acknowledge/);
+    assert.match(child, /task card or task list; never message the coordinator to report progress or acknowledge/);
     assert.ok(!text(start(COORD_CLI)).includes(STANDING_RULE_TEXT), 'a top-level session does not');
     assert.ok(!text(start('cli-unknown')).includes(STANDING_RULE_TEXT), 'an unknown session does not');
     assert.ok(!text(start(CHILD_CLI, {}, { agent_id: 'agent-1' })).includes(STANDING_RULE_TEXT), 'a subagent of a child does not');

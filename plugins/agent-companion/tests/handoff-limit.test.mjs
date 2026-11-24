@@ -25,6 +25,7 @@ const turn = (id, ctx) => `${JSON.stringify({
 const user = (t) => `${JSON.stringify({ type: 'user', message: { role: 'user', content: t } })}\n`;
 const toolCall = (name, file, id = 'toolu_w1') => `${JSON.stringify({ type: 'assistant', requestId: `r_${id}`, message: { id: `m_${id}`, model: 'claude-sonnet-5-5', usage: { input_tokens: 5, cache_read_input_tokens: 119000, cache_creation_input_tokens: 1000 }, content: [{ type: 'tool_use', id, name, input: { file_path: file, content: 'x' } }] } })}\n`;
 const toolResult = (id, isError = false) => `${JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: isError, content: isError ? 'File has not been read yet' : 'ok' }] } })}\n`;
+const bashCall = (command, id = 'toolu_b1') => `${JSON.stringify({ type: 'assistant', requestId: `r_${id}`, message: { id: `m_${id}`, model: 'claude-sonnet-5-5', usage: { input_tokens: 5, cache_read_input_tokens: 119000, cache_creation_input_tokens: 1000 }, content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }] } })}\n`;
 const writeCall = (file) => toolCall('Write', file) + toolResult('toolu_w1');
 
 function layout(fx) {
@@ -41,7 +42,7 @@ const pre = (lead, tool = 'Bash', input = { command: 'ls' }, extra = {}) => ({
   agent_id: AGENT, agent_type: 'ac-sonnet-high', tool_name: tool, tool_input: input, tool_use_id: 'toolu_1', ...extra,
 });
 const run = (lead, tool, input, env = ON, extra = {}) => runHook('hooks/subagent-context.mjs', pre(lead, tool, input, extra), { env });
-const text = (r) => r.json?.hookSpecificOutput?.additionalContext || '';
+const text = (r) => String(r.json?.hookSpecificOutput?.additionalContext || '').replace(/ Put the line `transcript: [^`]*` at the top of the handoff file .*$/m, ''); // 0.31.66 sentence, pinned in subagent-context.test.mjs
 const denied = (r) => r.json?.hookSpecificOutput?.permissionDecision === 'deny';
 const reason = (r) => r.json?.hookSpecificOutput?.permissionDecisionReason || '';
 const rows = () => readJsonl(join(telemetryDir(), 'handoff-limit.jsonl'));
@@ -310,7 +311,9 @@ test('unit: gitOnly, isHandoffPath, handoffReturnPath, finalIsComplete', () => {
     assert.equal(handoffReturnPath(`x\nDONE: partial, handoff at ${f}\n`), f, 'a real last line with an existing file');
     assert.equal(handoffReturnPath('x\nDONE: partial, handoff at a-handoff.md', d), 'a-handoff.md', 'relative path resolves against cwd');
     assert.equal(handoffReturnPath(`DONE: partial, handoff at ${join(d, 'gone-handoff.md').replace(/\\/g, '/')}`), null, 'a file that is not there');
-    assert.equal(handoffReturnPath(`DONE: partial, handoff at ${f}\nand then some more text`), null, 'not the final line');
+    assert.equal(handoffReturnPath(`DONE: partial, handoff at ${f}\nand then some more text`), f, '0.31.66: the line may be anywhere in the final message');
+    assert.equal(handoffReturnPath(`DONE: partial, handoff at ${f}\nKnowledge check: none needed\n`), f, 'followed by a trailing line');
+    assert.equal(handoffReturnPath(`DONE: partial, handoff at ${join(d, 'gone-handoff.md').replace(/\\/g, '/')}\nmore`), null, 'anywhere, but the file must exist');
     assert.equal(handoffReturnPath('Rule: "DONE: partial, handoff at <path>" gets a fresh same-rung continuation, not a resume'), null, 'the injected rule text, mid-message');
     assert.equal(handoffReturnPath('x\nRule: "DONE: partial, handoff at <path>" gets a fresh same-rung continuation, not a resume'), null, 'the rule text as the last line');
   } finally { rmSync(d, { recursive: true, force: true }); }
@@ -420,6 +423,12 @@ test('handoffFileWritten: only a successful Write or Edit of a handoff .md count
       ['a Write of another file', toolCall('Write', '/w/notes.md') + toolResult('toolu_w1'), false],
       ['a Write of a source file with the word in its name', toolCall('Write', '/w/src/handoff.ts') + toolResult('toolu_w1'), false],
       ['a Write whose result is not in the tail yet', toolCall('Write', '/w/task-handoff.md'), true],
+      ['a Bash heredoc to a handoff file', bashCall('cat > /w/task-handoff.md <<EOF\nnotes\nEOF') + toolResult('toolu_b1'), true],
+      ['a Bash append', bashCall("echo 'more' >> /w/task-handoff.md") + toolResult('toolu_b1'), true],
+      ['a Bash tee -a', bashCall('printf x | tee -a "/w/out/task-handoff.md"') + toolResult('toolu_b1'), true],
+      ['a failed Bash write', bashCall('cat > /w/task-handoff.md <<EOF\nx\nEOF') + toolResult('toolu_b1', true), false],
+      ['a Bash cat of a handoff file', bashCall('cat /w/task-handoff.md') + toolResult('toolu_b1'), false],
+      ['a Bash write of another file', bashCall('echo x > /w/notes.md') + toolResult('toolu_b1'), false],
       ['nothing', user('go') + turn('r1', 1000), false],
       ['a garbled tail', 'not json "tool_use"\n{"type":"assistant","message":{"content":[{"type":"tool_use"', false],
     ];
@@ -478,16 +487,17 @@ test('0.31.65 lower rungs: no warn, the handoff notice at 110K', () => {
 
 test('0.31.65 higher rungs: one warn at 110K, silence to 130K, the handoff notice at 130K', () => {
   for (const agentType of ['ac-sonnet-high', 'ac-sonnet-xhigh', 'ac-opus-medium', 'ac-opus-high', 'agent-companion:ac-opus-max']) {
+    const line = /opus/.test(agentType) ? 120 : 130; // 0.31.66: the opus rungs hand off at 120K
     const fx = makeFixture();
     try {
       const { lead, agentFile } = layout(fx);
       assert.equal(at(lead, agentFile, 109000, agentType).stdout.trim(), '', `${agentType} at 109K`);
       const w = text(at(lead, agentFile, 111000, agentType));
-      assert.match(w, /^\[agent-companion\] Context at 111K \(handoff notice at 130K, hard stop at 150K\): keep your handoff file/, agentType);
+      assert.match(w, new RegExp(`^\\[agent-companion\\] Context at 111K \\(handoff notice at ${line}K, hard stop at 150K\\): keep your handoff file`), agentType);
       assert.equal(at(lead, agentFile, 112000, agentType).stdout.trim(), '', `${agentType}: the warn is once`);
-      assert.equal(at(lead, agentFile, 129000, agentType).stdout.trim(), '', `${agentType} between the lines`);
-      assert.match(text(at(lead, agentFile, 131000, agentType)), /^\[agent-companion\] Context at 131K, limit 150K: finish the current step/, agentType);
-      assert.deepEqual(rows().map((x) => [x.limit, x.action, x.tokens]), [['warn', 'warn', 111000], ['soft', 'notice', 131000]], agentType);
+      assert.equal(at(lead, agentFile, line * 1000 - 1000, agentType).stdout.trim(), '', `${agentType} between the lines`);
+      assert.match(text(at(lead, agentFile, line * 1000 + 1000, agentType)), new RegExp(`^\\[agent-companion\\] Context at ${line + 1}K, limit 150K: finish the current step`), agentType);
+      assert.deepEqual(rows().map((x) => [x.limit, x.action, x.tokens]), [['warn', 'warn', 111000], ['soft', 'notice', line * 1000 + 1000]], agentType);
     } finally { fx.cleanup(); }
   }
 });
@@ -518,8 +528,15 @@ test('0.31.65 the options override the defaults', () => {
   try {
     const { lead, agentFile } = layout(fy);
     // high 0 falls back to the lower line (110K): the handoff notice at 111K
-    assert.match(text(at(lead, agentFile, 111000, 'ac-opus-high', env({ [HI]: '0' }))), /Context at 111K, limit 150K/);
+    assert.match(text(at(lead, agentFile, 111000, 'ac-sonnet-high', env({ [HI]: '0' }))), /Context at 111K, limit 150K/);
   } finally { fy.cleanup(); }
+  const fo = makeFixture();
+  try {
+    const { lead, agentFile } = layout(fo);
+    // 0.31.66: an opus rung keeps its own line (120K) when the high option is 0 or less: no handoff notice at 111K, the notice at 121K
+    assert.doesNotMatch(text(at(lead, agentFile, 111000, 'ac-opus-high', env({ [HI]: '0' }))), /limit 150K/);
+    assert.match(text(at(lead, agentFile, 121000, 'ac-opus-high', env({ [HI]: '0' }))), /Context at 121K, limit 150K/);
+  } finally { fo.cleanup(); }
   const fz = makeFixture();
   try {
     const { lead, agentFile } = layout(fz);
@@ -539,7 +556,11 @@ test('0.31.65 threshold library: rung classes and lines', async () => {
   for (const t of ['ac-sonnet-high', 'ac-sonnet-xhigh', 'ac-opus-low', 'ac-opus-max', 'agent-companion:ac-opus-high']) assert.equal(lib.isHighRung(t), true, t);
   for (const t of ['ac-haiku', 'ac-sonnet-low', 'ac-sonnet-medium', 'general-purpose', '', undefined]) assert.equal(lib.isHighRung(t), false, String(t));
   assert.equal(lib.handoffThreshold('ac-sonnet-low'), 110000);
-  assert.equal(lib.handoffThreshold('ac-opus-high'), 130000);
+  assert.equal(lib.handoffThreshold('ac-opus-high'), 120000, '0.31.66: opus rungs hand off at 120K');
+  assert.equal(lib.handoffThreshold('agent-companion:ac-opus-max'), 120000);
+  assert.equal(lib.handoffThreshold('ac-sonnet-high'), 130000);
+  assert.equal(lib.handoffThreshold('ac-sonnet-xhigh'), 130000);
+  assert.equal(lib.warnThreshold('ac-opus-high'), 110000);
   assert.equal(lib.warnThreshold('ac-sonnet-low'), 0, 'warn equals the lower line: none');
   assert.equal(lib.warnThreshold('ac-sonnet-high'), 110000);
   assert.match(lib.warnText(111000, 130000, 150000), /Context at 111K \(handoff notice at 130K, hard stop at 150K\)/);
@@ -560,4 +581,36 @@ test('0.31.65 threshold library: high rungs never hand off before the lower ones
   } finally {
     keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
   }
+});
+
+test('0.31.66 the opus option holds when subagent_context_notice_high_tokens is 0 or less; a high rung that is not opus falls back to the base line', async () => {
+  const lib = await import('../hooks/lib/handoff-limit.mjs');
+  const keys = ['CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_HIGH_TOKENS', 'CLAUDE_PLUGIN_OPTION_SUBAGENT_CONTEXT_NOTICE_OPUS_TOKENS'];
+  const saved = keys.map((k) => process.env[k]);
+  try {
+    process.env[keys[0]] = '0';
+    delete process.env[keys[1]];
+    assert.equal(lib.handoffThreshold('ac-opus-high'), 120000, 'high 0: the opus rung keeps the opus default');
+    assert.equal(lib.handoffThreshold('ac-sonnet-high'), 110000, 'high 0: a sonnet high rung stands at the base line');
+    process.env[keys[0]] = '-1';
+    assert.equal(lib.handoffThreshold('ac-opus-xhigh'), 120000, 'high below 0 behaves the same');
+    process.env[keys[1]] = '125000';
+    assert.equal(lib.handoffThreshold('ac-opus-high'), 125000, 'an explicit opus option overrides');
+    process.env[keys[1]] = '0';
+    assert.equal(lib.handoffThreshold('ac-opus-high'), 110000, 'both 0: the base line stands');
+  } finally {
+    keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
+  }
+});
+
+test('0.31.66 bashWritesHandoff matches the file NAME only: a directory called handoff does not count', async () => {
+  const { bashWritesHandoff } = await import('../hooks/lib/handoff-limit.mjs');
+  assert.equal(bashWritesHandoff('cat > docs/handoff/design.md <<EOF'), false, 'directory named handoff');
+  assert.equal(bashWritesHandoff('echo x >> /w/handoff/notes.md'), false);
+  assert.equal(bashWritesHandoff('tee C:\\w\\handoff\\design.md'), false, 'a Windows path with a handoff directory');
+  assert.equal(bashWritesHandoff('cat > docs/handoff/task-handoff.md <<EOF'), true, 'file name matches');
+  assert.equal(bashWritesHandoff('echo x >> fix-round-handoff.md'), true);
+  assert.equal(bashWritesHandoff('tee -a "/w/x/api-handoff.md"'), true);
+  assert.equal(bashWritesHandoff('cat > notes.md'), false);
+  assert.equal(bashWritesHandoff(undefined), false);
 });

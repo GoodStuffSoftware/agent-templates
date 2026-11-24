@@ -926,7 +926,7 @@ const isClass = (rules, id) => {
  * Returns { action: 'none' | 'deny' | 'hint' | 'rewrite', classes, command?, text? }.
  * Never throws; any error is { action: 'none' }.
  */
-export async function gateDecision(command, { cwd, mode = DEFAULT_GATE_MODE, env = process.env, rewriteAllowed = true, exists, read, rulesInline = null, shell = 'bash' } = {}) {
+export async function gateDecision(command, { cwd, mode = DEFAULT_GATE_MODE, env = process.env, rewriteAllowed = true, exists, read, rulesInline = null, shell = 'bash', payload = null } = {}) {
   const none = { action: 'none', classes: [] };
   try {
     if (mode === 'off' || typeof command !== 'string' || !command.trim()) return none;
@@ -943,7 +943,7 @@ export async function gateDecision(command, { cwd, mode = DEFAULT_GATE_MODE, env
     const heavy = found.heavy.filter((h) => isClass(rules, h.class));
     if (!heavy.length) return none;
     const classes = [...new Set(heavy.map((h) => h.class))];
-    const heldText = holdDenyMessage('this heavy command');
+    const heldText = holdDenyMessage('this heavy command', payload);
     if (heldText) return { action: 'deny', classes, command: null, text: heldText, held: true };
     const launcher = launcherFor(loaded.claudeHome, exists ?? existsSync);
     const heaviest = (cs) => cs.slice().sort((a, b) => boxOf(rules, b) - boxOf(rules, a))[0];

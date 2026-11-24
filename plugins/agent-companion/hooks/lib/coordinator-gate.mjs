@@ -23,7 +23,7 @@ export const MODES = Object.freeze(['block', 'warn', 'off']);
 export const DEFAULT_MODE = 'block';
 export const DENY_REASON = 'Messages to your coordinator start with QUESTION:, BLOCKED:, DONE:, CHANGE:, FINDING: or ANSWER:. Put status on your card or task list. If this needs the coordinator, resend it with the right tag.';
 export const WARN_NOTE = 'agent-companion (coordinator message gate, warn): this message to your coordinator has no tag. Start it with QUESTION:, BLOCKED:, DONE:, CHANGE:, FINDING: or ANSWER:, and put status on your card or task list.';
-export const STANDING_RULE_TEXT = 'Messages to your coordinator start with QUESTION: (need a decision), BLOCKED: (stuck), DONE: (hand-back), CHANGE: (plan changed), FINDING: (new risk or fact it must act on) or ANSWER: (reply to its request).\nStatus goes on your task card if you use one, otherwise your task list; never message the coordinator just to report progress or acknowledge.';
+export const STANDING_RULE_TEXT = 'Messages to your coordinator start with QUESTION: (decision needed), BLOCKED: (stuck), DONE: (hand-back), CHANGE: (plan changed), FINDING: (new risk or fact) or ANSWER: (reply).\nStatus goes on your task card or task list; never message the coordinator to report progress or acknowledge.';
 
 // block, warn or off; the plain off spellings (false, 0, no) read as off like the other guards' options;
 // anything else is the shipped default.

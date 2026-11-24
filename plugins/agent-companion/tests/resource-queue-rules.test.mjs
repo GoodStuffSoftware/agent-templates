@@ -593,7 +593,7 @@ test('parseResourceArg: name, name:N, box:N; rejects bad names and counts', () =
   for (const bad of ['', ':3', 'a b', 'x:0', 'x:-1', 'x:1.5', 'x:y', '../etc', 'a:1:2']) assert.throws(() => parseResourceArg(bad), /bad --resource/, bad);
 });
 
-test('buildRequest: a class supplies defaults, explicit flags override, {cwd} is a stable hash, nothing to wait for is an error', () => {
+test('buildRequest: a class supplies defaults, explicit flags override, {cwd} is a stable hash, nothing given defaults to box:1', () => {
   const rules = shipped();
   const e2e = buildRequest({ cls: 'e2e' }, rules);
   assert.equal(e2e.box, 8);
@@ -618,7 +618,9 @@ test('buildRequest: a class supplies defaults, explicit flags override, {cwd} is
   assert.match(Object.keys(g1.resources)[0], /^gradle-[0-9a-f]{8}$/);
 
   assert.throws(() => buildRequest({ cls: 'nope' }, rules), /unknown --class "nope"/);
-  assert.throws(() => buildRequest({}, rules), /nothing to wait for/);
+  const bare = buildRequest({}, rules);
+  assert.equal(bare.box, 1, 'no --resource and no --class: defaults to box:1');
+  assert.deepEqual(bare.resources, {});
 });
 
 test('runUnderQueue hands every sample record to the lease sidecar, and a failed read leaves the sidecar alone', async () => {

@@ -531,6 +531,20 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/hold-message.mjs",
+              "--event",
+              "stop"
+            ],
+            "timeout": 5
+          }
+        ]
       }
     ],
     "SubagentStop": [
@@ -707,6 +721,21 @@
             "command": "node",
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/hooks/bash-exit.mjs"
+            ],
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/hold-message.mjs",
+              "--event",
+              "post"
             ],
             "timeout": 5
           }

@@ -13,12 +13,12 @@ const HOUR = 3600e3;
 const T = Date.parse('2026-03-01T10:00:00Z');
 
 let tmp; let state; let claude;
-const env = () => ({ ...process.env, CLAUDE_CONFIG_DIR: claude, AGENT_COMPANION_STATE_DIR: state, AGENT_COMPANION_FAKE_NOW: '', CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_MINUTES: '' });
+const env = () => ({ ...process.env, AGENT_COMPANION_DESKTOP_SESSIONS_DIR: join(tmp, 'desk'), CLAUDE_CONFIG_DIR: claude, AGENT_COMPANION_STATE_DIR: state, AGENT_COMPANION_FAKE_NOW: '', CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_MINUTES: '' });
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'rw-'));
   state = join(tmp, 'ac'); claude = join(tmp, 'claude');
   mkdirSync(join(state, 'state'), { recursive: true }); mkdirSync(join(claude, 'plugins'), { recursive: true });
-  process.env.CLAUDE_CONFIG_DIR = claude; process.env.AGENT_COMPANION_STATE_DIR = state; delete process.env.AGENT_COMPANION_FAKE_NOW;
+  process.env.CLAUDE_CONFIG_DIR = claude; process.env.AGENT_COMPANION_STATE_DIR = state; process.env.AGENT_COMPANION_DESKTOP_SESSIONS_DIR = join(tmp, 'desk'); delete process.env.AGENT_COMPANION_FAKE_NOW;
 });
 
 const W = await import('../scripts/release-watch.mjs');
@@ -246,7 +246,7 @@ test('clear lifts the hold, logs a row, and the cooldown suppresses the same fla
   S.noteShown('s1', T);
   S.maybeHold({ holdMinutes: 30, at: T + HOUR });
   const r = S.clear({ by: 'test', at: T + 2 * HOUR });
-  assert.deepEqual(r, { flagCleared: true, holdCleared: true });
+  assert.deepEqual(r, { flagCleared: true, holdCleared: true, heldSessions: [] });
   assert.equal(S.isHoldActive(), false); assert.equal(existsSync(file('release-hold.json')), false);
   assert.equal(S.flagLine(), null);
   assert.equal(S.openFlag({ version: '1', flags: [{ name: 'queue-clears', value: 4 }], at: T + 3 * HOUR }), null, 'inside the 4 h cooldown, same size');
@@ -1198,3 +1198,179 @@ test('legacy-ack-kept: a legacy ack with a typed record at its time stays, as an
 
 test('cleanup', () => { rmSync(tmp, { recursive: true, force: true }); });
 void tel;
+
+// ---- held sessions: record, list, clear, one-time cleared notice ----
+const startHold = () => { S.openFlag({ version: '1', flags: flag, at: T }); S.noteShown('s0', T); return S.maybeHold({ holdMinutes: 30, at: T + HOUR }); };
+const cli = (...a) => spawnSync(process.execPath, [SCRIPT, ...a], { env: env(), encoding: 'utf8', windowsHide: true });
+
+test('held sessions: recorded once per session (a subagent apart), updated on repeat, capped, nothing recorded when not held', () => {
+  assert.equal(S.noteHeld({ session_id: 'lead-a' }, T), false, 'not held: nothing recorded');
+  startHold();
+  assert.ok(S.noteHeld({ session_id: 'lead-a', cwd: '/w/demo', transcript_path: '/t/a.jsonl' }, T + 2 * HOUR));
+  S.noteHeld({ session_id: 'lead-a', cwd: '/w/demo' }, T + 3 * HOUR);
+  S.noteHeld({ session_id: 'lead-a', agent_id: 'sub-1', cwd: '/w/demo' }, T + 3 * HOUR);
+  const l = S.heldSessions();
+  assert.equal(l.length, 2, 'one lead entry, one subagent entry');
+  const lead = l.find((x) => !x.agentId);
+  assert.deepEqual([lead.sessionId, lead.cwd, lead.transcriptPath, lead.firstSeen, lead.lastSeen], ['lead-a', '/w/demo', '/t/a.jsonl', iso(T + 2 * HOUR), iso(T + 3 * HOUR)]);
+  assert.equal(l.find((x) => x.agentId).agentId, 'sub-1');
+  for (let i = 0; i < S.HELD_CAP + 20; i++) S.noteHeld({ session_id: `bulk-${i}` }, T + 4 * HOUR + i);
+  assert.equal(S.heldSessions().length, S.HELD_CAP);
+});
+
+test('held: the CLI lists the held sessions as text and JSON; none recorded says so', () => {
+  assert.match(cli('held').stdout, /none recorded/);
+  startHold();
+  S.noteHeld({ session_id: 'lead-a', cwd: '/w/demo' }, T + 2 * HOUR);
+  S.noteHeld({ session_id: 'lead-b', cwd: '/w/other' }, T + 2 * HOUR);
+  S.noteHeld({ session_id: 'lead-a', agent_id: 'sub-1' }, T + 2 * HOUR);
+  const t = cli('held').stdout;
+  assert.match(t, /2 lead, 1 subagent/);
+  assert.match(t, /lead lead-a  local unmapped/);
+  assert.match(t, /No desktop session found for these .*lead-a \(cwd \/w\/demo\); lead-b \(cwd \/w\/other\)/);
+  assert.doesNotMatch(t, /Send each of these sessions/, 'nothing mapped: no ids to message');
+  const j = JSON.parse(cli('held', '--json').stdout);
+  assert.equal(j.held, true); assert.equal(j.sessions.length, 3);
+});
+
+test('clear: prints the held list, stores it with clearedAt in the history row; a cleared notice reaches each lead once', () => {
+  startHold();
+  S.noteHeld({ session_id: 'lead-a', cwd: '/w/demo' }, T + 2 * HOUR);
+  S.noteHeld({ session_id: 'lead-b', cwd: '/w/other' }, T + 2 * HOUR);
+  S.noteHeld({ session_id: 'lead-a', agent_id: 'sub-1' }, T + 2 * HOUR);
+  const out = cli('clear', '--by', 'operator').stdout;
+  assert.match(out, /cleared \(flag true, hold true\)/);
+  assert.match(out, /lead lead-a/); assert.match(out, /lead lead-b/);
+  assert.match(out, /No desktop session found for these/);
+  const row = readFileSync(file('release-watch-checks.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((r) => r.event === 'clear').pop();
+  assert.ok(row.clearedAt); assert.equal(row.heldSessions.length, 3);
+  assert.equal(S.heldSessions().length, 0, 'no hold now');
+  const n = S.clearedNotice('lead-a', T + 5 * HOUR);
+  assert.match(n, /post-release hold was cleared at .* by the operator\. Resume from your handoff or where you stopped\./);
+  assert.equal(S.clearedNotice('lead-a', T + 6 * HOUR), null, 'once per session');
+  assert.equal(S.clearedNotice('stranger', T + 6 * HOUR), null, 'a session that was never held');
+  assert.equal(S.clearedNotice('sub-1', T + 6 * HOUR), null, 'a subagent id is not a lead');
+  assert.match(S.clearedNotice('lead-b', T + 6 * HOUR), /cleared/);
+  assert.match(cli('held').stdout, /still owed a local message/, 'a clear nobody has claimed: the sessions are still owed a message');
+  S.takeOwedMessages('lead-z', T + 7 * HOUR);
+  assert.match(cli('held').stdout, /none recorded/, 'claimed: nothing owed');
+});
+
+test('a new hold starts a new list, and a stale cleared notice is not shown during it', () => {
+  startHold();
+  S.noteHeld({ session_id: 'lead-a' }, T + 2 * HOUR);
+  S.clear({ at: T + 3 * HOUR });
+  S.openFlag({ version: '2', flags: [{ name: 'other', value: 1 }], at: T + 10 * HOUR });
+  S.noteShown('s9', T + 10 * HOUR);
+  S.maybeHold({ holdMinutes: 30, at: T + 12 * HOUR });
+  assert.equal(S.clearedNotice('lead-a', T + 12 * HOUR), null, 'held again: no cleared notice');
+  S.noteHeld({ session_id: 'lead-c' }, T + 13 * HOUR);
+  assert.deepEqual(S.heldSessions().map((x) => x.sessionId), ['lead-c']);
+});
+
+test('wording: a lead is told to stop and wait for the local message, no cron; a subagent only to write its handoff and stop', () => {
+  startHold();
+  const lead = S.flagLine({ at: T + 2 * HOUR });
+  assert.match(lead, /Stop and wait: end your turn now\. A local message arrives in this session when the hold clears/);
+  assert.doesNotMatch(lead, /CronCreate|cron|20 minutes/);
+  assert.doesNotMatch(lead, /<plugin root>/);
+  const deny = S.holdDenyMessage('starting a new agent', { session_id: 'lead-a' });
+  assert.match(deny, /Stop and wait/); assert.doesNotMatch(deny, /CronCreate/);
+  const sub = S.holdDenyMessage('resuming a worker', { session_id: 'lead-a', agent_id: 'sub-1' });
+  assert.match(sub, /Write your handoff and stop/); assert.doesNotMatch(sub, /CronCreate/);
+  assert.equal(S.heldSessions().length, 2, 'the denials were recorded too');
+});
+
+// ---- desktop session ids and the local message after a clear ----
+const putDesktop = (cliId, local, extra = {}, rel = ['acct-1', 'org-1']) => {
+  const d = join(tmp, 'desk', ...rel); mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, local + '.json'), JSON.stringify({ sessionId: local, cliSessionId: cliId, cwd: '/w/demo', title: 'invented', ...extra }));
+};
+
+test('desktop map: Claude Code session id -> local_ id, from every account and org folder; junk and non-session files ignored', () => {
+  putDesktop('lead-a', 'local_aaaa1111-0000-4000-8000-000000000001');
+  putDesktop('lead-b', 'local_bbbb2222-0000-4000-8000-000000000002', {}, ['acct-2', 'org-9']);
+  writeFileSync(join(tmp, 'desk', 'acct-1', 'org-1', 'local_broken.json'), '{nope');
+  writeFileSync(join(tmp, 'desk', 'acct-1', 'org-1', 'notes.json'), JSON.stringify({ sessionId: 'local_x', cliSessionId: 'lead-z' }));
+  const m = S.desktopSessionMap();
+  assert.equal(m.get('lead-a'), 'local_aaaa1111-0000-4000-8000-000000000001');
+  assert.equal(m.get('lead-b'), 'local_bbbb2222-0000-4000-8000-000000000002');
+  assert.equal(m.has('lead-z'), false);
+  assert.equal(S.desktopSessionMap(join(tmp, 'nowhere')).size, 0, 'a missing store is an empty map');
+});
+
+test('clear: mapped leads get the local-message line and localSessionId in JSON; unmapped leads and subagents are not messaged', () => {
+  putDesktop('lead-a', 'local_aaaa1111-0000-4000-8000-000000000001');
+  startHold();
+  S.noteHeld({ session_id: 'lead-a', cwd: '/w/demo' }, T + 2 * HOUR);
+  S.noteHeld({ session_id: 'lead-b', cwd: '/w/other' }, T + 2 * HOUR);
+  S.noteHeld({ session_id: 'lead-a', agent_id: 'sub-1' }, T + 2 * HOUR);
+  const held = cli('held').stdout;
+  assert.match(held, /Send each of these sessions a local message now: local_aaaa1111-0000-4000-8000-000000000001\n/);
+  const out = cli('clear').stdout;
+  assert.match(out, /lead lead-a  local local_aaaa1111-0000-4000-8000-000000000001/);
+  assert.match(out, /^Send each of these sessions a local message now: local_aaaa1111-0000-4000-8000-000000000001$/m);
+  assert.match(out, /No desktop session found for these \(message by hand\): lead-b \(cwd \/w\/other\)/);
+  assert.doesNotMatch(out, /sub-1/);
+});
+
+test('clear --json: localSessionId on each lead entry, null when unmapped', () => {
+  putDesktop('lead-a', 'local_aaaa1111-0000-4000-8000-000000000001');
+  startHold();
+  S.noteHeld({ session_id: 'lead-a' }, T + 2 * HOUR);
+  S.noteHeld({ session_id: 'lead-b' }, T + 2 * HOUR);
+  const j = JSON.parse(cli('clear', '--json').stdout);
+  assert.equal(j.heldSessions.find((x) => x.sessionId === 'lead-a').localSessionId, 'local_aaaa1111-0000-4000-8000-000000000001');
+  assert.equal(j.heldSessions.find((x) => x.sessionId === 'lead-b').localSessionId, null);
+});
+
+// ---- 0.31.66 counting fixes ----
+test('count-once: a tool_result repeated in an api-request-blob record counts once', () => {
+  const sd = join(claude, 'projects', 'C--pdup', 'sess', 'subagents'); mkdirSync(sd, { recursive: true });
+  const ts = new Date(T + HOUR).toISOString();
+  const res = { type: 'tool_result', tool_use_id: 'dup-1', is_error: true, content: 'PreToolUse:Bash hook error: invented boom' };
+  const L = [
+    { type: 'user', timestamp: ts, message: { role: 'user', content: 'Do the invented task.' } },
+    { type: 'user', timestamp: ts, message: { role: 'user', content: [res] } },
+    { type: 'api-request-blob', timestamp: ts, message: { role: 'user', content: [res] } },
+    { type: 'api-request-blob', timestamp: ts, message: { role: 'user', content: [res] } },
+  ];
+  writeFileSync(join(sd, 'agent-dup.jsonl'), L.map((l) => JSON.stringify(l)).join('\n'));
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(m.hookSignatures.since['PreToolUse:Bash invented boom'], 1);
+});
+
+test('hook-error noise: the harness worktree-isolation block is never a signature or a hook error; one event of a new signature is a note, not a FLAG', () => {
+  const sd = join(claude, 'projects', 'C--pnoise', 'sess', 'subagents'); mkdirSync(sd, { recursive: true });
+  const ts = new Date(T + HOUR).toISOString();
+  const line = (id, text) => JSON.stringify({ type: 'user', timestamp: ts, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: true, content: text }] } });
+  const first = JSON.stringify({ type: 'user', timestamp: ts, message: { role: 'user', content: 'Do the invented task.' } });
+  writeFileSync(join(sd, 'agent-noise.jsonl'), [first, line('n-1', 'PreToolUse:Edit hook error: This session is running in an isolated git worktree at `/w/invented`, but `/w/other/x` is outside it.'), line('n-2', 'PreToolUse:Bash hook error: invented single boom')].join('\n'));
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.deepEqual(Object.keys(m.hookSignatures.since), ['PreToolUse:Bash invented single boom'], 'the harness block is not a signature');
+  const one = names(metrics({ hookSignatures: { since: { 'PreToolUse:Bash invented single boom': 1 }, base: {} } }));
+  assert.ok(!one.some((x) => x.startsWith('hook-signature')), 'one event is a note, not a flag');
+  assert.ok(names(metrics({ hookSignatures: { since: { 'PreToolUse:Bash invented single boom': 5 }, base: {} } })).some((x) => x.startsWith('hook-signature')), 'five events flag');
+});
+
+test('count-once: two hard denials from one worker are one worker, and the row count stays in the detail', () => {
+  putRows('handoff-limit.jsonl', [{ at: T + HOUR, limit: 'hard', action: 'deny', agent_id: 'wA', session_id: 's1' }, { at: T + 2 * HOUR, limit: 'hard', action: 'deny', agent_id: 'wA', session_id: 's1' },
+    { at: T + 2 * HOUR, limit: 'hard', action: 'deny', session_id: 's2' }]);
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(m.telemetry['handoff:hard/deny'].since, 3);
+  assert.equal(m.handoffHardWorkers.since, 2);
+  const x = W.evaluate(metrics({ handoffHardWorkers: { since: 1, base: 0 }, telemetry: { 'handoff:hard/deny': t(3, 0, 3, 0) } })).metrics.find((y) => y.name === 'handoff-hard-deny');
+  assert.equal(x.events, 1);
+});
+
+test('status: an install newer than the armed releases is reported as not armed yet, and status writes nothing', () => {
+  W.tick({ at: T + HOUR, installed: installed(), run: () => metrics(), holdMinutes: 30 });
+  const T2 = T + 2 * HOUR + 3 * 60e3;
+  const before = readFileSync(file('release-watch-run.json'), 'utf8');
+  const inst2 = { plugins: { 'agent-companion@x': [{ version: '9.9.9', lastUpdated: iso(T2) }] } };
+  const out = W.status(T2 + 60e3, { installed: inst2 });
+  assert.match(out, /release 9\.9\.9 installed .*: not armed yet; the 10-minute job arms it by \d\d:\d0Z/);
+  assert.equal(JSON.parse(W.status(T2 + 60e3, { json: true, installed: inst2 })).pending.version, '9.9.9');
+  assert.doesNotMatch(W.status(T2, { installed: installed() }), /not armed yet/);
+  assert.equal(readFileSync(file('release-watch-run.json'), 'utf8'), before);
+});

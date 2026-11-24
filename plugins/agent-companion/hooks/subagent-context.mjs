@@ -43,6 +43,7 @@
 // reads at SubagentStop to tell the lead.
 
 import { readStdin, opt, passthrough, deny, recordDenial, callerIsSubagent, appendLog } from './lib/context.mjs';
+import { noteHeld } from './lib/release-watch-state.mjs';
 import { resolveAgentTranscript } from './lib/runaway.mjs';
 import {
   readContextSignal, claimSignals, claimOnce, recordEvent, subagentNoticeText, noticeVariant, pruneContextState,
@@ -58,7 +59,7 @@ import { allowanceNote, allowanceWatch } from './lib/plan-allowance.mjs';
 try {
   const p = readStdin();
   if (!callerIsSubagent(p)) passthrough();
-  const threshold = handoffThreshold(p.agent_type); // 110000 for the lower rungs, 130000 for sonnet high/xhigh and the opus rungs (options)
+  const threshold = handoffThreshold(p.agent_type); // 110000 for the lower rungs, 130000 for sonnet high/xhigh, 120000 for the opus rungs (options)
   const warnAt = warnThreshold(p.agent_type);
   const ceiling = opt('subagent_ceiling_tokens', CEILING_DEFAULT_TOKENS);
   const repeat = opt('subagent_ceiling_repeat_tokens', CEILING_REPEAT_DEFAULT_TOKENS);
@@ -97,6 +98,7 @@ try {
   const hard = hardCheck(p, sig, { ...hcfg, on: handoffOn });
   if (hard) {
     appendLog(HANDOFF_LOG, hard.row);
+    if (hard.held) { try { noteHeld(p); } catch { /* advisory */ } }
     recordDenial('handoff-hard-limit', p, hard.held ? `${p.tool_name} while the release hold is on` : `${p.tool_name} at ${sig.ctx} tokens, limit ${hcfg.hard}`);
     deny(streakPrefix(noteDeny(p.agent_id)) + denyText(sig ? sig.ctx : 0, hcfg.hard, noticeVariant(readBrief(path), p.agent_type), hard.why, hard.held));
   }
@@ -127,7 +129,7 @@ try {
   const nearLimit = planOn && noticePct > 0 ? allowanceWatch(p, { noticePct }) : null;
 
   const variant = (kinds.includes('size') || repeatNote) ? noticeVariant(readBrief(path), p.agent_type) : 'writer';
-  const info = { ctx: sig ? sig.ctx : undefined, hard: handoffOn ? hcfg.hard : 0 };
+  const info = { ctx: sig ? sig.ctx : undefined, hard: handoffOn ? hcfg.hard : 0, transcript: path };
   const warnLine = warn ? warnText(sig.ctx, threshold, handoffOn ? hcfg.hard : 0, noticeVariant(readBrief(path), p.agent_type)) : '';
   const text = [warnLine, kinds.length ? subagentNoticeText(kinds, threshold, variant, info) : '', repeatNote ? subagentNoticeText(['size'], threshold, variant, info) : '', nudge ? nudge.text : '', step ? step.warn : '', longRun ? longRun.text : '', allowance || '', nearLimit || '']
     .filter(Boolean).join('\n');

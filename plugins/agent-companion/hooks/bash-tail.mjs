@@ -56,6 +56,7 @@ import {
   analyze, wrapCommand, outputTarget, pruneOldOutputs, modeAllowed, shellPath, TELEMETRY_STREAM,
   readPermissionRules, blockingPermissionRule,
 } from './lib/bash-tail.mjs';
+import { diffCapTarget, diffCapWrap } from './lib/diff-cap.mjs';
 import { worktreeRemoveDecision } from './lib/worktree-remove.mjs';
 import { waitCapRewrite } from './lib/wait-cap.mjs';
 import { gateDecision, gateMode, DEFAULT_GATE_MODE, TELEMETRY_STREAM as GATE_STREAM } from './lib/resource-gate.mjs';
@@ -176,6 +177,7 @@ try {
         // tell. Unless the option is on, a PowerShell rewrite becomes a deny that carries the queued command.
         && (!isPs || opt('resource_gate_powershell_rewrite', false) === true);
       const d = await gateDecision(input.command, {
+        payload: p,
         cwd: typeof p.cwd === 'string' && p.cwd ? p.cwd : process.cwd(),
         mode,
         shell: isPs ? 'powershell' : 'bash',
@@ -206,6 +208,24 @@ try {
 
   // The PowerShell tool gets the gate only: the output tail is bash-specific.
   if (isPs) finish();
+
+  // ---- step 1b: diff cap (hooks/lib/diff-cap.mjs) -----------------------------------------
+  // One git diff / show / log -p call returns at most 400 lines: more goes to a file, and the stat, the first 300 lines and the
+  // file's path come back (read the rest by range). Silent; exit status kept. Option diff_cap (default true). Only in the permission modes of
+  // bash_tail_permission_modes (default bypassPermissions): the permission rules are checked against the REWRITTEN command, so in other modes an allow
+  // rule (Bash(git diff:*)) would stop matching it. Not widened on purpose.
+  try {
+    if (opt('diff_cap', true) && !gateCommand && !input.run_in_background && diffCapTarget(input.command)
+      && modeAllowed(p.permission_mode, opt('bash_tail_permission_modes', 'bypassPermissions'))) {
+      const t = outputTarget();
+      pruneOldOutputs(t.dir);
+      const wrapped = diffCapWrap(input.command, { file: t.file });
+      if (!permissionHit(p, input.command) && !permissionHit(p, wrapped)) {
+        row(p, { event: 'diff-capped', id: t.id, command_chars: input.command.length });
+        finish(wrapped);
+      }
+    }
+  } catch { /* fails open: the diff prints as written */ }
 
   // ---- step 2: the output tail -------------------------------------------------
   if (!opt('bash_tail', true)) finish();

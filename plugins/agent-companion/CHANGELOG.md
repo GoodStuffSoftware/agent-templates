@@ -2,6 +2,22 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.66 — 2026-11-23
+
+- **Hold clear reaches the sessions that stood down.** Every session shown the post-release hold notice or refused by it is recorded (session id, cwd, transcript path, agent id for a subagent, first and last seen; deduped, capped at 200) in `release-hold-sessions.json`. New `release-watch.mjs held [--json]` lists them; `clear` prints the same list ("message each: <ids>") and stores it with `clearedAt` in the clear row of the history. After a clear, each recorded lead session gets a one-time notice on its next prompt: the hold was cleared at <time> by the operator, resume from your handoff or where you stopped. A subagent is told only to write its handoff and stop (its lead resumes it). Held leads no longer arm a 20-minute cron (each fire re-wrote a cold cache). They stop and wait; `release-watch.mjs clear` maps each held lead to its desktop session (`local_<uuid>`, from the Claude desktop session store), prints "Send each of these sessions a local message now: ...", `--json` carries localSessionId, and a PostToolUse hook plus one-shot Stop block make the lead send them.
+- **Release watch counting.** A tool_result repeated in api-request-blob records counts once; handoff-hard-deny counts distinct workers; `status` names an install the 10-minute job has not armed yet (and `--json` gains `pending`).
+- **Handoff guard.** A handoff written with Bash (`cat >`, `>>`, `tee`) counts, and `DONE: partial, handoff at <path>` is accepted anywhere in the final message (no more false end-blocks); the hand-off notice asks the worker to put `transcript: <path>` at the top of its handoff file; the opus rungs hand off at 120K (new option `subagent_context_notice_opus_tokens`) instead of 130K.
+- **Diff cap.** A Bash `git diff`, `git show` or `git log -p` call now returns at most 400 lines (stat, first 300 lines and the path of the full output to read by range; exit status kept; option `diff_cap`). It applies only in the permission modes listed in `bash_tail_permission_modes`; the README and plugin.json describe that. Built-in session-start rule wording is tightened so the lead-child block fits the 4200 cap again.
+- **Hold-clear fix round.**
+  - Owed messages reach every lead on every lift: the 10-minute tick, a typed clear and the `release-watch.mjs clear` CLI all queue them, and `held` lists them. Unmapped leads are listed too.
+  - Writes to the held and pending session files are locked (file-lock), so parallel sessions no longer lose records. At the 200 cap, subagent records are evicted first.
+  - The opus handoff override applies when `subagent_context_notice_high_tokens` is 0 or less.
+  - `bashWritesHandoff` matches the handoff file name only, not the whole path.
+  - Release watch: the harness "This session is running in an isolated git worktree" block is no longer counted as a hook error or a hook signature (wording is the only handle; the transcript record cannot tell the source). A new signature still needs 5 events.
+  - `resource-queue.mjs run` defaults to `box:1` and prints a one-line usage; the pre-push scan runs the lesson word cap (150 words). Both come from the merged release-speed work; there is no separate 0.31.67.
+  - CI: see the CI line below.
+- **CI runs pre-release only and fast.** `agent-companion-tests` runs on a push to `release/**`, a pull request into `main` and by hand, on Linux only (three shard jobs, `CI_LOCAL_SHARD=<i>/<n>` in `scripts/ci-local.mjs`; the desktop budget, slices and 2-worker default are off on the runner); the Windows run is the local release run (CONTRIBUTING.md, Release gate). `leak-check` runs on `release/**`, `main`, PRs and by hand. One resource-queue test no longer waits out its 60 s timeout.
+
 ## 0.31.65 — 2026-11-23
 
 - **Standing worker metrics read the whole week.** The release watch's worker metrics (no-final-status, partial-share, blocked-share, worker-bash-fail, harness-refusals) now pick transcripts by file mtime inside the window instead of the first 2000 in directory order, which dropped about 65% of a week and whole projects. A worker's STATUS is also read from its `SubagentHandback` call. Agent types off the reporting contract (`Explore`, `Plan`, `web-fetch`, `claude-code-guide`, `statusline-setup`) and hook-verification probes are excluded from those metrics and counted under `workers.excluded`. The blocked-share event floor is 5 (was 3), so three blocked workers from other projects' brief problems no longer start a hold. Details: ADR 0008.

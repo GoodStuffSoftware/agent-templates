@@ -7,37 +7,52 @@ name: agent-companion-tests
 #
 # Since 0.31.30 this workflow is THE test gate: the pre-push hook only scans
 # for leaks and private names, and a contributor runs just the targeted tests
-# for the files they touch. The matrix covers Linux and Windows, because the
-# local runs on a Windows machine used to be the only Windows coverage.
+# for the files they touch.
+#
+# Pre-release only (0.31.66): it runs on a push to release/**, on a pull request
+# into main, and by hand, never on every branch push. Linux only: the full suite
+# runs on the operator's Windows machine before every release (CONTRIBUTING.md,
+# "Release gate"), so a GitHub Windows job only repeated that, while Linux is
+# the platform that cannot be run locally. The suite is split into SHARDS
+# (scripts/ci-local.mjs, CI_LOCAL_SHARD) that run as parallel jobs, so the
+# slowest job is a few minutes, not the 7 of one job over all 302 files.
 
 on:
   push:
-    branches-ignore:
-      - 'wip/**'
-      - 'backup/**'
+    branches:
+      - 'release/**'
   pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+# A release push is seen twice (the push, and the open PR's synchronize): the
+# newer run of the same branch replaces the older, so each commit tests once.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    name: test (shard ${{ matrix.shard }}/3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
-      # One OS going red must not hide the other's result.
+      # One shard going red must not hide the others' results.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        shard: [1, 2, 3]
+    env:
+      CI_LOCAL_SHARD: ${{ matrix.shard }}/3
+      # The runner is this job's alone, so the desktop-sharing machinery in
+      # ci-local (the shared budget, its load guard, slices of 6 files per
+      # worker with a barrier after each) only costs time here. Off, with
+      # every test file in one run at 4 at a time (the runner has 4 vCPU).
+      CI_LOCAL_LOCK: '0'
+      CI_LOCAL_SLICE: '0'
+      CI_LOCAL_TEST_CONCURRENCY: '4'
+      CI_LOCAL_HEAVY_MAX: '4'
     steps:
-      # git for Windows ships core.autocrlf=true, which rewrites LF to CRLF in
-      # the working tree while the stored blob stays untouched, so a test that
-      # compares bytes (or runs `git apply`) fails on a Windows checkout with
-      # nothing visible in `git status`. Turn it off before checkout so every
-      # OS gets the stored bytes. .gitattributes pins eol=lf for the files the
-      # tooling reads byte-exact as a second layer.
-      - name: Disable git autocrlf
-        shell: bash
-        run: git config --global core.autocrlf false
-
       - name: Checkout
         uses: actions/checkout@v7
         with:
@@ -62,12 +77,5 @@ jobs:
       # plugins/agent-companion/tests/*.test.mjs glob itself, so this stays
       # independent of any platform's own glob resolution inside the test
       # runner.
-      - name: Run agent-companion test suite
+      - name: Run agent-companion test suite (shard ${{ matrix.shard }}/3)
         run: node scripts/ci-local.mjs --suite agent-companion-tests
-
-      # leak-check.yml runs scripts-tests (ci-local, push-scan, setup-hooks and
-      # the hook-tree tests) on Linux only. The local runs on Windows used to
-      # cover those on Windows too, so run them here for the Windows leg.
-      - name: Run scripts tests (Windows)
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        run: node scripts/ci-local.mjs --suite scripts-tests
