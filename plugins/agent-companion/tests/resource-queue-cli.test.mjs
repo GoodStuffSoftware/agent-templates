@@ -235,7 +235,7 @@ test('run: a value other than 0 in RESOURCE_QUEUE does not opt out', async () =>
     dir: b.ledger, env: b.env, legacyDir: b.legacy, resources: { 'app-e2e': 1 }, heartbeat: 'off', registerExit: false, log: () => {},
   });
   try {
-    const r = b.run(['run', '--resource', 'app-e2e', '--max-wait', '1', '--', NODE, '-e', 'process.exit(0)'], { RESOURCE_QUEUE: '1' });
+    const r = b.run(['run', '--resource', 'app-e2e', '--max-wait', '1', '--', NODE, '-e', 'process.exit(0)'], { RESOURCE_QUEUE: '1' }, { timeout: 6000 }); // never granted (exclusive holder lives): the run waits until killed; "waiting" is printed at once, so 6 s is the bound the control test above uses, not the box's 60 s
     assert.match(r.stderr, /waiting/);
   } finally { holder.release(); b.done(); }
 });

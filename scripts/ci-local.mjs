@@ -6,7 +6,8 @@
 // cannot drift because there is only one command, not two copies of one.
 // Since 0.31.30 the pre-push hook (`.githooks/pre-push`) runs only the
 // pushed-commit leak and private-names scan from this file; the suites run on
-// GitHub CI (Linux and Windows). `--pre-push-hook --with-suites` (or env
+// GitHub CI (Linux, pre-release; Windows runs locally before a release, see
+// CONTRIBUTING.md "Release gate"). `--pre-push-hook --with-suites` (or env
 // CI_LOCAL_PRE_PUSH_SUITES=1) restores the old behaviour of running them there.
 //
 // Background: overnight, a shallow-clone checkout, a missing `claude` CLI on
@@ -54,6 +55,12 @@
 // the machine's available parallelism, clamped to 1..8. node's own default
 // (every core but one) oversubscribes a many-core machine enough to make
 // timing-sensitive tests fail under load.
+//
+// Shard: $CI_LOCAL_SHARD=<i>/<n> runs every n-th test file (1-based i) of each
+// suite, the heavy files spread the same way. The CI workflow runs n shards per
+// OS as a matrix (see agent-companion-tests.yml). CI also sets CI_LOCAL_LOCK=0,
+// CI_LOCAL_SLICE=0 and its own concurrency: the budget, the load guard and the
+// slices exist to share one desktop, and a runner is that job's alone.
 //
 // Per-test timeout: every node --test run gets --test-timeout=<ms>, default
 // 120000, overridden by $CI_LOCAL_TEST_TIMEOUT_MS when it is a positive
@@ -242,6 +249,34 @@ export function resolveTestConcurrency(env = process.env, cpuCount = availablePa
 }
 
 // ---------------------------------------------------------------------------
+// Sharding (exported and unit-tested)
+// ---------------------------------------------------------------------------
+
+export const SHARD_ENV = 'CI_LOCAL_SHARD';
+
+// { index, total } from "<index>/<total>" (1-based), null when unset, and
+// { warning } for a malformed value (ignored, never half-applied: the whole
+// suite runs). GitHub's matrix passes `${{ matrix.shard }}/N`.
+export function resolveShard(env = process.env) {
+  const raw = String(env[SHARD_ENV] ?? '').trim();
+  if (!raw) return null;
+  const m = /^(\d+)\/(\d+)$/.exec(raw);
+  const index = m ? Number(m[1]) : 0;
+  const total = m ? Number(m[2]) : 0;
+  if (!m || index < 1 || total < 1 || index > total) {
+    return { warning: `ci-local: ignoring ${SHARD_ENV}=${JSON.stringify(raw)} (want <index>/<total>, 1 <= index <= total); running every file.` };
+  }
+  return { index, total };
+}
+
+// Every total-th file, starting at index-1, of a sorted list: neighbouring
+// files (often the same area, so alike in cost) land in different shards.
+export function shardFiles(files, shard) {
+  if (!shard || !shard.total) return files;
+  return files.filter((_, i) => i % shard.total === shard.index - 1);
+}
+
+// ---------------------------------------------------------------------------
 // Per-test timeout (exported and unit-tested)
 // ---------------------------------------------------------------------------
 
@@ -297,6 +332,10 @@ function printHelp() {
                         "node plugins/agent-companion/scripts/ci-budget.mjs status". CI_LOCAL_LOCK=0
                         skips the budget. Git/sh-heavy test files run in a
                         pass of their own (CI_LOCAL_HEAVY_MAX, CI_LOCAL_HEAVY_COST).
+  env ${SHARD_ENV}=<i>/<n>
+                        run only shard i of n of each suite's test files (every
+                        n-th file; heavy files spread too). CI runs a matrix of
+                        shards so each job is short.
   env ${TIMEOUT_ENV}=<ms>
                         fail any single test that runs longer than this, by
                         name (default: ${DEFAULT_TEST_TIMEOUT_MS}). Never 0 or unbounded.
@@ -926,7 +965,20 @@ export function runBudgetedTests({
   files, cwd, env, ciParity, budget, concurrency = resolveTestConcurrency().value,
   run = runTestSuite, log = (m) => console.log(m),
 }) {
-  const { normal, heavy } = splitHeavy(files, budget.heavyMax > 0 && budget.kind !== 'targeted' ? HEAVY_TEST_FILES : []);
+  const all = splitHeavy(files, budget.heavyMax > 0 && budget.kind !== 'targeted' ? HEAVY_TEST_FILES : []);
+  // CI_LOCAL_SHARD=<i>/<n>: this run takes every n-th file of each lane (the
+  // heavy files are spread over the shards too), so a matrix of n jobs covers
+  // every file once.
+  const shard = resolveShard(env);
+  if (shard?.warning) log(shard.warning);
+  const normal = shard?.total ? shardFiles(all.normal, shard) : all.normal;
+  const heavy = shard?.total ? shardFiles(all.heavy, shard) : all.heavy;
+  if (shard?.total) {
+    log(`ci-local: shard ${shard.index}/${shard.total}: ${normal.length + heavy.length} of ${files.length} test file(s).`);
+    if (!normal.length && !heavy.length) {
+      return { status: 0, outcome: 'pass', counts: null, flakyFiles: [], failedFiles: [] };
+    }
+  }
   const parts = [];
   // The regular files run in slices of `sliceFactor` files per worker, and each slice
   // asks the budget again for its workers, which re-samples the machine: a long pass
@@ -1135,7 +1187,7 @@ export async function prePushGate(refs, {
     : () => WITHHELD_REF;
   if (!suites) {
     // Scan-only (the hook's default since 0.31.30): the suites run on GitHub
-    // CI, on Linux and Windows, so a push costs seconds and takes no lease.
+    // CI (Linux; Windows runs locally), so a push costs seconds and takes no lease.
     log('\nci-local pre-push: scan passed. The test suites run on GitHub CI, not here (node scripts/ci-local.mjs runs them by hand).');
     return 0;
   }

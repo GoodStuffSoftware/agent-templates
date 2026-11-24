@@ -16,6 +16,7 @@ All notable changes to the `agent-companion` plugin. Dates are UTC.
   - Release watch: the harness "This session is running in an isolated git worktree" block is no longer counted as a hook error or a hook signature (wording is the only handle; the transcript record cannot tell the source). A new signature still needs 5 events.
   - `resource-queue.mjs run` defaults to `box:1` and prints a one-line usage; the pre-push scan runs the lesson word cap (150 words). Both come from the merged release-speed work; there is no separate 0.31.67.
   - CI: see the CI line below.
+- **CI runs pre-release only and fast.** `agent-companion-tests` runs on a push to `release/**`, a pull request into `main` and by hand, on Linux only (three shard jobs, `CI_LOCAL_SHARD=<i>/<n>` in `scripts/ci-local.mjs`; the desktop budget, slices and 2-worker default are off on the runner); the Windows run is the local release run (CONTRIBUTING.md, Release gate). `leak-check` runs on `release/**`, `main`, PRs and by hand. One resource-queue test no longer waits out its 60 s timeout.
 
 ## 0.31.65 — 2026-11-23
 
