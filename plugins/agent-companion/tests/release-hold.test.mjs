@@ -7,7 +7,8 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync, readFileSync, appendFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { makeFixture, runHook, decisionOf, PLUGIN_ROOT, queueFreeEnv } from './helpers.mjs';
 import { gateDecision } from '../hooks/lib/resource-gate.mjs';
 import { evaluate } from '../scripts/release-watch.mjs';
@@ -424,4 +425,91 @@ test('the prompt that lifts the hold also gets the instruction for the other map
   const ok = as('lead-b', 'clear hold');
   assert.match(ctxOf(ok), /hold is lifted/);
   assert.match(ctxOf(ok), new RegExp(`Send each of these sessions a local message now: ${L_A}`));
+}));
+
+// ---- 0.31.66 round: owed messages on every lift, locks, cap order ----
+const liftByTick = (fx, held) => {
+  const t0 = Date.now();
+  S.openFlag({ version: '9', flags: freshFlag(), at: t0 - 3600e3 });
+  S.noteShown('s1', t0 - 60e3);
+  putHold({ ...HOLD, since: iso(t0 - 30e3) });
+  for (const h of held) S.noteHeld(h, t0 - 20e3);
+  const tp = mkTranscript(fx, 'tick-lift', [urec(t0 - 500, 'clear hold')]);
+  assert.ok(S.noteCandidate({ sessionId: 's1', transcriptPath: tp, prompt: 'clear hold', at: t0 }));
+  S.maybeHold({ holdMinutes: 30, at: t0 + 5000 });
+  assert.equal(S.isHoldActive(), false, 'the tick lifted the hold');
+  return tp;
+};
+const HELD_LEADS = [{ session_id: 'lead-a', cwd: '/w/a', transcript_path: '/t/a.jsonl' }, { session_id: 'lead-b', cwd: '/w/b', transcript_path: '/t/b.jsonl' }, { session_id: 'sub-1', agent_id: 'ag1', cwd: '/w/a' }];
+
+test('owed: a lift by the tick records who is owed; the next lead prompt gets the message instruction (unmapped leads by Claude Code session id), the Stop hook blocks once, the claim is once', () => withFx((fx) => {
+  const desk = join(fx.dir, 'desk', 'acct', 'org'); mkdirSync(desk, { recursive: true });
+  writeFileSync(join(desk, L_A + '.json'), JSON.stringify({ sessionId: L_A, cliSessionId: 'lead-a' }));
+  const prevDesk = process.env.AGENT_COMPANION_DESKTOP_SESSIONS_DIR; process.env.AGENT_COMPANION_DESKTOP_SESSIONS_DIR = join(fx.dir, 'desk'); // the lift (this process) maps the held leads
+  try { liftByTick(fx, HELD_LEADS); } finally { if (prevDesk === undefined) delete process.env.AGENT_COMPANION_DESKTOP_SESSIONS_DIR; else process.env.AGENT_COMPANION_DESKTOP_SESSIONS_DIR = prevDesk; }
+  assert.deepEqual(S.owedSessions().map((x) => x.sessionId).sort(), ['lead-a', 'lead-b', 'sub-1'], 'recorded and unclaimed');
+  const tp = join(fx.dir, 'lead-c.jsonl'); writeFileSync(tp, 'x\n');
+  const e = { CLAUDE_CODE_SESSION_ATTENDED: '1', AGENT_COMPANION_DESKTOP_SESSIONS_DIR: join(fx.dir, 'desk') };
+  const first = runHook('hooks/runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 'lead-c', prompt: 'status?', cwd: '/w/c', transcript_path: tp, origin: { kind: 'human' } }, { env: e });
+  assert.match(ctxOf(first), /no desktop session to message/);
+  assert.match(ctxOf(first), new RegExp(`Send each of these sessions a local message now: ${L_A}`), 'the mapped lead by its desktop id');
+  assert.match(ctxOf(first), /lead-b \(cwd \/w\/b\)/, 'the unmapped lead by its Claude Code session id');
+  assert.doesNotMatch(ctxOf(first), /lead-a \(cwd/, 'a mapped lead is not in the unmapped list');
+  assert.doesNotMatch(ctxOf(first), /sub-1/, 'a subagent is not a lead to message');
+  assert.deepEqual(S.owedSessions(), [], 'claimed');
+  assert.ok(S.readPendingMessages('lead-c'), 'the claim is recorded so the Stop hook can hold the session to it');
+  const again = runHook('hooks/runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 'lead-d', prompt: 'hello', cwd: '/w/d', transcript_path: '/t/d.jsonl', origin: { kind: 'human' } }, { env: e });
+  assert.doesNotMatch(ctxOf(again), /no desktop session to message|Send each of these/, 'no second lead is told');
+  const stop = runHook('hooks/hold-message.mjs', { hook_event_name: 'Stop', session_id: 'lead-c', transcript_path: tp }, { args: ['--event', 'stop'] });
+  assert.equal(stop.json && stop.json.decision, 'block');
+  assert.equal(runHook('hooks/hold-message.mjs', { hook_event_name: 'Stop', session_id: 'lead-c', transcript_path: tp }, { args: ['--event', 'stop'] }).json, null, 'one block at most');
+}));
+
+test('owed: release-watch held lists the sessions still owed a message after a lift nobody claimed, and nothing once claimed', () => withFx((fx) => {
+  liftByTick(fx, HELD_LEADS);
+  const env = { ...process.env, AGENT_COMPANION_STATE_DIR: process.env.AGENT_COMPANION_STATE_DIR, AGENT_COMPANION_DESKTOP_SESSIONS_DIR: join(fx.dir, 'none') };
+  const run = (...a) => spawnSync(process.execPath, [join(PLUGIN_ROOT, 'scripts', 'release-watch.mjs'), ...a], { env, encoding: 'utf8', windowsHide: true });
+  const out = run('held');
+  assert.match(out.stdout, /hold cleared; these sessions are still owed a local message/);
+  assert.match(out.stdout, /lead-a/); assert.match(out.stdout, /lead-b/);
+  const j = JSON.parse(run('held', '--json').stdout);
+  assert.equal(j.owed, true); assert.equal(j.held, false); assert.equal(j.sessions.length, 3);
+  S.takeOwedMessages('lead-z');
+  assert.doesNotMatch(run('held').stdout, /still owed a local message/);
+}));
+
+test('owed: a typed "clear hold" lists the unmapped leads by Claude Code session id, and a lead sees the owed text once', () => withFx(() => {
+  putHold(HOLD);
+  promptAs('lead-a', 'status?');
+  promptAs('lead-b', 'hello');
+  const ok = promptAs('lead-b', 'clear hold');
+  assert.match(ctxOf(ok), /hold is lifted/);
+  assert.match(ctxOf(ok), /no desktop session to message/);
+  assert.match(ctxOf(ok), /lead-a \(cwd \/w\/demo\)/);
+  assert.doesNotMatch(ctxOf(ok), /lead-b \(cwd/, 'the lead that lifted it is not told to message itself');
+  assert.doesNotMatch(ctxOf(promptAs('lead-a', 'next')), /no desktop session to message/, 'claimed once');
+}));
+
+test('held records: capHeld drops subagent records first, then the oldest leads', () => {
+  const rec = (sessionId, agentId, t) => ({ sessionId, agentId, firstSeen: iso(t), lastSeen: iso(t) });
+  const list = [rec('l1', null, 1000), rec('s1', 'a1', 5000), rec('l2', null, 2000), rec('s2', 'a2', 6000), rec('l3', null, 3000)];
+  const kept = S.capHeld(list, 4).map((x) => x.sessionId);
+  assert.deepEqual(kept.sort(), ['l1', 'l2', 'l3', 's2'], 'the oldest subagent goes first even though a lead is older');
+  const two = S.capHeld(list, 2).map((x) => x.sessionId).sort();
+  assert.deepEqual(two, ['l2', 'l3'], 'leads fill the cap before any subagent; the oldest lead goes last');
+  assert.equal(S.capHeld(list, 10).length, 5, 'under the cap: untouched');
+});
+
+test('held records: parallel writers (separate processes) lose no record', () => withFx(async () => {
+  putHold(HOLD);
+  const stateDir = process.env.AGENT_COMPANION_STATE_DIR;
+  const mod = pathToFileURL(join(PLUGIN_ROOT, 'hooks', 'lib', 'release-watch-state.mjs')).href;
+  const code = `const S = await import(process.argv[1]); const i = process.argv[2]; S.noteHeld({ session_id: 'par-' + i, cwd: '/w/' + i, transcript_path: '/t/' + i + '.jsonl' });`;
+  const N = 8;
+  await Promise.all(Array.from({ length: N }, (_, i) => new Promise((res, rej) => {
+    const c = spawn(process.execPath, ['--input-type=module', '-e', code, mod, String(i)], { env: { ...process.env, AGENT_COMPANION_STATE_DIR: stateDir }, windowsHide: true, stdio: 'ignore' });
+    c.on('error', rej); c.on('exit', res);
+  })));
+  const ids = sessionsOf().map((x) => x.sessionId).sort();
+  assert.deepEqual(ids, Array.from({ length: N }, (_, i) => 'par-' + i).sort(), 'every writer\'s record is kept');
 }));
