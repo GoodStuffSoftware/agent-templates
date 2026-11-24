@@ -84,6 +84,6 @@ test('the text built-in rules inject is byte-identical to 0.31.51 before the not
   // knowledge-check-howto (0.31.57) is newer than the baseline, like child-coordinator-messages: left out of the hash.
   const rows = defaultRules().filter((r) => r.id !== 'child-coordinator-messages' && r.id !== 'knowledge-check-howto').map((r) => [r.id, r.then, r.thenLater ?? null, r.after ?? null].map(mask));
   const sha = createHash('sha256').update(JSON.stringify(rows)).digest('hex').slice(0, 12);
-  // Baseline taken from the settings-home branch before the notes were added. A deliberate wording change updates this hash (0.31.54: the resume-doctrine handoff clause; 0.31.65: the delegate-first writer-brief sentence; 0.31.66: diff-cap leg tightened delegate-first, resume-doctrine and lead-brevity wording; 0.31.66 round: trimmed delegate-first, resume-doctrine and lead-effort-check again to fit the lead-child block with 50 characters of headroom).
-  assert.equal(sha, ['d6e7a8', '380d06'].join(''));
+  // Baseline taken from the settings-home branch before the notes were added. A deliberate wording change updates this hash (0.31.54: the resume-doctrine handoff clause; 0.31.65: the delegate-first writer-brief sentence; 0.31.66: diff-cap leg tightened delegate-first, resume-doctrine and lead-brevity wording; 0.31.66 round: trimmed delegate-first, resume-doctrine and lead-effort-check again to fit the lead-child block with 50 characters of headroom; 0.31.68: event-turn-quiet full text lost two sentences the short form and the one-line cap already carry).
+  assert.equal(sha, ['2781d8', '0ef4b9'].join(''));
 });

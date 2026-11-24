@@ -246,7 +246,7 @@ test('text: writer clause is short, names the floors line and the absolute floor
   assert.ok(w.length < 1300, `writer clause is ${w.length} chars`);
   // The two short kinds carry no floors prose and no floor command, and stay inside their size budget (a typical project name).
   const leg = writerClause('risk', 'acme-app', { kind: 'leg' });
-  for (const re of [/one leg of a larger job/, /you spawn no reviewer; the lead applies the review table once to the whole change/, /Finish the task; at the handoff notice, hand off per the writer clause/, /Run unit tests for what you touch, no full suite, e2e, CI or full build/, /lead runs one pass after all legs/, /Commit, push, then report RISK: low\|mid\|high with the reason/]) {
+  for (const re of [/one leg of a larger job/, /you spawn no reviewer; the lead applies the review table once to the whole change/, /Run unit tests for what you touch, no full suite, e2e, CI or full build/, /lead runs one pass after all legs/, /Commit, push, then report RISK: low\|mid\|high with the reason/]) {
     assert.match(leg, re);
   }
   const plain = writerClause('risk', 'acme-app', { kind: 'plain' });

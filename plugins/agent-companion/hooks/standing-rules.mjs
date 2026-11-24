@@ -28,11 +28,11 @@
 // to SAVE tokens — to ever approach that. See outputCap() and cutToCap() in lib/rules.mjs: the "(N more rules dropped)" note rides on top of the cap, so the cut never takes it.
 
 import { readStdin, opt, passthrough, sessionIsSubagent } from './lib/context.mjs';
-import { matchRules, renderRules, readRules, cutToCap, pickEventTurnText, markEventTurnTold } from './lib/rules.mjs';
+import { matchRules, renderRules, readRules, cutToCap, sessionStartMaxChars, outputCap, pickEventTurnText, markEventTurnTold } from './lib/rules.mjs';
 
-function emit(hookEventName, text) {
+function emit(hookEventName, text, cap = outputCap()) {
   process.stdout.write(JSON.stringify({
-    hookSpecificOutput: { hookEventName, additionalContext: cutToCap(text) },
+    hookSpecificOutput: { hookEventName, additionalContext: cutToCap(text, cap) },
   }));
   process.exit(0);
 }
@@ -51,9 +51,9 @@ try {
     // only the rules that apply to a worker (audience 'all'); the orchestration
     // rules (spawn, ask the operator, resume, poll) would be noise it cannot act on.
     const matched = matchRules({ scope: 'session-start', sessionId, subagent: sessionIsSubagent(p) });
-    const text = renderRules(matched);
+    const text = renderRules(matched, { maxChars: sessionStartMaxChars() });
     if (!text) passthrough();
-    emit('SessionStart', text);
+    emit('SessionStart', text, outputCap({ sessionStart: true }));
   } else if (event === 'user-prompt') {
     const prompt = p.prompt ?? p.user_input ?? '';
     const always = matchRules({ scope: 'always', sessionId });
