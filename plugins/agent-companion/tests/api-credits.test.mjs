@@ -15,7 +15,7 @@ import {
 import { runApi, validKeyShape, isUnavailable, isWorkspaceMissing, isSpendLimit, hardUsdFrom, softUsdFrom, reviewLimits, reviewLimitsLine, OFFICIAL_ENDPOINT, SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD } from '../scripts/lib/api-run.mjs';
 import { makeTools } from '../scripts/lib/api-tools.mjs';
 import { telemetryDir } from '../hooks/lib/context.mjs';
-import { briefHash } from '../hooks/lib/sg-review-route.mjs';
+import { briefHash, runnerPrompt } from '../hooks/lib/sg-review-route.mjs';
 import { main as reviewMain, headMismatch, buildPrompt, readProjectRules, fetchSystem, RULES_CAP } from '../scripts/api-review.mjs';
 import { main as creditsMain } from '../scripts/api-credits.mjs';
 import { priceUsage } from '../scripts/lib/pricing.mjs';
@@ -840,21 +840,39 @@ const verdictRows = () => {
   return existsSync(p) ? readFileSync(p, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
 };
 
-test('S2: a worktree whose HEAD is not the range head is refused before any API call, and the failed row carries the brief hash', async () => {
+test('S2: a cwd whose HEAD is not the range head reviews from a temporary detached worktree, removed afterwards', async () => {
   const t = rig();
   try {
     assert.equal(headMismatch(t.repo, 'HEAD~1..HEAD'), null, 'cwd at the range head: fine');
     assert.match(headMismatch(t.repo, 'HEAD~1..HEAD~1'), /working directory is at [0-9a-f]{9}, not the range head [0-9a-f]{9}/);
     assert.match(headMismatch(t.repo, 'nope..no-such-ref'), /cannot resolve the range head/);
+    const listed = () => spawnSyncHidden('git', ['worktree', 'list', '--porcelain'], { cwd: t.repo, encoding: 'utf8' }).stdout;
     const f = stubFetch([msg([text('VERDICT: PASS')])]);
     const r = await t.run(f, { extra: ['--diff-ref', 'HEAD~1..HEAD~1'] });
+    assert.equal(r.code, 0, r.out);
+    assert.equal(f.calls.length, 1, 'the review ran');
+    assert.equal(listed().split(/\r?\n/).filter((l) => l.startsWith('worktree ')).length, 1, 'the temporary worktree is gone');
+    const rows = verdictRows();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].ok, true);
+  } finally { t.fx.cleanup(); }
+});
+
+test('S2b: a range head that cannot be resolved is refused before any API call; the reason is recorded and reaches the lead', async () => {
+  const t = rig();
+  try {
+    const f = stubFetch([msg([text('VERDICT: PASS')])]);
+    const r = await t.run(f, { extra: ['--diff-ref', 'nope..no-such-ref'] });
     assert.equal(r.code, 4);
-    assert.match(r.out, /^API review failed: the working directory is at/);
+    assert.match(r.out, /^API review failed: cannot resolve the range head/);
     assert.equal(f.calls.length, 0, 'no call, nothing paid');
     const rows = verdictRows();
     assert.equal(rows.length, 1);
     assert.equal(rows[0].source, 'api-review'); assert.equal(rows[0].ok, false);
+    assert.match(rows[0].reason, /cannot resolve the range head/);
     assert.equal(rows[0].brief_hash, briefHash(readFileSync(t.brief, 'utf8')), 'the guard repeat check keys on this');
+    const p = runnerPrompt({ briefFile: 'b', reviewFile: 'r', range: 'a..b', cwd: 'c' });
+    assert.match(p, /API review failed \(<reason>\); spawn the review again/);
   } finally { t.fx.cleanup(); }
 });
 
