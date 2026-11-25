@@ -156,10 +156,10 @@ Defaults and why: 110K and 150K from usage review 2026-11 (calls over 150K were 
 
 An Artifact watch is the live comment subscription behind `ArtifactComments`. When one fails to arm (for example the artifact belongs to the other claude.ai account after an account switch) nothing is written anywhere until the session lists its watches. Two hooks make that visible, locally (no network, no Discord):
 
-- `hooks/artifact-watch.mjs`, PostToolUse on `ArtifactComments` and `Artifact`. Failures: an `arms[]` entry whose state is not armed/ok, a `watches[]` entry with `connected: false`, or the text form ("NOT watching" / "failed to arm"). The session gets one directive: call `PushNotification` once (session title, artifact, reason), say the same in its next reply, and fix it by sharing the artifact to this account as editor (`session-sync:share-artifacts`) or switching back to the owning account.
+- `hooks/artifact-watch.mjs`, PostToolUse on `ArtifactComments` and `Artifact`. Only structured fields count: an `arms[]` entry whose state means failure (failed, or matching fail/error/drop/revok/expir/denied/unauthor), or a `watches[]` entry with `connected: false`. Pending, arming or connecting states do nothing. The one text form is the client's "NOT watching: the live subscription failed to arm" line in an `Artifact` publish result that has no structured fields; comment text is never read. The session gets one directive: call `PushNotification` once (session title, artifact, reason), say the same in its next reply, and fix it by sharing the artifact to this account as editor (`session-sync:share-artifacts`) or switching back to the owning account. The directive is printed before the state is recorded.
 - `hooks/artifact-watch-start.mjs`, SessionStart on `resume` and `compact`. A session that holds watches (recorded by the hook above, or `publishedArtifacts` in the desktop session record, cached 10 minutes) is told to list them once with `ArtifactComments {"action":"watch"}`. Silent otherwise. No transcript scan.
 
-Dedupe: key = session id + artifact url + failure time (`at`). A repeat listing of the same failure injects nothing; a new `at` for the same url alerts again. State is under `~/.claude/agent-companion/state/`: `artifact-watch-alerted.json` (keys), `artifact-watch-alerts.jsonl` (one record per alert, the evidence trail), `artifact-watch-sessions.json`, `artifact-watch-meta.json` (cache).
+Dedupe is a state transition, not a timestamp: per session and url the last observed state (ok or failed) is kept. An alert fires when a url goes into failed from ok or unknown, once per failure episode; it stays silent while the url stays failed (a new `at` or `since` does not matter) until the url has been seen working again, or one reminder 24 h after the alert. State: one file per session, `~/.claude/agent-companion/state/artifact-watch/<session>.json` (temp file + rename; an unreadable file is never overwritten and the directive still prints), `artifact-watch-alerts.jsonl` (append-only, one record per alert), `artifact-watch-index.json` (session metadata cache, 10 minutes, capped at 4000 records walked and 120 indexed).
 
 Option `artifact_watch_alerts` (default `true`); off silences both hooks.
 
@@ -167,8 +167,8 @@ CLI (arguments are stable; session-sync calls it after an account switch):
 
 ```
 node scripts/artifact-watch.mjs scan [--since <iso>] [--json]   # sessions with failed arms not yet alerted (transcript tails, last 24 h by default)
-node scripts/artifact-watch.mjs simulate --session <id>          # feed the hook a fixture failure; prints the directive once, nothing on a repeat
-node scripts/artifact-watch.mjs status [--json]                  # alerts sent and dedupe counts
+node scripts/artifact-watch.mjs simulate --session <id>          # real hook, isolated temp state dir (never real state); directive once, nothing on a repeat; --reset clears it
+node scripts/artifact-watch.mjs status [--json]                  # alerts sent (simulated records excluded)
 ```
 
 ## Delegation guard

@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 // Artifact watch alerts CLI. Usage (arguments are stable; session-sync calls these after an account switch):
 //   node scripts/artifact-watch.mjs scan [--since <iso>] [--json]   sessions with failed arms not yet alerted (transcript tails only)
-//   node scripts/artifact-watch.mjs simulate --session <id>          feed the PostToolUse hook a fixture failure; print what it injects
-//   node scripts/artifact-watch.mjs status [--json]                  alerts sent, with dedupe state
-// Read-only except simulate (which writes dedupe state and one alert record, like the real hook). No network.
+//   node scripts/artifact-watch.mjs simulate --session <id> [--reset]  run the real PostToolUse hook on a fixture failure against an
+//                                                                    isolated temp state dir; print what it injects. Never touches real state.
+//   node scripts/artifact-watch.mjs status [--json]                  alerts sent (simulated records excluded)
+// Read-only except simulate's own temp dir. No network.
 
-import { readdirSync, statSync, openSync, readSync, closeSync, readFileSync, existsSync } from 'node:fs';
+import { readdirSync, statSync, openSync, readSync, closeSync, readFileSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { claudeDir } from '../hooks/lib/context.mjs';
-import { parseWatchResult, alertKey, ALERTED_FILE, ALERTS_LOG, LIST_CALL } from '../hooks/lib/artifact-watch.mjs';
+import { parseWatchResult, readSessionState, ALERTS_LOG, LIST_CALL } from '../hooks/lib/artifact-watch.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const TAIL_BYTES = 4 * 1024 * 1024;
@@ -33,13 +35,8 @@ function tailLines(path, bytes = TAIL_BYTES) {
   } catch { return []; } finally { try { if (fd !== undefined) closeSync(fd); } catch { /* ignore */ } }
 }
 
-function readAlerted() {
-  try { return JSON.parse(readFileSync(ALERTED_FILE(), 'utf8')) || {}; } catch { return {}; }
-}
-
 export function scan({ since, root = join(claudeDir(), 'projects') } = {}) {
   const cutoff = since ? Date.parse(since) : Date.now() - DAY;
-  const alerted = readAlerted();
   const files = [];
   let dirs = [];
   try { dirs = readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()); } catch { /* none */ }
@@ -55,31 +52,33 @@ export function scan({ since, root = join(claudeDir(), 'projects') } = {}) {
   const out = [];
   for (const { p } of files.slice(0, MAX_FILES)) {
     const sid = basename(p, '.jsonl');
-    const live = new Set();
     const failed = new Map();
     for (const line of tailLines(p)) {
       if (!line.includes('"arms"') && !line.includes('"watches"')) continue;
       let o; try { o = JSON.parse(line); } catch { continue; }
       const r = o && o.toolUseResult;
       if (!r || typeof r !== 'object') continue;
-      const { failures } = parseWatchResult(r);
-      for (const w of Array.isArray(r.watches) ? r.watches : []) if (w && w.connected === true) { live.add(w.url); failed.delete(w.url); }
-      for (const f of failures) { failed.set(f.url, f); live.delete(f.url); }
+      for (const f of parseWatchResult(r).obs) {
+        if (f.status === 'failed') failed.set(f.url, f);
+        else if (f.status === 'ok') failed.delete(f.url);
+      }
     }
-    const fresh = [...failed.values()].filter((f) => !alerted[alertKey(sid, f)]);
+    const st = readSessionState(sid);
+    const fresh = [...failed.values()].filter((f) => !(st.ok && st.data.urls[f.url] && st.data.urls[f.url].state === 'failed'));
     if (fresh.length) out.push({ session: sid, transcript: p, failures: fresh.map((f) => ({ ...f, atIso: f.at ? new Date(f.at).toISOString() : null })) });
   }
   return out;
 }
 
 export function status() {
-  const alerted = readAlerted();
   let records = [];
-  try { records = readFileSync(ALERTS_LOG(), 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); } catch { /* none */ }
-  return { alertsSent: records.length, dedupeKeys: Object.keys(alerted).length, alerts: records };
+  try { records = readFileSync(ALERTS_LOG(), 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((r) => r && !r.simulated); } catch { /* none */ }
+  let sessions = 0;
+  try { sessions = readdirSync(join(ALERTS_LOG(), '..', 'artifact-watch')).filter((n) => n.endsWith('.json')).length; } catch { /* none */ }
+  return { alertsSent: records.length, sessionsTracked: sessions, alerts: records };
 }
 
-const SIM_AT = 1795582347544; // fixed, so a second run of the same session dedupes
+const SIM_AT = 1795582347544; // fixed
 export function simulatePayload(session) {
   const url = 'https://claude.ai/artifact/SimulatedArtifact0001';
   return {
@@ -89,9 +88,17 @@ export function simulatePayload(session) {
   };
 }
 
-function simulate(session) {
+// The simulation's state dir: a temp dir that persists between runs (so a second run dedupes); --reset clears it.
+export const simDir = () => process.env.AGENT_COMPANION_ARTIFACT_WATCH_SIM_DIR || join(tmpdir(), 'ac-artifact-watch-simulate');
+
+function simulate(session, reset) {
+  const dir = simDir();
+  if (reset) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* none */ } }
+  mkdirSync(dir, { recursive: true });
+  const env = { ...process.env, AGENT_COMPANION_STATE_DIR: dir, AGENT_COMPANION_CODE_SESSIONS_DIR: join(dir, 'no-code-sessions') };
+  delete env.CLAUDE_PLUGIN_OPTION_ARTIFACT_WATCH_ALERTS;
   const res = spawnSync(process.execPath, [join(HERE, '..', 'hooks', 'artifact-watch.mjs')], {
-    input: JSON.stringify(simulatePayload(session)), encoding: 'utf8', windowsHide: true, timeout: 15000,
+    input: JSON.stringify(simulatePayload(session)), encoding: 'utf8', windowsHide: true, timeout: 15000, env,
   });
   const out = (res.stdout || '').trim();
   if (!out) return '';
@@ -110,18 +117,18 @@ if (isMain) {
     else for (const s of r) for (const f of s.failures) console.log(`${s.session}  ${f.url}  ${f.atIso || '?'}  ${f.reason}`);
   } else if (cmd === 'simulate') {
     const s = arg(argv, '--session');
-    if (!s) { console.error('usage: artifact-watch.mjs simulate --session <id>'); process.exit(2); }
-    const t = simulate(s);
+    if (!s) { console.error('usage: artifact-watch.mjs simulate --session <id> [--reset]'); process.exit(2); }
+    const t = simulate(s, argv.includes('--reset'));
     if (t) console.log(t);
   } else if (cmd === 'status') {
     const r = status();
     if (json) console.log(JSON.stringify(r, null, 2));
     else {
-      console.log(`alerts sent: ${r.alertsSent}; dedupe keys: ${r.dedupeKeys}`);
-      for (const a of r.alerts.slice(-20)) console.log(`${a.ts}  ${a.session}  ${a.url}  at=${a.at}  ${a.reason}${a.simulated ? '  (simulated)' : ''}`);
+      console.log(`alerts sent: ${r.alertsSent}; sessions tracked: ${r.sessionsTracked}`);
+      for (const a of r.alerts.slice(-20)) console.log(`${a.ts}  ${a.session}  ${a.url}  at=${a.at}  ${a.reason}${a.reminder ? '  (reminder)' : ''}`);
     }
   } else {
-    console.error(`usage: artifact-watch.mjs scan [--since <iso>] [--json] | simulate --session <id> | status [--json]\nSession list call: ArtifactComments ${LIST_CALL}`);
+    console.error(`usage: artifact-watch.mjs scan [--since <iso>] [--json] | simulate --session <id> [--reset] | status [--json]\nSession list call: ArtifactComments ${LIST_CALL}`);
     process.exit(cmd ? 2 : 0);
   }
 }
