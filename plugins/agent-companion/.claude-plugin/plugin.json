@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.68",
+  "version": "0.31.69",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -957,6 +957,12 @@
       "type": "boolean",
       "title": "Routine pin rule",
       "description": "Every routine names an evaluated model. Denies a RemoteTrigger create/update whose job_config has no model, and after a local scheduled task is created, says so when its SKILL.md has no model: line. Default on; off = neither check.",
+      "default": true
+    },
+    "artifact_watch_alerts": {
+      "type": "boolean",
+      "title": "Artifact watch alerts",
+      "description": "When an ArtifactComments or Artifact result shows an artifact watch that failed to arm or is not connected, tell the session once (per session, artifact and failure time) to send a desktop push notification (PushNotification) and say so in its next reply, with the fix. On resume or compact a session that holds watches is told to list them once so a failed arm shows up. Local only; no network send. Off: both hooks stay silent. CLI: scripts/artifact-watch.mjs.",
       "default": true
     },
     "publish_check": {

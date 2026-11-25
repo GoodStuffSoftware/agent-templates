@@ -152,6 +152,25 @@ When a worker ends with a handoff, the lead is told to spawn a fresh worker of t
 `subagent_handoff_limits` is the switch (default on); `subagent_handoff_exempt_types` lists agent types left out (default empty). An explicit 0 in your config is honoured. Rows: `handoff-limit.jsonl`.
 Defaults and why: 110K and 150K from usage review 2026-11 (calls over 150K were about 40% of subagent cost); the older `subagent_ceiling_tokens` nudge stays as it was.
 
+## Artifact watch alerts (0.31.69)
+
+An Artifact watch is the live comment subscription behind `ArtifactComments`. When one fails to arm (for example the artifact belongs to the other claude.ai account after an account switch) nothing is written anywhere until the session lists its watches. Two hooks make that visible, locally (no network, no Discord):
+
+- `hooks/artifact-watch.mjs`, PostToolUse on `ArtifactComments` and `Artifact`. Failures: an `arms[]` entry whose state is not armed/ok, a `watches[]` entry with `connected: false`, or the text form ("NOT watching" / "failed to arm"). The session gets one directive: call `PushNotification` once (session title, artifact, reason), say the same in its next reply, and fix it by sharing the artifact to this account as editor (`session-sync:share-artifacts`) or switching back to the owning account.
+- `hooks/artifact-watch-start.mjs`, SessionStart on `resume` and `compact`. A session that holds watches (recorded by the hook above, or `publishedArtifacts` in the desktop session record, cached 10 minutes) is told to list them once with `ArtifactComments {"action":"watch"}`. Silent otherwise. No transcript scan.
+
+Dedupe: key = session id + artifact url + failure time (`at`). A repeat listing of the same failure injects nothing; a new `at` for the same url alerts again. State is under `~/.claude/agent-companion/state/`: `artifact-watch-alerted.json` (keys), `artifact-watch-alerts.jsonl` (one record per alert, the evidence trail), `artifact-watch-sessions.json`, `artifact-watch-meta.json` (cache).
+
+Option `artifact_watch_alerts` (default `true`); off silences both hooks.
+
+CLI (arguments are stable; session-sync calls it after an account switch):
+
+```
+node scripts/artifact-watch.mjs scan [--since <iso>] [--json]   # sessions with failed arms not yet alerted (transcript tails, last 24 h by default)
+node scripts/artifact-watch.mjs simulate --session <id>          # feed the hook a fixture failure; prints the directive once, nothing on a repeat
+node scripts/artifact-watch.mjs status [--json]                  # alerts sent and dedupe counts
+```
+
 ## Delegation guard
 
 `delegation_guard` enforces "the main session delegates" at the tool call rather than in a document. It counts the main thread's execution-class calls (`Bash`, `PowerShell`, `Edit`, `Write`, `NotebookEdit`, `Read`, `Grep`, `Glob`); an `Agent` spawn or a `SendMessage` that actually runs (PostToolUse, so a spawn another guard denied does not count) ends the streak. When a call brings the streak to `delegation_threshold` (default 4, minimum 2) the guard fires and the streak restarts at 0:
