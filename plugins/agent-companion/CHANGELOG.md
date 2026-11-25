@@ -2,6 +2,10 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.70 — 2026-11-25
+
+- **Artifact watch alert fix text corrected.** The directive no longer says sharing the artifact as editor fixes a failed watch (tested: it does not for an artifact owned by another organization). It now says to switch back to the owning account; re-sharing may help only within this account's own organization (unverified).
+
 ## 0.31.69 — 2026-11-25
 
 - **Artifact watch alerts.** A PostToolUse hook on `ArtifactComments` and `Artifact` detects failed or disconnected artifact watches (structured `arms[]`/`watches[]` fields; the text form only for the Artifact publish line) and tells the session to send one `PushNotification`, say so in its next reply, and give the fix. A SessionStart hook (resume, compact) tells a session that holds watches to list them once. Alerts on a transition into failed (once per failure episode, one 24 h reminder), state per session in `state/artifact-watch/<session>.json`; evidence in `state/artifact-watch-alerts.jsonl`. New CLI `scripts/artifact-watch.mjs` (`scan`, `simulate` against an isolated temp state dir, `status`) and option `artifact_watch_alerts` (default on).

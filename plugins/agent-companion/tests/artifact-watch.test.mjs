@@ -28,7 +28,9 @@ test('fixture failure gives one directive, a repeat gives none', () => {
     assert.equal(a.status, 0);
     const t = ctx(a);
     assert.match(t, /PushNotification/);
-    assert.match(t, /session-sync:share-artifacts/);
+    assert.match(t, /switch back to the account that owns the artifact/);
+    assert.match(t, /even with editor access/);
+    assert.doesNotMatch(t, /share-artifacts/);
     assert.match(t, /next reply/);
     assert.ok(t.includes(URL1) && t.includes('no_subscription_token'));
     const b = runHook(HOOK, post('s1', failed()));
