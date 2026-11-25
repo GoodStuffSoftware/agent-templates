@@ -152,6 +152,25 @@ When a worker ends with a handoff, the lead is told to spawn a fresh worker of t
 `subagent_handoff_limits` is the switch (default on); `subagent_handoff_exempt_types` lists agent types left out (default empty). An explicit 0 in your config is honoured. Rows: `handoff-limit.jsonl`.
 Defaults and why: 110K and 150K from usage review 2026-11 (calls over 150K were about 40% of subagent cost); the older `subagent_ceiling_tokens` nudge stays as it was.
 
+## Artifact watch alerts (0.31.69)
+
+An Artifact watch is the live comment subscription behind `ArtifactComments`. When one fails to arm (for example the artifact belongs to the other claude.ai account after an account switch) nothing is written anywhere until the session lists its watches. Two hooks make that visible, locally (no network, no Discord):
+
+- `hooks/artifact-watch.mjs`, PostToolUse on `ArtifactComments` and `Artifact`. Only structured fields count: an `arms[]` entry whose state means failure (failed, or matching fail/error/drop/revok/expir/denied/unauthor), or a `watches[]` entry with `connected: false`. Pending, arming or connecting states do nothing. The one text form is the client's "NOT watching: the live subscription failed to arm" line in an `Artifact` publish result that has no structured fields; comment text is never read. The session gets one directive: call `PushNotification` once (session title, artifact, reason), say the same in its next reply, and fix it by sharing the artifact to this account as editor (`session-sync:share-artifacts`) or switching back to the owning account. The directive is printed before the state is recorded.
+- `hooks/artifact-watch-start.mjs`, SessionStart on `resume` and `compact`. A session that holds watches (recorded by the hook above, or `publishedArtifacts` in the desktop session record, cached 10 minutes) is told to list them once with `ArtifactComments {"action":"watch"}`. Silent otherwise. No transcript scan.
+
+Dedupe is a state transition, not a timestamp: per session and url the last observed state (ok or failed) is kept. An alert fires when a url goes into failed from ok or unknown, once per failure episode; it stays silent while the url stays failed (a new `at` or `since` does not matter) until the url has been seen working again, or one reminder 24 h after the alert. State: one file per session, `~/.claude/agent-companion/state/artifact-watch/<session>.json` (temp file + rename; an unreadable file is never overwritten and the directive still prints), `artifact-watch-alerts.jsonl` (append-only, one record per alert), `artifact-watch-index.json` (session metadata cache, 10 minutes, capped at 4000 records walked and 120 indexed).
+
+Option `artifact_watch_alerts` (default `true`); off silences both hooks.
+
+CLI (arguments are stable; session-sync calls it after an account switch):
+
+```
+node scripts/artifact-watch.mjs scan [--since <iso>] [--json]   # sessions with failed arms not yet alerted (transcript tails, last 24 h by default)
+node scripts/artifact-watch.mjs simulate --session <id>          # real hook, isolated temp state dir (never real state); directive once, nothing on a repeat; --reset clears it
+node scripts/artifact-watch.mjs status [--json]                  # alerts sent (simulated records excluded)
+```
+
 ## Delegation guard
 
 `delegation_guard` enforces "the main session delegates" at the tool call rather than in a document. It counts the main thread's execution-class calls (`Bash`, `PowerShell`, `Edit`, `Write`, `NotebookEdit`, `Read`, `Grep`, `Glob`); an `Agent` spawn or a `SendMessage` that actually runs (PostToolUse, so a spawn another guard denied does not count) ends the streak. When a call brings the streak to `delegation_threshold` (default 4, minimum 2) the guard fires and the streak restarts at 0:

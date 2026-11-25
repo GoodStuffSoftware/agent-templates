@@ -56,7 +56,8 @@ export function codeSessionsDir({ env = process.env, platform = process.platform
 }
 
 // Every local_*.json under the dir (<account>/<org>/ levels, found by a bounded walk), newest first.
-function recordFiles(root) {
+// `maxFiles` hard-caps how many records are collected (the walk stops there), for callers on a latency budget.
+export function recordFiles(root, { maxFiles = Infinity } = {}) {
   const out = [];
   const walk = (d, depth) => {
     let es;
@@ -65,6 +66,7 @@ function recordFiles(root) {
       const p = join(d, e.name);
       if (e.isDirectory()) { if (depth < 3) walk(p, depth + 1); continue; }
       if (!/^local_.*\.json$/.test(e.name)) continue;
+      if (out.length >= maxFiles) return;
       try { out.push({ p, m: statSync(p).mtimeMs }); } catch { /* vanished */ }
     }
   };
