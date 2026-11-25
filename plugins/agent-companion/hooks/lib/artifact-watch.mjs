@@ -205,7 +205,7 @@ export function buildDirective(sid, fresh, meta = {}) {
     'Do these now, in this order:',
     `1. Call PushNotification ONCE with a short text like: "${title}: artifact watch failed: ${short}". Local desktop push only; no Discord, no other send.`,
     '2. Say the same in your next reply to the user (session, artifact, reason).',
-    '3. Give the fix: share the artifact to this account as an editor (session-sync:share-artifacts), or switch back to the account that owns it.',
+    "3. Give the fix: switch back to the account that owns the artifact; a watch cannot run from another organization's account, even with editor access. Re-sharing may help only for an artifact in this account's own organization (unverified).",
     'Do not call PushNotification again for this same failure.',
   ].join('\n');
 }
