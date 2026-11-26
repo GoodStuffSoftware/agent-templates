@@ -621,10 +621,57 @@ export function status({ now = Date.now(), cfg = loadConfig(), path = ledgerPath
   { const w = sharesWarning(sh); if (w) lines.push(w); }
   if (c.tripped) lines.push(`BREAKER TRIPPED ${c.tripped.at}: ${c.tripped.reason}; decide answers plan until the cycle ends or a probe succeeds`);
   else if (c.fails) lines.push(`${c.fails} billing/auth failure(s) in a row (trips at ${TRIP_AFTER})`);
-  return { text: lines.join('\n'), total, cycle: cy, ledger: c };
+  // The primary lane's entries only (named targets are reported by targetLines); allEntries has every lane.
+  return { text: lines.join('\n'), total, cycle: cy, ledger: { ...c, entries: entriesOf(c.entries, PRIMARY), allEntries: c.entries } };
 }
 
-// The API share of all reviews (0.31.63), from telemetry/review-verdicts.jsonl. An API review counts once, by the row api-review.mjs
+/// --- per-target report (0.31.72) --------------------------------------------------------------
+// Empty unless api_targets names a target, so the output with the options unset is the output it always was.
+export const namedTargets = (cfg) => Object.values((cfg && cfg.targets) || {}).filter((t) => !t.builtin);
+
+// One lane's booked figures and breaker, as a line for target `t`.
+function laneLine(t, c) {
+  const L = laneOf(c, t.name);
+  const spent = sum(L.spent);
+  const n = sum(L.n);
+  const budget = t.name === PRIMARY ? null : t.budget;
+  const brk = L.tripped ? `BREAKER TRIPPED ${L.tripped.at}: ${L.tripped.reason}` : (L.fails ? `${L.fails} failure(s) in a row (trips at ${TRIP_AFTER})` : 'breaker ok');
+  return `${t.name}: booked $${spent.toFixed(2)} in ${n} item(s)${budget ? ` of its $${budget} budget` : ''}; ${brk}`;
+}
+
+// cycle: the ledger cycle (top level = primary lane, lanes = named). orgs: getTargetOrgs() result ([] before it is fetched), grouped
+// by org id with the org name only as secondary text. A group with no cost data says so and never fails the report.
+export function targetLines({ cfg, cycle = emptyCycle(), orgs = [], now = Date.now() }) {
+  const named = namedTargets(cfg);
+  const lines = [];
+  for (const e of cfg.targetErrors || []) lines.push(`api_targets: ${e}`);
+  if (!named.length && !Object.keys(cfg.categoryTargets || {}).length) return lines;
+  const cy = cycleOf(now, cfg.cycleDay);
+  const all = Object.values(cfg.targets || {});
+  lines.push('API targets (grouped by org; booked = this ledger, billed = Admin API):');
+  for (const cat of ['review', 'workers']) {
+    const l = (cfg.categoryTargets || {})[cat];
+    if (l && l.length) lines.push(`  ${cat} order: ${l.join(' > ')}, then the plan`);
+  }
+  const seen = new Set();
+  const groups = orgs.length ? orgs : [{ id: null, name: '', targets: all.map((t) => t.name), ok: false, snapshot: null, reason: 'billing not fetched' }];
+  for (const g of groups) {
+    const head = g.id ? `org ${g.id}${g.name ? ` (${g.name})` : ''}` : 'org unknown';
+    const billed = g.ok && g.snapshot ? `billed $${billedSince(g.snapshot, cy.start).toFixed(2)} this cycle through ${new Date(g.snapshot.through).toISOString().slice(0, 10)}` : `no cost data${g.reason ? ` (${g.reason})` : ''}`;
+    lines.push(`  ${head}: ${billed}`);
+    for (const name of g.targets) {
+      const t = (cfg.targets || {})[name];
+      if (!t) continue;
+      seen.add(name);
+      const ws = g.ok && g.snapshot && t.workspace ? `; workspace ${workspaceName(g.snapshot, t.workspace)} billed $${billedSince(g.snapshot, cy.start, t.workspace).toFixed(2)}` : '';
+      lines.push(`    ${laneLine(t, cycle)}${ws}`);
+    }
+  }
+  for (const t of all) if (!seen.has(t.name)) lines.push(`    ${laneLine(t, cycle)}`);
+  return lines;
+}
+
+/ The API share of all reviews (0.31.63), from telemetry/review-verdicts.jsonl. An API review counts once, by the row api-review.mjs
 // writes on exit (source "api-review"); every other row counts as a subagent review unless it says route "api" (the verdict row of a
 // guard-routed review, which the api-review row already counts). An api-review row with ok:false (a failed run, retried as a subagent) is not counted: the retry is the one review that happened. The denominator is reviews with a verdict: API reviews that finished plus subagent reviews with a parsed verdict line. Rows without a route (older ones) are subagent reviews.
 export function reviewShareLines({ now = Date.now(), file = join(telemetryDir(), 'review-verdicts.jsonl') } = {}) {

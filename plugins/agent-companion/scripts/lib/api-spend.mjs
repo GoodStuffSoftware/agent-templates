@@ -19,6 +19,7 @@
 
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { opt, stateFile, stateRootPath } from '../../hooks/lib/context.mjs';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
 import { spawnSyncHidden } from './proc.mjs';
@@ -369,7 +370,10 @@ export async function fetchBilling(key, fetchImpl, { now = Date.now(), cfg = loa
     }
   } catch { hourly = null; hourlyFrom = null; missing.push('hourly usage'); }
   try { keys = await fetchApiKeyNames(key, fetchImpl); } catch { missing.push('key names'); }
-  return { v: 1, through, from, cost, usage, hourly, hourlyFrom, workspaces, keys, missing };
+  // 0.31.72: the org this admin key belongs to (reports group by org id: two orgs can share one display name). Optional.
+  let org = null;
+  try { const o = await adminGet('/v1/organizations/me', [], key, fetchImpl); if (o && o.id) org = { id: String(o.id), name: String(o.name || '') }; } catch { /* the cost data is still good without it */ }
+  return { v: 1, through, from, cost, usage, hourly, hourlyFrom, workspaces, keys, missing, org };
 }
 
 function readBillingCache(path) {
@@ -412,4 +416,41 @@ export async function getBilling({
     try { mkdirSync(dirname(cachePath), { recursive: true }); writeFileSync(failPath, `${JSON.stringify({ at: now, reason })}\n`); } catch { /* only costs a retry */ }
     return { ok: false, reason };
   }
+}
+
+// --- per-target billing, grouped by org (0.31.72) -------------------------------------------
+// One billing snapshot per distinct admin key source (the primary's is passed in, already fetched), then targets are grouped by
+// org id: two orgs can share one display name, so the name is secondary. A target with no admin key, or whose key fails, is its own
+// group with ok: false and a reason ("no cost data"); nothing here throws. Key values never leave getBilling/readAdminKey.
+// Returns [{ id, name, targets: [name], ok, snapshot, reason }].
+export async function getTargetOrgs({ now = Date.now(), cfg = loadSpendConfig(), env = process.env, fetchImpl = globalThis.fetch, readKey, cachePath = billingCachePath(), primary = null } = {}) {
+  const targets = Object.values(cfg.targets || {});
+  const bySource = new Map();
+  const groups = [];
+  for (const t of targets) {
+    const src = t.builtin ? cfg.adminKeySource : t.admin;
+    if (!src) { groups.push({ id: null, name: '', targets: [t.name], ok: false, snapshot: null, reason: 'no admin key configured for this target' }); continue; }
+    if (!bySource.has(src)) {
+      let r;
+      if (t.builtin && primary) r = primary;
+      else {
+        const h = createHash('sha256').update(src).digest('hex').slice(0, 8);
+        try { r = await getBilling({ now, cfg: { ...cfg, adminKeySource: src }, env, fetchImpl, ...(readKey ? { readKey } : {}), cachePath: t.builtin ? cachePath : `${cachePath}.${h}` }); } catch (e) { r = { ok: false, reason: scrub((e && e.message) || e).slice(0, 120) }; }
+      }
+      bySource.set(src, { r, names: [] });
+    }
+    bySource.get(src).names.push(t.name);
+  }
+  const byOrg = new Map();
+  for (const [src, { r, names }] of bySource) {
+    const org = r && r.ok && r.snapshot && r.snapshot.org;
+    const id = org ? org.id : null;
+    if (id && byOrg.has(id)) { byOrg.get(id).targets.push(...names); continue; }
+    const g = { id, name: org ? org.name : '', targets: [...names], ok: !!(r && r.ok), snapshot: r && r.ok ? r.snapshot : null, reason: r && r.ok ? '' : scrub((r && r.reason) || 'no cost data').slice(0, 120) };
+    if (id) byOrg.set(id, g);
+    groups.push(g);
+  }
+  // keep the order of cfg.targets: primary first
+  const idx = (g) => Math.min(...g.targets.map((n) => targets.findIndex((t) => t.name === n)));
+  return groups.sort((a, b) => idx(a) - idx(b));
 }
