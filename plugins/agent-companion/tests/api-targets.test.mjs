@@ -222,7 +222,7 @@ test('worker: --target flag is a usage error for an unknown name; the worker fai
 });
 
 test('hook: API: target=<name> is read and passed to the governor and to api-review; API: no and API: opus keep working', async () => {
-  assert.equal(apiTarget('x\nAPI: target=overflow-reviewers\n'), 'overflow-reviewers');
+  assert.equal(apiTarget('x\nAPI: target=second-org-reviewers\n'), 'second-org-reviewers');
   assert.equal(apiTarget('API: no'), null);
   assert.equal(apiMarker('API: target=a'), null);
   assert.equal(apiMarker('API: no'), 'no');
@@ -233,14 +233,16 @@ test('hook: API: target=<name> is read and passed to the governor and to api-rev
   try {
     const seen = [];
     const brief = (x) => `TYPE: code-review\nWRITER: sonnet/high\nROLE: reviewer\nRISK: mid\n${x}\nBranch fix/zz, diff range main..fix/zz in WORKTREE: ${w.dir}\n`;
-    const call = (b, decide) => routeReview({ typeIsParity: true, declaredType: 'code-review', brief: b, decls: briefDeclarations(b), p: { tool_use_id: 'toolu_t1', cwd: w.dir }, input: { subagent_type: 'agent-companion:ac-sonnet-high', description: 'r', prompt: b }, subagentCaller: true, model: 'sonnet', sid: 's', updatedInput: null, deps: { opt: (k, d) => (k === 'api_review_route' ? 'all' : d), stateDir: () => w.dir, telemetryDir: () => w.dir, decide } });
+    const call = (b, decide) => routeReview({ typeIsParity: true, declaredType: 'code-review', brief: b, decls: briefDeclarations(b), p: { tool_use_id: 'toolu_t1', cwd: w.dir }, input: { subagent_type: 'agent-companion:ac-sonnet-high', description: 'r', prompt: b }, subagentCaller: true, model: 'sonnet', sid: 's', updatedInput: null, deps: { opt: (k, d) => (k === 'api_review_route' ? 'all' : k === 'api_targets' ? JSON.stringify({ a: { key: 'env:AC_KEY_A' } }) : d), stateDir: () => w.dir, telemetryDir: () => w.dir, decide } });
     const r = await call(brief('API: target=a'), (c, o) => { seen.push(o.target); return { decision: 'api', reason: 'ok', target: 'a' }; });
     assert.equal(r.route, 'api');
     assert.deepEqual(seen, ['a']);
     assert.match(r.updatedInput.prompt, /api-review\.mjs.* --target a /);
     const n = await call(brief('API: no'), () => { throw new Error('not asked'); });
     assert.equal(n.route_reason, 'caller-no');
-    const bad = await call(brief('API: target=nope'), () => ({ decision: 'plan', reason: 'failed closed: unknown target "nope"' }));
-    assert.deepEqual([bad.route, bad.route_reason], ['subagent', 'governor-fallback']);
+    // an unknown name is caught in the hook before the governor (the same target list), with a notice for the lead
+    const bad = await call(brief('API: target=nope'), () => { throw new Error('not asked'); });
+    assert.deepEqual([bad.route, bad.route_reason], ['subagent', 'unknown-target']);
+    assert.match(bad.notice, /nope.*known: primary, a\)/);
   } finally { w.cleanup(); }
 });

@@ -5,8 +5,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { makeFixture } from './helpers.mjs';
-import { loadConfig, decide, record, recordFallback, PRIMARY } from '../scripts/lib/api-credits.mjs';
+import { makeFixture, runHook, readJsonl } from './helpers.mjs';
+import { loadConfig, decide, record, recordFallback, recordFailure, PRIMARY } from '../scripts/lib/api-credits.mjs';
 import { fetchBilling, loadSpendConfig } from '../scripts/lib/api-spend.mjs';
 import { main as reviewMain } from '../scripts/api-review.mjs';
 import { runWorker } from '../scripts/api-worker.mjs';
@@ -193,4 +193,82 @@ test('fix 6: on the SDK engine a billing_error counts as credit exhausted (cappe
     assert.equal(r.unavailable, true);
     assert.equal(r.capped, true, r.reason);
   } finally { fx.cleanup(); }
+});
+
+// --- second fix round: the brief's target against the governor, and an unknown target name ---
+const REVIEW_BRIEF = (dir, extra) => `TYPE: code-review\nWRITER: sonnet/high\nROLE: reviewer\nRISK: mid\n${extra}\nBranch fix/zz, diff range main..fix/zz in WORKTREE: ${dir}\n`;
+function hookCall(w, brief, opts, decide) {
+  return routeReview({ typeIsParity: true, declaredType: 'code-review', brief, decls: briefDeclarations(brief), p: { tool_use_id: 'toolu_t3', cwd: w.dir }, input: { subagent_type: 'agent-companion:ac-sonnet-high', description: 'r', prompt: brief }, subagentCaller: true, model: 'sonnet', sid: 's', updatedInput: null,
+    deps: { opt: (k, d) => (k === 'api_review_route' ? 'all' : k in opts ? opts[k] : d), stateDir: () => join(w.dir, 'st'), telemetryDir: () => join(w.dir, 'tel'), ...(decide ? { decide } : {}) } });
+}
+
+test('S7: a governor redirect wins over the brief target (the real decide, scratch state dir)', async () => {
+  const w = makeFixture();
+  const saved = { AC_API_KEY: process.env.AC_API_KEY, AC_KEY_A: process.env.AC_KEY_A, AC_KEY_B: process.env.AC_KEY_B };
+  Object.assign(process.env, ENV);
+  try {
+    const opts = { api_targets: TARGETS, api_category_targets: 'review=a,primary' };
+    const brief = REVIEW_BRIEF(w.dir, 'API: target=a');
+    // a healthy: the explicit target starts the walk at a
+    const ok = await hookCall(w, brief, opts);
+    assert.equal(ok.route, 'api');
+    assert.match(ok.updatedInput.prompt, / --target a /);
+    // a tripped: the governor answers primary, and the runner is told primary, not a
+    recordFailure('cap', { cfg: mk(opts), hard: true, target: 'a' });
+    const redirected = await hookCall(w, brief, opts);
+    assert.equal(redirected.route, 'api');
+    assert.match(redirected.updatedInput.prompt, / --target primary /);
+    assert.doesNotMatch(redirected.updatedInput.prompt, / --target a /);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    w.cleanup();
+  }
+});
+
+test('L1: an unknown API: target=<name> is said to the lead and routes as API: no (options unset and set)', async () => {
+  const w = makeFixture();
+  const never = () => { throw new Error('decide must not run for an unknown target'); };
+  try {
+    const brief = REVIEW_BRIEF(w.dir, 'API: target=nosuch');
+    for (const [opts, known] of [[{}, 'known: primary)'], [{ api_targets: TARGETS, api_category_targets: 'review=a,primary' }, 'known: primary, a, b)']]) {
+      const r = await hookCall(w, brief, opts, never);
+      assert.equal(r.route, 'subagent');
+      assert.equal(r.route_reason, 'unknown-target');
+      assert.equal(r.updatedInput, null);
+      assert.match(r.notice, /API: target=nosuch/);
+      assert.ok(r.notice.includes(known), r.notice);
+    }
+    // a known name still routes
+    const okr = await hookCall(w, REVIEW_BRIEF(w.dir, 'API: target=a'), { api_targets: TARGETS }, () => ({ decision: 'api', reason: 'ok', target: 'a' }));
+    assert.equal(okr.route, 'api');
+  } finally { w.cleanup(); }
+});
+
+test('L1: through the spawn-guard hook the lead gets the notice and the spawn row says unknown-target', () => {
+  const t = makeFixture();
+  try {
+    const res = runHook('hooks/spawn-guard.mjs', {
+      session_id: 'sid-l1', agent_type: 'main', cwd: t.dir,
+      tool_input: { subagent_type: 'agent-companion:ac-sonnet-high', model: 'sonnet', run_in_background: true, name: 'rev', prompt: REVIEW_BRIEF(t.dir, 'API: target=nosuch') },
+    }, { env: { CLAUDE_PLUGIN_DATA: join(t.dir, '.claude', 'plugins', 'data', 'agent-companion-x'), CLAUDE_PLUGIN_OPTION_API_REVIEW_ROUTE: 'all' } });
+    assert.equal(res.status, 0, res.stderr);
+    const ctx = JSON.stringify(res.json || {});
+    assert.match(ctx, /API: target=nosuch/);
+    assert.match(ctx, /known: primary\)/);
+    const row = readJsonl(join(t.stateDir, 'telemetry', 'spawns.jsonl'))[0];
+    assert.equal(row && row.review_route_reason, 'unknown-target');
+  } finally { t.cleanup(); }
+});
+
+test('L3: a workspace-missing failure on a named target names that target\'s own workspace setting', async () => {
+  const r = rig();
+  try {
+    const WS400 = { status: 400, body: { type: 'error', error: { type: 'invalid_request_error', message: 'The request must include the anthropic-workspace-id header' } } };
+    const out = await r.run(keyed({ [KA]: WS400 }), { cfg: mk({ api_targets: TARGETS, api_category_targets: 'review=a' }) });
+    assert.notEqual(out.code, 0);
+    assert.match(out.out, /target a in api_targets/);
+    assert.doesNotMatch(out.out, /AC_API_WORKSPACE_ID/);
+    const out2 = await r.run(keyed({ [K0]: WS400 }), { cfg: mk() });
+    assert.match(out2.out, /AC_API_WORKSPACE_ID/);
+  } finally { r.fx.cleanup(); }
 });

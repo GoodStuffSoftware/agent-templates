@@ -323,6 +323,9 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     let nd;
     try { nd = decide('review', { cfg: cfgEff, env, target: next.name, ...(now ? { now } : {}) }); } catch { break; }
     if (nd.decision !== 'api') break;
+    // The failed attempt's own ledger error and notes are said now: only the last attempt's are printed after the loop.
+    if (r.ledgerError) err(`target ${tgt || PRIMARY}: ${r.ledgerError}`);
+    for (const n of r.notes || []) err(`API review note: target ${tgt || PRIMARY}: ${n}`);
     err(`API review note: target ${tgt || PRIMARY} is capped (${String(r.reason).slice(0, 80)}); failing over to ${nd.target || PRIMARY}`);
     tgt = nd.target && nd.target !== PRIMARY ? nd.target : null;
     attempts += 1;

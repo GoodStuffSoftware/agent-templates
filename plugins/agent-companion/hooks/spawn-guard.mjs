@@ -154,6 +154,8 @@ try {
     typeIsParity, declaredType, brief, decls, p, input, subagentCaller, model, isCanary, sid, recursionDeny,
     callerDeclaredType, updatedInput,
   });
+  // An unknown `API: target=` name in the brief: the spawn still runs (plan subagent); the lead is told through the allow's additionalContext.
+  const roleNudgeOut = reviewRoute && reviewRoute.notice ? [roleNudge, reviewRoute.notice].filter((x) => typeof x === 'string' && x.trim()).join('\n\n') : roleNudge;
   writeSpawnRow({
     reviewRoute,
     isCanary, input, model, def, callerEffort, sid, leadLive, p, loadedAtMs, ladderRewrite, declared, fromDef,
@@ -187,7 +189,7 @@ try {
     neededTools, browserVariantFor, missingModelNote, parityNoWriter, writerInferNote, parityNoWriterNote,
     writerNote, writerInferredNote, writerEffortNote, selfReviewNote, writerBelowCallerNote, gateMessage,
     parityInheritedEffort, noEffortStatedNote, buildFloorNote, pinReplacedNote, projectRoutePlan, p,
-    subagentCaller, pin, updatedInput, roleNudge, premiumDeclared, declaredKind, declaredConsequence,
+    subagentCaller, pin, updatedInput, roleNudge: roleNudgeOut, premiumDeclared, declaredKind, declaredConsequence,
     warrantDeclared, routingKnown, typeWeight, capCounts, parityRungName, rewriteState, rewriteModule,
     RECOMMEND_CMD, selfReviewExpected,
   });

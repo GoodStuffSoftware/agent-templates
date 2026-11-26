@@ -339,7 +339,7 @@
     "api_category_targets": {
       "type": "string",
       "title": "API targets: ordered target list per category",
-      "description": "Which targets each category tries, in order, with failover: \"review=primary,overflow-reviewers workers=overflow-workers\" (space-separated categories; review and workers). A run that ends on a spend-limit 400, the enforced 429 (error_code enforced_spend_limit_reached, never retried), credit exhausted, or a governor cap answer goes to the next target; when every target is exhausted the job falls back to the plan as before. An explicit target (`--target`, `API: target=`) fails over only to the targets after it in the list. Empty (default) = [primary] for every category.",
+      "description": "Which targets each category tries, in order, with failover: \"review=primary,second-org-reviewers workers=second-org-workers\" (space-separated categories; review and workers). A run that ends on a spend-limit 400, the enforced 429 (error_code enforced_spend_limit_reached, never retried), credit exhausted, or a governor cap answer goes to the next target; when every target is exhausted the job falls back to the plan as before. An explicit target (`--target`, `API: target=`) fails over only to the targets after it in the list. Empty (default) = [primary] for every category.",
       "default": ""
     },
     "api_spend_alerts": {

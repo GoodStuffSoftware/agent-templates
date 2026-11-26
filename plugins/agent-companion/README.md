@@ -1368,9 +1368,9 @@ Path guard (both modes): a Read, Grep or Glob search root is expanded first (`~`
 Work can be sent to any API key (and optional workspace) you name, with an ordered list per category and failover. Two options, both empty by default (then the only target is the built-in `primary`, `api_credits_key_source`, and behaviour is unchanged):
 
 - `api_targets`: JSON, `{"name":{"key":"bws:<secret>" | "env:<NAME>","workspace":"<id, optional>","admin":"<admin key source, optional>","budget":<USD, optional>}}`. `primary` is built in and cannot be redefined.
-- `api_category_targets`: the order each category tries, `review=primary,overflow-reviewers workers=overflow-workers` (categories `review` and `workers`).
+- `api_category_targets`: the order each category tries, `review=primary,second-org-reviewers workers=second-org-workers` (categories `review` and `workers`).
 
-Example (names only): target `overflow-workers` = `bws:anthropic-overflow--workers-key`, target `overflow-reviewers` = `bws:anthropic-overflow--reviewers-key`, both with admin key `bws:anthropic-overflow--admin-key`.
+Example (names only): target `second-org-workers` = `bws:<your-workers-key-name>`, target `second-org-reviewers` = `bws:<your-reviewers-key-name>`, both with admin key `bws:<your-admin-key-name>`.
 
 - **Failover.** A run that ends on a spend-limit 400, the enforced 429 (`error.details.error_code` `enforced_spend_limit_reached`: a wall, never retried on the fetch engine; an ordinary 429 is still retried. On the SDK engine the bundled Claude Code CLI makes its own retries of a 429 before the runner sees the error, and they cannot be switched off for this one case, so the retries happen there and the run then fails over once the error surfaces; `CLAUDE_CODE_MAX_RETRIES` would lower them for every error, so it is left at the CLI default), credit exhausted, or a governor cap answer goes to the next target. When every target is exhausted the job falls back to the plan as before. Alternation and the other plan answers are unchanged.
 - **One job, one target.** `--target <name>` on `api-review.mjs`, `api-worker.mjs` and `api-credits.mjs decide|record`, or the brief line `API: target=<name>` (read by the review route). An explicit target fails over only to the targets after it in that category's list. An unknown name is a usage error (the route falls back to the subagent).

@@ -58,7 +58,7 @@ import { loadConfig, resolveKey, record, recordFailure, recordSpend, targetOf, P
 import { spawnSyncHidden } from './proc.mjs';
 import { buildUserGuards } from './api-sdk-guards.mjs';
 import {
-  validKeyShape, scrub, resolveModel, isUnavailable, isSpendLimit, isCreditExhausted, isWorkspaceMissing, hasVerdict, WORKSPACE_ENV, WORKSPACE_HINT,
+  validKeyShape, scrub, resolveModel, isUnavailable, isSpendLimit, isCreditExhausted, isWorkspaceMissing, hasVerdict, WORKSPACE_ENV, WORKSPACE_HINT, workspaceHint,
   SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD, slowNote, softUsdNote, logSlowReview,
 } from './api-run.mjs';
 
@@ -431,7 +431,7 @@ export async function runApiSdk({
     if (result.subtype !== 'success' || result.is_error) {
       const errs = Array.isArray(result.errors) ? result.errors.join('; ') : '';
       const why = scrub(errs || (result.subtype === 'success' ? text : '') || `${result.subtype}${lastAssistantError ? ` (${lastAssistantError})` : ''}`, key).replace(/\s+/g, ' ').trim();
-      if (isWorkspaceMissing({ text: why })) { noteFailure(WORKSPACE_HINT); return fail(true, WORKSPACE_HINT); }
+      if (isWorkspaceMissing({ text: why })) { noteFailure(workspaceHint(tn)); return fail(true, workspaceHint(tn)); }
       if (isSpendLimit({ status: 400, text: why })) { const r = `workspace limit: ${why}`.slice(0, 200); noteFailure(r, true); return fail(true, r, true); }
       if (/enforced_spend_limit_reached/.test(why)) { const r = `org spend cap: ${why}`.slice(0, 200); noteFailure(r, true); return fail(true, r, true); }
       if ((lastAssistantError && AUTH_ERRORS.has(lastAssistantError)) || isUnavailable({ text: why })) { const r = `SDK: ${why}`.slice(0, 200); noteFailure(r); return fail(true, r, lastAssistantError === 'billing_error' || isCreditExhausted({ text: why })); }

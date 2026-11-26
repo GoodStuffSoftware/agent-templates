@@ -46,6 +46,8 @@ export const OFFICIAL_ENDPOINT = 'https://api.anthropic.com/v1/messages';
 export const API_VERSION = '2023-06-01';
 export const WORKSPACE_ENV = 'AC_API_WORKSPACE_ID';
 export const WORKSPACE_HINT = `set ${WORKSPACE_ENV}: the key is not scoped to a workspace (HTTP 400, the request must include the anthropic-workspace-id header)`;
+// A named target carries its own workspace in api_targets ("workspace"); the primary uses the env variable.
+export const workspaceHint = (tn) => (tn ? `set "workspace" for target ${tn} in api_targets: the key is not scoped to a workspace (HTTP 400, the request must include the anthropic-workspace-id header)` : WORKSPACE_HINT);
 
 // A Console API key starts sk-ant- (today sk-ant-usr...; older keys sk-ant-api...). Admin keys
 // and OAuth tokens are not API keys for this purpose.
@@ -321,8 +323,8 @@ export async function runApi({
       if (status !== 200 || !j || j.type === 'error') {
         const msg = scrub((j && j.error && j.error.message) || raw || 'no response', key).replace(/\s+/g, ' ').trim().slice(0, 200);
         if (isWorkspaceMissing({ status, text: msg })) {
-          noteFailure(WORKSPACE_HINT);
-          return fail(true, WORKSPACE_HINT);
+          noteFailure(workspaceHint(tn));
+          return fail(true, workspaceHint(tn));
         }
         const cap = isCapFailure({ status, text: msg, raw });
         if (isUnavailable({ status, text: msg }) || cap) {
