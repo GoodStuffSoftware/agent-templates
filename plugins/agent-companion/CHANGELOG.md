@@ -2,7 +2,7 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
-## 0.31.71 (unreleased)
+## 0.31.71 — 2026-11-26
 
 - **Release-watch check counts fixed (scripts/release-watch.mjs).** Usage-limit errors no longer count toward `api-errors` (an info line "usage limit hit at <time>" shows instead); workers that ended on the usage limit are left out of both sides of `no-final-status` and reported as a separate count; `hook-signature` counts distinct workers (event count shown beside it) instead of events; `guard:delegation/deny` is measured per active lead-hour (leads with a spawn in the window), so more leads at once do not raise it.
 - **Release-watch flag stamps, per-version split and designed denies (scripts/release-watch.mjs, hooks/lib/designed-denies.mjs).** The per-release split of worker metrics attributes each worker by the `guard_version` of its own spawn row (matched on the worker's `toolUseId`); only a worker with no such row is placed by time, and a flag then says "time-attributed" (`versionsBasis`). The flag file's `T`, `version` and `check` now name the release and check that produced the flags (the newest release due in that check), no longer the chain base and the newest install; the chain base is kept in a new `chain` field that the answer cooldown still keys on. A guard deny that works as designed (resource-gate "Heavy command (...) not run", worktree-remove "git worktree remove not run", scope-tripwire "Check in with the lead before...") is no longer a hook error and never a new signature: recognised by a list of deny prefixes kept next to the guards (designed-denies.mjs), not by a guard id (the transcript line carries none). Signatures also collapse paths and numbers (box numbers, counts) before they are compared.
