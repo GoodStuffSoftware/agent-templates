@@ -99,11 +99,79 @@ export function parseCategoryWorkspaces(raw) {
   return out;
 }
 
+// --- named API targets (0.31.72) ----------------------------------------------------------
+// A target is a place API work can be billed: a key source, an optional workspace id (sent as the
+// anthropic-workspace-id header only when set), an optional admin key source (cost data) and an optional monthly budget,
+// with its own breaker and budget lane in the ledger. The built-in target "primary" is today's setup (api_credits_key_source
+// plus the AC_API_WORKSPACE_ID / AC_API_WORKERS_WORKSPACE_ID workspaces); with api_targets and api_category_targets unset
+// nothing else exists and behaviour is unchanged. api_targets is JSON: {"name":{"key":"bws:secret","workspace":"","admin":"bws:secret","budget":50}}.
+export const PRIMARY = 'primary';
+const TARGET_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
+export class TargetError extends Error {}
+
+export function parseTargets(raw) {
+  const targets = {};
+  const errors = [];
+  const s = String(raw ?? '').trim();
+  if (!s) return { targets, errors };
+  let j = null;
+  try { j = JSON.parse(s); } catch { errors.push('api_targets is not valid JSON'); }
+  if (j && typeof j === 'object' && !Array.isArray(j)) {
+    for (const [k, v] of Object.entries(j)) {
+      const name = String(k).trim().toLowerCase();
+      if (!TARGET_NAME_RE.test(name)) { errors.push(`target name "${String(k).slice(0, 40)}" is not allowed (a-z, 0-9, _ -)`); continue; }
+      if (name === PRIMARY) { errors.push('target "primary" is built in (api_credits_key_source) and cannot be redefined'); continue; }
+      const key = String((v && v.key) || '').trim();
+      if (!parseKeySource(key)) { errors.push(`target ${name}: key must be env:<NAME> or bws:<secret-name>`); continue; }
+      const workspace = String((v && v.workspace) || '').trim();
+      if (workspace && !/^[A-Za-z0-9_.-]+$/.test(workspace)) { errors.push(`target ${name}: workspace id is malformed`); continue; }
+      const b = Number(v && v.budget);
+      targets[name] = { name, keySource: key, workspace, admin: String((v && v.admin) || '').trim(), budget: Number.isFinite(b) && b > 0 ? b : null };
+    }
+  } else if (j !== null) errors.push('api_targets must be a JSON object of targets');
+  return { targets, errors };
+}
+
+// "category=target,target category=target" -> { category: [target, ...] } (ordered: the first is the default, later ones are failover).
+export function parseCategoryTargets(raw) {
+  const out = {};
+  for (const part of String(raw ?? '').split(/[;\s]+/).filter(Boolean)) {
+    const i = part.indexOf('=');
+    if (i < 1 || i === part.length - 1) continue;
+    const list = [...new Set(part.slice(i + 1).split(',').map((x) => x.trim().toLowerCase()).filter(Boolean))];
+    if (list.length) out[part.slice(0, i).toLowerCase()] = list;
+  }
+  return out;
+}
+
+const builtinPrimary = (cfg) => ({ name: PRIMARY, keySource: cfg.keySource, workspace: '', admin: '', budget: cfg.budget, builtin: true });
+
+// The ordered targets a job of `category` may use. `explicit` (--target, or an `API: target=` brief line) starts the list at that
+// target: used as given, its failover only the targets listed after it for the category. An unknown name throws a TargetError.
+export function resolveTargets(category, cfg, explicit = null) {
+  const targets = cfg.targets || { [PRIMARY]: builtinPrimary(cfg) };
+  const configured = (cfg.categoryTargets || {})[category];
+  const list = configured && configured.length ? configured : [PRIMARY];
+  const known = () => Object.keys(targets).join(', ');
+  for (const n of list) if (!targets[n]) throw new TargetError(`api_category_targets names an unknown target "${n}" for ${category} (known: ${known()})`);
+  let names = list;
+  if (explicit !== null && explicit !== undefined && String(explicit).trim() !== '') {
+    const n = String(explicit).trim().toLowerCase();
+    if (!targets[n]) throw new TargetError(`unknown target "${String(explicit).slice(0, 40)}" (known: ${known()})`);
+    const at = list.indexOf(n);
+    names = at < 0 ? [n] : list.slice(at);
+  }
+  return names.map((n) => targets[n]);
+}
+
+export const targetOf = (cfg, name) => ((cfg && cfg.targets) || {})[name || PRIMARY] || builtinPrimary(cfg);
+
 export function loadConfig(o = opt) {
   const day = Math.floor(Number(o('api_credits_cycle_day', 1)));
   const budget = Number(o('api_credits_budget_usd', 200));
   const ratio = Number(o('api_credits_review_ratio', 0.5));
   const est = Number(o('api_credits_item_estimate_usd', 2));
+  const tp = parseTargets(o('api_targets', ''));
   return {
     budget: Number.isFinite(budget) && budget > 0 ? budget : 200,
     cycleDay: day >= 1 && day <= 28 ? day : 1,
@@ -113,6 +181,9 @@ export function loadConfig(o = opt) {
     itemEstimate: Number.isFinite(est) && est > 0 ? est : 2,
     workspaceLimits: parseWorkspaceLimits(o('api_credits_workspace_limits', '')),
     categoryWorkspaces: { ...DEFAULT_CATEGORY_WORKSPACES, ...parseCategoryWorkspaces(o('api_credits_category_workspaces', '')) },
+    targets: { [PRIMARY]: { name: PRIMARY, keySource: String(o('api_credits_key_source', DEFAULT_KEY_SOURCE) || '').trim(), workspace: '', admin: '', budget: Number.isFinite(budget) && budget > 0 ? budget : 200, builtin: true }, ...tp.targets },
+    categoryTargets: parseCategoryTargets(o('api_category_targets', '')),
+    targetErrors: tp.errors,
   };
 }
 
