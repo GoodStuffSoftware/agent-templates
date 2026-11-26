@@ -671,7 +671,7 @@ export function targetLines({ cfg, cycle = emptyCycle(), orgs = [], now = Date.n
   return lines;
 }
 
-/ The API share of all reviews (0.31.63), from telemetry/review-verdicts.jsonl. An API review counts once, by the row api-review.mjs
+// The API share of all reviews (0.31.63), from telemetry/review-verdicts.jsonl. An API review counts once, by the row api-review.mjs
 // writes on exit (source "api-review"); every other row counts as a subagent review unless it says route "api" (the verdict row of a
 // guard-routed review, which the api-review row already counts). An api-review row with ok:false (a failed run, retried as a subagent) is not counted: the retry is the one review that happened. The denominator is reviews with a verdict: API reviews that finished plus subagent reviews with a parsed verdict line. Rows without a route (older ones) are subagent reviews.
 export function reviewShareLines({ now = Date.now(), file = join(telemetryDir(), 'review-verdicts.jsonl') } = {}) {
