@@ -316,7 +316,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   let tgt = chain[0].name === PRIMARY ? null : chain[0].name;
   let attempts = 1;
   let r = await runOnce(tgt);
-  while (!r.ok && r.capped) {
+  while (!r.ok && (r.capped || r.keyFailed)) {
     const at = chain.findIndex((t) => t.name === (tgt || PRIMARY));
     const next = chain[at + 1];
     if (!next) break;
@@ -326,7 +326,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     // The failed attempt's own ledger error and notes are said now: only the last attempt's are printed after the loop.
     if (r.ledgerError) err(`target ${tgt || PRIMARY}: ${r.ledgerError}`);
     for (const n of r.notes || []) err(`API review note: target ${tgt || PRIMARY}: ${n}`);
-    err(`API review note: target ${tgt || PRIMARY} is capped (${String(r.reason).slice(0, 80)}); failing over to ${nd.target || PRIMARY}`);
+    err(r.keyFailed ? `API review note: target ${tgt || PRIMARY} has no usable key (${String(r.reason).slice(0, 80)}); skipping to ${nd.target || PRIMARY}` : `API review note: target ${tgt || PRIMARY} is capped (${String(r.reason).slice(0, 80)}); failing over to ${nd.target || PRIMARY}`);
     tgt = nd.target && nd.target !== PRIMARY ? nd.target : null;
     attempts += 1;
     reviewId = `${baseReviewId}-${attempts}`;

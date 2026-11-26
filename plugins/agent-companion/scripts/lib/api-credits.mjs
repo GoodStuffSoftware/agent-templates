@@ -35,6 +35,7 @@
 
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, appendFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { opt, stateFile, telemetryDir, tailRecords } from '../../hooks/lib/context.mjs';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
 import { spawnSyncHidden } from './proc.mjs';
@@ -45,6 +46,8 @@ export const CATEGORIES = ['review', 'overflow', 'rater', 'workers'];
 export const DEFAULT_SHARES = { review: 0.5, overflow: 0.1, rater: 0.05, workers: 0.3, reserve: 0.05 };
 export const RESERVE_DAYS = 3;
 export const DEFAULT_KEY_SOURCE = 'env:AC_API_KEY';
+export const DEFAULT_BWS_TOKEN_SOURCE = 'env:BWS_ACCESS_TOKEN';
+const BWS_TOKEN_ENV = 'BWS_ACCESS_TOKEN';
 export const TRIP_AFTER = 2; // billing/auth failures in a row
 export const BOOKED_ONLY = 'booked only, not verified against billing';
 // Category -> workspace (name or wrkspc_ id) for the billed-spend attribution and the limits. 'review'
@@ -182,6 +185,7 @@ export function loadConfig(o = opt) {
     workspaceLimits: parseWorkspaceLimits(o('api_credits_workspace_limits', '')),
     categoryWorkspaces: { ...DEFAULT_CATEGORY_WORKSPACES, ...parseCategoryWorkspaces(o('api_credits_category_workspaces', '')) },
     targets: { [PRIMARY]: { name: PRIMARY, keySource: String(o('api_credits_key_source', DEFAULT_KEY_SOURCE) || '').trim(), workspace: '', admin: '', budget: Number.isFinite(budget) && budget > 0 ? budget : 200, builtin: true }, ...tp.targets },
+    bwsTokenSource: String(o('api_bws_token_source', DEFAULT_BWS_TOKEN_SOURCE) || '').trim() || DEFAULT_BWS_TOKEN_SOURCE,
     categoryTargets: parseCategoryTargets(o('api_category_targets', '')),
     targetErrors: tp.errors,
   };
@@ -212,32 +216,58 @@ export function parseKeySource(src) {
   return m ? { kind: m[1], name: m[2].trim() } : null;
 }
 
+// The Bitwarden access token (0.31.73, option api_bws_token_source): "env:NAME" (default env:BWS_ACCESS_TOKEN) or "file:<path>"
+// (a leading ~ is the home directory; the file is read here, in this process, and trimmed). With a file source the
+// BWS_ACCESS_TOKEN variable, when set, wins over the file. Errors name the source, never the value. The token goes only to the
+// bws child's environment (resolveKey).
+export function parseTokenSource(src) {
+  const m = /^(env|file):(.+)$/.exec(String(src || '').trim() || DEFAULT_BWS_TOKEN_SOURCE);
+  return m && m[2].trim() ? { kind: m[1], name: m[2].trim() } : null;
+}
+const homePath = (p) => (p === '~' ? homedir() : /^~[\\/]/.test(p) ? join(homedir(), p.slice(2)) : p);
+const keyFailure = (msg) => Object.assign(new Error(msg), { keyFailure: true });
+export function bwsToken(env = process.env, tokenSource = undefined) {
+  const src = tokenSource === undefined ? opt('api_bws_token_source', DEFAULT_BWS_TOKEN_SOURCE) : tokenSource;
+  const p = parseTokenSource(src);
+  if (!p) throw keyFailure('api_bws_token_source must be env:<NAME> or file:<path>');
+  if (p.kind === 'env') {
+    if (!env[p.name]) throw keyFailure(`${p.name} is not set`);
+    return env[p.name];
+  }
+  if (env[BWS_TOKEN_ENV]) return env[BWS_TOKEN_ENV];
+  let v;
+  try { v = String(readFileSync(homePath(p.name), 'utf8')).trim(); } catch { throw keyFailure(`Bitwarden token file is missing or unreadable (file:${p.name})`); }
+  if (!v) throw keyFailure(`Bitwarden token file is empty (file:${p.name})`);
+  return v;
+}
+
 // Cheap presence check for `decide`: the source is well formed and the thing it
-// reads from is set. Never reads the key's value into anything it returns.
-export function keyConfigured(src, env = process.env) {
+// reads from is set. Never returns the key's or the token's value.
+export function keyConfigured(src, env = process.env, tokenSource = undefined) {
   const p = parseKeySource(src);
   if (!p || !p.name) return false;
   if (p.kind === 'env') return !!env[p.name];
-  return !!env.BWS_ACCESS_TOKEN;
+  try { return !!bwsToken(env, tokenSource); } catch { return false; }
 }
 
 // A key-lookup failure that is the configuration's fault (bws failed, no such secret): the runner
-// counts it toward the two-strikes breaker, like a billing or auth failure.
-const keyError = (msg) => Object.assign(new Error(msg), { configFailure: true });
+// counts it toward the two-strikes breaker, like a billing or auth failure. keyFailure: the run never started, so a
+// caller with another target may move on to it.
+const keyError = (msg) => Object.assign(new Error(msg), { configFailure: true, keyFailure: true });
 
 // The key itself. Runner only. Throws a message that never contains the key.
-export function resolveKey(src, env = process.env) {
+export function resolveKey(src, env = process.env, tokenSource = undefined) {
   const p = parseKeySource(src);
-  if (!p || !p.name) throw new Error('no key source configured');
+  if (!p || !p.name) throw keyFailure('no key source configured');
   if (p.kind === 'env') {
     const v = env[p.name];
-    if (!v) throw new Error(`environment variable ${p.name} is not set`);
+    if (!v) throw keyFailure(`environment variable ${p.name} is not set`);
     return v;
   }
-  if (!env.BWS_ACCESS_TOKEN) throw new Error('BWS_ACCESS_TOKEN is not set');
+  const token = bwsToken(env, tokenSource);
   const isId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(p.name);
   const args = isId ? ['secret', 'get', p.name, '-o', 'json'] : ['secret', 'list', '-o', 'json'];
-  const r = spawnSyncHidden(process.env.AGENT_COMPANION_BWS_BIN || 'bws', args, { env, encoding: 'utf8', timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+  const r = spawnSyncHidden(process.env.AGENT_COMPANION_BWS_BIN || 'bws', args, { env: { ...env, [BWS_TOKEN_ENV]: token }, encoding: 'utf8', timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
   if (r.error || r.status !== 0) throw keyError('bws failed to return the secret');
   let j;
   try { j = JSON.parse(r.stdout); } catch { throw keyError('bws returned unreadable output'); }
@@ -383,7 +413,7 @@ export function decide(category, { now = Date.now(), cfg = loadConfig(), path = 
     const reasons = [];
     const usable = [];
     for (const t of chain) {
-      if (keyConfigured(t.keySource, env)) usable.push(t);
+      if (keyConfigured(t.keySource, env, cfg.bwsTokenSource)) usable.push(t);
       else reasons.push(t.name === PRIMARY ? 'no API key configured (set api_credits_key_source and the variable it names)' : `target ${t.name}: no API key available (check its key source)`);
     }
     const joined = () => reasons.join('; then ');
@@ -611,7 +641,7 @@ export function status({ now = Date.now(), cfg = loadConfig(), path = ledgerPath
   const sh = cfg.shares;
   const lines = [];
   lines.push(`cycle ${cy.key} (UTC, starts day ${cfg.cycleDay}): ${(cy.frac * 100).toFixed(0)}% elapsed, reserve ${cy.reserveReleased ? 'released' : `held until ${RESERVE_DAYS} days before ${new Date(cy.end).toISOString().slice(0, 10)}`}`);
-  lines.push(`key: ${keyConfigured(cfg.keySource, env) ? `configured (${(parseKeySource(cfg.keySource) || {}).kind} source)` : 'not configured, so every decision is plan'}`);
+  lines.push(`key: ${keyConfigured(cfg.keySource, env, cfg.bwsTokenSource) ? `configured (${(parseKeySource(cfg.keySource) || {}).kind} source)` : 'not configured, so every decision is plan'}`);
   if (unreadable) lines.push(`ledger unreadable (${unreadable.slice(0, 80)}): every decision is plan`);
   for (const k of CATEGORIES) {
     const pace = (sh[k] || 0) * cfg.budget * cy.frac;

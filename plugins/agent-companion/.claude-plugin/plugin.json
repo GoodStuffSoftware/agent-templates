@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.72",
+  "version": "0.31.73",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -227,6 +227,12 @@
       "title": "API credits: where the Console API key comes from",
       "description": "Where scripts/api-review.mjs finds the Console API key that bills a review to the plan's API credits: \"env:<NAME>\" (a user environment variable; default env:AC_API_KEY) or \"bws:<secret-name>\" (Bitwarden Secrets Manager CLI, with BWS_ACCESS_TOKEN in the environment). The key goes only into the x-api-key header of a Messages API request (the credits do not cover Claude Code, so no claude process is started); it is never printed, logged, written or put on a command line. If the key is not scoped to a workspace, also set the environment variable AC_API_WORKSPACE_ID. With the variable unset, `api-credits.mjs decide` answers plan and nothing changes. Create the key in the Claude Console and turn auto-reload off there so nothing charges a card.",
       "default": "env:AC_API_KEY"
+    },
+    "api_bws_token_source": {
+      "type": "string",
+      "title": "API credits: where the Bitwarden access token comes from",
+      "description": "Where the plugin finds the Bitwarden Secrets Manager access token it needs for every \"bws:<secret-name>\" source (api_credits_key_source, api_admin_key_source, api_targets keys and admin keys): \"env:<NAME>\" (default env:BWS_ACCESS_TOKEN) or \"file:<path-to-token-file>\" (a leading ~ is your home directory; the file is read by the plugin itself and trimmed). With a file source the BWS_ACCESS_TOKEN variable, when set, wins over the file. The token reaches only the environment of the bws child process; it is never printed, logged, written to the ledger or put on a command line. Errors name the source (file:<path> missing or empty), never the value.",
+      "default": "env:BWS_ACCESS_TOKEN"
     },
     "api_credits_budget_usd": {
       "type": "number",

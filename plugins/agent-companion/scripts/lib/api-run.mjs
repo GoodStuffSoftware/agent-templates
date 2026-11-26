@@ -263,7 +263,7 @@ export async function runApi({
     return { ok: false, unavailable, reason: r, usd, path: 'fetch', notes, ...(capped ? { capped: true } : {}), ...(tn ? { target: tn } : {}), ...(ledgerError ? { ledgerError } : {}) };
   };
   try {
-    key = resolveKey(T.keySource, env);
+    key = resolveKey(T.keySource, env, cfg.bwsTokenSource);
     if (!validKeyShape(key)) throw configError('the configured secret is not a Console API key (it must start sk-ant-, and sk-ant-admin and sk-ant-oat are refused)');
     // A named target sends only its own workspace id (none when unset: its key may be workspace-scoped); primary keeps the env variable.
     const ws = tn ? String(T.workspace || '').trim() : String(env[WORKSPACE_ENV] || '').trim();
@@ -377,6 +377,6 @@ export async function runApi({
   } catch (e) {
     const reason = scrub(String((e && e.message) || e), key).slice(0, 200);
     if (e && e.configFailure) noteFailure(reason);
-    return fail(!!(e && e.configFailure), reason);
+    return { ...fail(!!(e && e.configFailure), reason), ...(e && e.keyFailure ? { keyFailed: true } : {}) };
   }
 }
