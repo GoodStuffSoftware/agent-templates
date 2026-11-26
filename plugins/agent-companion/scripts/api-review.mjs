@@ -39,6 +39,7 @@ import { briefHash } from '../hooks/lib/sg-review-route.mjs';
 import { apiVerdictFields, recordPostPassDefect } from '../hooks/lib/review-verdict.mjs';
 import { runApi, REVIEW_SYSTEM, reviewLimits, EXIT_OK, EXIT_USAGE, EXIT_UNAVAILABLE, EXIT_FAILED } from './lib/api-run.mjs';
 import { runApiSdk, DEFAULT_SDK_VERSION } from './lib/api-sdk-run.mjs';
+import { loadConfig, resolveTargets, decide, TargetError, PRIMARY } from './lib/api-credits.mjs';
 
 const DIFF_CAP = 150000;
 const BRIEF_CAP = 60000;
@@ -214,7 +215,7 @@ function parse(argv) {
 
 export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), err = (s) => process.stderr.write(`${s}\n`), env = process.env, fetchImpl, endpoint, sleep, now, cfg, clock, sdk, loadSdk } = {}) {
   const o = parse(argv);
-  const usage = 'usage: api-review.mjs run --brief-file <f> --diff-ref <base>..<head> --model <alias> [--effort <e>] --cwd <worktree> [--writer <model/effort>] [--risk low|mid|high] [--review-file <f>] [--session-id <id>] [--tool-use-id <id>] [--branch <b>] [--runner sdk|fetch] [--max-usd N] [--max-turns N] [--max-tokens N]';
+  const usage = 'usage: api-review.mjs run --brief-file <f> --diff-ref <base>..<head> --model <alias> [--effort <e>] --cwd <worktree> [--writer <model/effort>] [--risk low|mid|high] [--review-file <f>] [--session-id <id>] [--tool-use-id <id>] [--branch <b>] [--runner sdk|fetch] [--target <name>] [--max-usd N] [--max-turns N] [--max-tokens N]';
   if (o.error || o.cmd !== 'run' || !o['brief-file'] || !o['diff-ref'] || !o.model || !o.cwd) { out(o.error || usage); return EXIT_USAGE; }
   if (o.risk !== undefined && !RISKS.includes(o.risk)) { out('risk must be low, mid or high'); return EXIT_USAGE; }
   // The numeric options are validated: a NaN would silently remove its own cap.
@@ -224,6 +225,11 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   }
   // --max-usd: 0 turns the hard stop off (as the option does); anything else that is not a number >= 0 is a usage error.
   if (o['max-usd'] !== undefined && !(o['max-usd'] !== '' && Number.isFinite(Number(o['max-usd'])) && Number(o['max-usd']) >= 0)) { out('max-usd must be a number, 0 or more (0 turns the hard stop off)'); return EXIT_USAGE; }
+  // 0.31.72: --target names an API target (api_targets); the review fails over only to the targets after it in the review list. An unknown name is a usage error.
+  const cfgEff = cfg || loadConfig();
+  let chain;
+  try { chain = resolveTargets('review', cfgEff, o.target === undefined ? null : o.target); } catch (e) { if (e instanceof TargetError) { out(e.message); return EXIT_USAGE; } throw e; }
+  if (o.target !== undefined && !String(o.target).trim()) { out('--target needs a target name'); return EXIT_USAGE; }
   const reviewId = `rv-${randomUUID().slice(0, 8)}`; // the ledger entry's id, for api-credits.mjs record-fallback
   // 0.31.63: one telemetry row per API review (route 'api'), the count behind the share `api-credits.mjs status` prints; the guard's route and the manual path both end here.
   // A failed run is written with ok:false and the share leaves it out (the subagent retry counts as the review that happened). A run
@@ -276,12 +282,13 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   try { limits = reviewLimits({ softRaw: opt('api_review_soft_usd', ''), hardRaw: opt('api_review_hard_usd', ''), maxUsdFlag: o['max-usd'] }); } catch (e) { out(e.message); return EXIT_USAGE; }
   const { softUsd, maxUsd, clamped } = limits;
   if (clamped) err(`API review note: ${clamped}`);
+  const runOnce = async (tgt) => {
   let r = null;
   if (runner === 'sdk') {
     r = await runApiSdk({
       prompt: buildPrompt({ brief, diffRef: o['diff-ref'], writer: o.writer, risk: o.risk, shell: true, tempTree: !!temp, ...d }),
       model: o.model, effort: o.effort || null, cwd, category: 'review', meta,
-      maxUsd, softUsd, reviewId,
+      maxUsd, softUsd, reviewId, ...(tgt ? { target: tgt } : {}),
       ...(o['max-turns'] ? { maxTurns: Number(o['max-turns']) } : {}),
       sdkVersion: String(opt('api_sdk_version', DEFAULT_SDK_VERSION)),
       userGuards: opt('api_review_user_guards', true),
@@ -294,13 +301,30 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     prompt: buildPrompt({ brief, diffRef: o['diff-ref'], writer: o.writer, risk: o.risk, tempTree: !!temp, ...d }),
     system: fetchSystem(REVIEW_SYSTEM, readProjectRules(cwd)),
     model: o.model, effort: o.effort || null, cwd, category: 'review', meta,
-    maxUsd, softUsd, reviewId,
+    maxUsd, softUsd, reviewId, ...(tgt ? { target: tgt } : {}),
     ...(o['max-turns'] ? { maxTurns: Number(o['max-turns']) } : {}),
     ...(o['max-tokens'] ? { maxTokens: Number(o['max-tokens']) } : {}),
     requireVerdict: true, ...(clock ? { clock } : {}),
     env, ...(fetchImpl ? { fetchImpl } : {}), ...(endpoint ? { endpoint } : {}), ...(sleep ? { sleep } : {}),
     ...(now ? { now } : {}), ...(cfg ? { cfg } : {}),
   });
+  return r;
+  };
+  // The first target of the list (primary only, with the options unset); a run that ends capped (spend-limit 400, the enforced 429, credit
+  // exhausted) goes to the next target the governor still answers api for. Past the last, it is the unavailable result below: the plan, as today.
+  let tgt = chain[0].name === PRIMARY ? null : chain[0].name;
+  let r = await runOnce(tgt);
+  while (!r.ok && r.capped) {
+    const at = chain.findIndex((t) => t.name === (tgt || PRIMARY));
+    const next = chain[at + 1];
+    if (!next) break;
+    let nd;
+    try { nd = decide('review', { cfg: cfgEff, env, target: next.name, ...(now ? { now } : {}) }); } catch { break; }
+    if (nd.decision !== 'api') break;
+    err(`API review note: target ${tgt || PRIMARY} is capped (${String(r.reason).slice(0, 80)}); failing over to ${nd.target || PRIMARY}`);
+    tgt = nd.target || null;
+    r = await runOnce(tgt);
+  }
   if (r.ledgerError) err(r.ledgerError); // the spend is not in the ledger: say so
   for (const n of r.notes || []) err(`API review note: ${n}`);
   if (!r.ok) {
