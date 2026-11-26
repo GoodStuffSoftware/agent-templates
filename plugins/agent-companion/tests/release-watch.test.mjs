@@ -1525,7 +1525,7 @@ test('0.31.71 no-final-status: workers that ended on the usage limit are out of 
 });
 
 test('0.31.71 hook-signature: distinct workers are counted, events shown next to them', () => {
-  const sig = (id, i) => ({ type: 'user', timestamp: wts(i), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `${id}-${i}`, is_error: true, content: 'PreToolUse:Write hook error: Check in with the lead before building more' }] } });
+  const sig = (id, i) => ({ type: 'user', timestamp: wts(i), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `${id}-${i}`, is_error: true, content: 'PreToolUse:Write hook error: Failed running the hook script, exit code 2' }] } });
   putWorker('loop', [prompt71(0), ...[1, 2, 3, 4, 5].map((i) => sig('loop', i))]);
   let m = W.analyze({ T, nowMs: T + 3 * HOUR }); const k = Object.keys(m.hookSignatures.since)[0];
   assert.equal(m.hookSignatures.since[k], 1, 'one worker'); assert.equal(m.hookSignatureEvents.since[k], 5, 'five events');
@@ -1550,4 +1550,61 @@ test('0.31.71 guard:delegation/deny: rate per active lead-hour, more leads at on
   putRows('denials.jsonl', [...baseDen, ...den, ...den.map((r) => ({ ...r, at: r.at + 500 })), ...den.map((r) => ({ ...r, at: r.at + 900 })), ...den.map((r) => ({ ...r, at: r.at + 1500 }))]);
   m = W.analyze({ T, nowMs: T + 4 * HOUR });
   assert.equal(dg(m).status, 'flag', 'four times the rate per lead-hour still flags');
+});
+
+// ---- 0.31.71 leg C: per-version worker split, flag stamps, designed denies ----
+test('0.31.71 per-version split: a worker belongs to the release in its spawn row; time-based only when the row is missing, and labelled', () => {
+  const T2 = T + 3 * HOUR;
+  const tdir = join(claude, 'agent-companion', 'telemetry'); mkdirSync(tdir, { recursive: true });
+  writeFileSync(join(tdir, 'spawns.jsonl'), [rowj({ at: T + 3.5 * HOUR, guard_version: '1.0.0', tool_use_id: 'toolu_A', session_id: 's' }), rowj({ at: T - 2 * HOUR })].join(''));
+  const sd = join(claude, 'projects', 'C--p71c', 'sess', 'subagents'); mkdirSync(sd, { recursive: true });
+  const mk = (id, toolUseId) => {
+    writeFileSync(join(sd, `agent-${id}.jsonl`), JSON.stringify({ type: 'user', timestamp: iso(T2 + HOUR), message: { role: 'user', content: 'task' } }));
+    writeFileSync(join(sd, `agent-${id}.meta.json`), JSON.stringify({ finished: true, agentType: 'ac-sonnet-low', ...(toolUseId ? { toolUseId } : {}) }));
+  };
+  mk('A', 'toolu_A'); mk('B', null);
+  const rel = [{ version: '1.0.0', T }, { version: '1.1.0', T: T2 }];
+  const m = W.analyze({ T: T2, nowMs: T2 + 6 * HOUR, winFrom: T, baseFrom: T - 7 * 24 * HOUR, baseTo: T, releases: rel });
+  assert.equal(m.byVersion['1.0.0'].workers.since.n, 1, 'worker A started after the second install but its spawn row says 1.0.0');
+  assert.equal(m.byVersion['1.1.0'].workers.since.n, 1, 'worker B has no spawn row: time-attributed to the newest release');
+  assert.deepEqual(m.workerVersionBasis, { spawn: 1, time: 1 });
+});
+
+test('0.31.71 flag stamps: T, version and check name the release and the check that produced the flags, not the chain base', () => {
+  const T1 = T + 2 * HOUR;
+  W.tick({ at: T + HOUR, installed: instV('1.0.0', T), run: () => metrics(), standingRun: none });
+  W.tick({ at: T1 + 1.5 * HOUR, installed: instV('1.1.0', T1), run: flagged, standingRun: none });
+  const f = S.readFlag();
+  assert.equal(f.version, '1.1.0'); assert.equal(Date.parse(f.T), T1); assert.equal(f.check, '+1h'); assert.equal(Date.parse(f.chain), T, 'the chain base is kept apart');
+});
+
+test('0.31.71 flag stamps: an older release due alone is named, not the newest installed one', () => {
+  W.tick({ at: T + HOUR, installed: instV('1.0.0', T), run: () => metrics(), standingRun: none });
+  W.tick({ at: T + 4 * HOUR + 60e3, installed: instV('1.1.0', T + 3.5 * HOUR), run: flagged, standingRun: none });
+  const f = S.readFlag();
+  assert.equal(f.version, '1.0.0'); assert.equal(Date.parse(f.T), T); assert.equal(f.check, '+4h');
+});
+
+test('0.31.71 designed denies: a guard deny that works as designed is not a hook error and not a signature; real errors still flag', () => {
+  const res = (id, i, text) => ({ type: 'user', timestamp: wts(i), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `${id}-${i}`, is_error: true, content: text }] } });
+  const designed = [
+    'PreToolUse:PowerShell hook error: Heavy command (build (box 6)) not run (rewrite does not apply in this permission mode). Run it as: node queue.mjs',
+    'PreToolUse:Bash hook error: git worktree remove not run: on Windows it follows junctions and directory symlinks inside the tree.',
+    'PreToolUse:Write hook error: Check in with the lead before building more beyond the brief.',
+  ];
+  designed.forEach((txt, i) => putWorker(`d${i}`, [prompt71(0), res(`d${i}`, 1, txt)]));
+  putWorker('real1', [prompt71(0), res('real1', 1, 'PreToolUse:Bash hook error: Failed running /opt/tools/a/x.mjs: exit code 3 in box 4')]);
+  putWorker('real2', [prompt71(0), res('real2', 1, 'PreToolUse:Bash hook error: Failed running /opt/tools/b/x.mjs: exit code 7 in box 9')]);
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(m.workers.since.hookErrorWorkersPct, 40, 'only the two real errors count');
+  const keys = Object.keys(m.hookSignatures.since);
+  assert.equal(keys.length, 1, `one normalised signature, got ${JSON.stringify(keys)}`);
+  assert.equal(m.hookSignatures.since[keys[0]], 2);
+});
+
+test('designed-denies: prefixes and normalisation', async () => {
+  const D = await import('../hooks/lib/designed-denies.mjs');
+  assert.ok(D.isDesignedDeny('Heavy command (test (box 12)) not run')); assert.ok(!D.isDesignedDeny('Heavy command'));
+  assert.ok(!D.isDesignedDeny('TypeError: x is not a function'));
+  assert.equal(D.normalizeSignature('exit 12 in /a/b/c.mjs and C:\\x\\y.js'), 'exit N in <path> and <path>');
 });

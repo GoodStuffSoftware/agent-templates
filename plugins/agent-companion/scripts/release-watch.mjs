@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { claudeDir, stateRootPath, opt } from '../hooks/lib/context.mjs';
 import * as S from '../hooks/lib/release-watch-state.mjs';
+import { isDesignedDeny, normalizeSignature } from '../hooks/lib/designed-denies.mjs';
 import { unitsPerPercent } from '../hooks/lib/plan-allowance.mjs';
 
 // Session ids that only the install's live check writes (it feeds the guards invented commands and logs the denials). Exact ids, nothing guessed.
@@ -114,6 +115,12 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
   const rel = Array.isArray(releases) && releases.length >= 2 ? releases.map((r) => ({ v: r.version || iso(r.T), T: r.T })).sort((a, b) => a.T - b.T) : null;
   const verAt = (t) => { let v = rel[0].v; for (const r of rel) if (r.T <= t) v = r.v; return v; };
   const verOf = (r, t) => (r && rel.some((x) => x.v === r.guard_version) ? r.guard_version : verAt(t));
+  // A worker's release: the guard_version of its own spawn row (spawns.jsonl, matched by the tool_use_id in the worker's meta file) when that is a chain version, else the time-based verAt.
+  let spawnVer = null;
+  const workerVer = (x) => {
+    if (rel && x.tu) { spawnVer ??= new Map(rd('spawns').filter((r) => r && r.tool_use_id && r.guard_version).map((r) => [r.tool_use_id, r.guard_version])); const g = spawnVer.get(x.tu); if (g && rel.some((y) => y.v === g)) return { v: g, by: 'spawn' }; }
+    return { v: verAt(x.first), by: 'time' };
+  };
   const win = (r, vf) => {
     const t = ts(r); if (inHold(t)) return null;
     if (t >= W0 && t <= nowMs) return vf == null || verOf(r, t) === vf ? 'since' : null;
@@ -177,8 +184,9 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
         }
         if (b.type === 'tool_result' && b.is_error) {
           terr++; const t = typeof b.content === 'string' ? b.content : JSON.stringify(b.content);
-          const m = /^(PreToolUse:[\w:]+) hook error: (.{0,48})/.exec(t);
-          if (m && !/post-release hold/i.test(t) && !HARNESS_HOOK_ERROR_RE.test(m[2]) && !inHold(Date.parse(o.timestamp))) { hook++; sigs.push(`${m[1]} ${m[2]}`); }
+          const m = /^(PreToolUse:[\w:]+) hook error: ([\s\S]*)/.exec(t);
+          // A designed guard deny (designed-denies.mjs) is not a hook error; the variable parts of any other signature collapse before it is cut to 48 characters.
+          if (m && !/post-release hold/i.test(t) && !HARNESS_HOOK_ERROR_RE.test(m[2]) && !isDesignedDeny(m[2]) && !inHold(Date.parse(o.timestamp))) { hook++; sigs.push(`${m[1]} ${normalizeSignature(m[2]).slice(0, 48)}`); }
         }
       }
     }
@@ -187,9 +195,9 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
     if (!w || inHold(first)) continue;
     const st = STATUS_RE.exec(txt);
     const status0 = st ? st[1].toLowerCase() : stLine;
-    let fin = false; let atype = ''; try { const mt = JSON.parse(readFileSync(fp.replace(/\.jsonl$/, '.meta.json'), 'utf8')); fin = mt.finished === true; atype = String(mt.agentType || ''); } catch { /* none */ }
+    let fin = false; let atype = ''; let tu = null; try { const mt = JSON.parse(readFileSync(fp.replace(/\.jsonl$/, '.meta.json'), 'utf8')); fin = mt.finished === true; atype = String(mt.agentType || ''); tu = mt.toolUseId || null; } catch { /* none */ }
     const ex = probe ? 'probe' : NON_CONTRACT_TYPES.has(atype) ? atype : null;
-    WR.push({ w, first, sigs, u, peak, hook, terr, api, apiOther, usageAt, endUsage, bash, refusal, bashFail, ex, status: status0 || (fin ? 'none' : 'running') });
+    WR.push({ w, first, tu, sigs, u, peak, hook, terr, api, apiOther, usageAt, endUsage, bash, refusal, bashFail, ex, status: status0 || (fin ? 'none' : 'running') });
   }
   // The whole result for the since side restricted to release `vf` (null = the whole chain); the baseline side is always the shared one.
   const build = (vf) => {
@@ -249,7 +257,7 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
     }
     const W = { since: [], base: [] }; const sig = { since: {}, base: {} }; const sigEv = { since: {}, base: {} };
     for (const x of WR) {
-      if (x.w === 'since' && vf != null && verAt(x.first) !== vf) continue;
+      if (x.w === 'since' && vf != null && workerVer(x).v !== vf) continue;
       W[x.w].push(x); for (const k of x.sigs) sigEv[x.w][k] = (sigEv[x.w][k] || 0) + 1; for (const k of new Set(x.sigs)) sig[x.w][k] = (sig[x.w][k] || 0) + 1;
     }
     out.workers = {}; out.bash = {};
@@ -288,6 +296,7 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
     return out;
   };
   const out = build(null);
+  if (rel) { const by = { spawn: 0, time: 0 }; for (const x of WR) if (x.w === 'since') by[workerVer(x).by]++; out.workerVersionBasis = by; }
   if (rel) { out.byVersion = {}; for (const r of rel) out.byVersion[r.v] = build(r.v); }
   return out;
 }
@@ -559,7 +568,10 @@ function chainChecks({ rs, P, at, analyzeFn, res }) {
       }
     }
   } catch (e) { evald = { verdict: 'inconclusive', metrics: [], flags: [] }; metrics = { error: String(e && e.message || e) }; byVersion = null; }
-  const flags = evald.flags.map((f) => (verOf[f.name] ? { ...f, versions: verOf[f.name] } : f)); const verdict = evald.verdict;
+  // The per-release split of a worker metric is the spawn row's guard_version; workers with no matching spawn row are placed by time and the flag says so.
+  const vb = metrics && metrics.workerVersionBasis;
+  const basis = !vb ? null : vb.time === 0 ? 'guard_version of the spawn row' : vb.spawn === 0 ? 'time-attributed' : `${vb.spawn} by spawn guard_version, ${vb.time} time-attributed`;
+  const flags = evald.flags.map((f) => (verOf[f.name] ? { ...f, versions: verOf[f.name], ...(basis && WORKER_CLASS.test(f.name) ? { versionsBasis: basis } : {}) } : f)); const verdict = evald.verdict;
   const late = at - lead.due[last] > LATE_MS;
   for (const { r, idx } of due) {
     r.done = [...r.done, ...idx]; r.lastAt = at;
@@ -574,13 +586,15 @@ function chainChecks({ rs, P, at, analyzeFn, res }) {
   if (fin.extendedTo) row.extendedTo = iso(fin.extendedTo);
   S.appendRow(row);
   res.ran = true; res.checks = due.find((d) => d.r === lead).idx.map((i) => i + 1); res.flagged = flags.map((x) => x.name); res.verdict = verdict;
-  if (flags.length) S.openFlag({ version: newest.version, T: iso(rs.baseAnchor), check: row.label, flags, at });
+  // The flag names the release and the check that produced its flags: the lead of this check (the newest release due), its install time, its label.
+  // `chain` (the baseline anchor) keeps the cooldown of an answered flag shared across the chain, as T did before.
+  if (flags.length) S.openFlag({ version: lead.version, T: iso(lead.T), chain: iso(rs.baseAnchor), check: row.label, flags, at });
   if (fin.event === 'finished') {
     S.appendRow({ at: iso(at), event: 'finished', T: iso(fin.N.T), chain: iso(rs.baseAnchor), version: fin.N.version, releases: rs.releases.map((r) => r.version), activity: fin.act });
   } else if (fin.event === 'insufficient-data') {
     S.appendRow({ at: iso(at), event: 'insufficient-data', T: iso(fin.N.T), chain: iso(rs.baseAnchor), version: fin.N.version, activity: fin.act, floors: fin.FL });
     const detail = `no finish by +${Math.round((at - fin.N.T) / HOUR)}h: ${fin.why === 'floors' ? lackText(fin.act, fin.FL) : fin.why === 'open-flag' ? 'the activity floors were reached, an unanswered flag blocked the finish' : 'the activity floors were reached, the last check was not clean'}`;
-    if (!S.flagIsOpen(S.readFlag())) S.openFlag({ version: newest.version, T: iso(rs.baseAnchor), check: `+${Math.round((at - fin.N.T) / HOUR)}h`, at,
+    if (!S.flagIsOpen(S.readFlag())) S.openFlag({ version: fin.N.version, T: iso(fin.N.T), chain: iso(rs.baseAnchor), check: `+${Math.round((at - fin.N.T) / HOUR)}h`, at,
       flags: [{ name: 'insufficient-data', value: 0, level: 0, limit: 0, detail, n: fin.act ? fin.act.spawns : 0, events: 1, base: null }] });
   }
 }

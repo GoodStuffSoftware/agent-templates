@@ -91,13 +91,14 @@ export const NO_HOLD_FLAGS = new Set(['usage-source-empty', 'harness-refusals', 
 const holdable = (flags) => (Array.isArray(flags) ? flags : []).filter((x) => x && !NO_HOLD_FLAGS.has(x.name));
 const levelOf = (f) => (typeof f.level === 'number' ? f.level : typeof f.value === 'number' ? f.value : null);
 const answeredFor = (cool, name, T) => { const c = cool[name]; return c && c.T === T ? c : null; };
-export function openFlag({ version, T, check, flags, at = now() } = {}) {
+// T is the install time of the release that produced the flags; `chain` (optional) is the key the cooldown uses, so an answer given for one release of a chain holds for the next.
+export function openFlag({ version, T, chain, check, flags, at = now() } = {}) {
   try {
     const old = readFlag();
     const cool = (old && old.cooldown) || {};
     const fresh = (Array.isArray(flags) ? flags : []).filter((f) => {
       if (!f || !f.name) return false;
-      const c = answeredFor(cool, f.name, T ?? null);
+      const c = answeredFor(cool, f.name, chain ?? T ?? null);
       if (!c) return true;
       const l = levelOf(f);
       return l != null && typeof c.level === 'number' && c.level > 0 && l > c.level * WORSEN_FACTOR;
@@ -113,6 +114,7 @@ export function openFlag({ version, T, check, flags, at = now() } = {}) {
       v: 2,
       version: version ?? old?.version ?? null,
       T: T ?? old?.T ?? null,
+      chain: chain ?? old?.chain ?? null,
       check: check ?? old?.check ?? null,
       flags: merged,
       openedAt: open ? old.openedAt : iso(at),
@@ -131,7 +133,7 @@ export function openFlag({ version, T, check, flags, at = now() } = {}) {
 
 const answerLevels = (f, at, cool = {}) => {
   const c = { ...cool };
-  for (const x of f.flags || []) c[x.name] = { level: levelOf(x), T: f.T ?? null, at: iso(at) };
+  for (const x of f.flags || []) c[x.name] = { level: levelOf(x), T: f.chain ?? f.T ?? null, at: iso(at) };
   return c;
 };
 
