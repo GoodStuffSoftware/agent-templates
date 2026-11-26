@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.71",
+  "version": "0.31.72",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -328,6 +328,18 @@
       "type": "string",
       "title": "API spend watch: where the Admin API key comes from",
       "description": "Where scripts/api-spend.mjs and scripts/api-credits.mjs (status, decide: billed spend) find the organization's Admin API key (sk-ant-admin...), which reads the cost and usage reports: \"dpapi:<path>\" (a file written by PowerShell ConvertFrom-SecureString for the current Windows user; default <state root>/secrets/anthropic-admin-key.dpapi), \"env:<NAME>\" or \"bws:<secret-name>\". The key goes only into the x-api-key header of a GET request; it is never printed, logged, written or put on a command line. Only an organization has an Admin API; with no key the watch reports 'unavailable' and nothing else changes.",
+      "default": ""
+    },
+    "api_targets": {
+      "type": "string",
+      "title": "API targets: named keys (and workspaces) work can be sent to",
+      "description": "JSON object naming extra API targets: {\"name\":{\"key\":\"bws:<secret>\" or \"env:<NAME>\",\"workspace\":\"<workspace id, optional>\",\"admin\":\"<Admin API key source, optional>\",\"budget\":<USD, optional>}}. Names are a-z, 0-9, _ and -; \"primary\" is built in (api_credits_key_source) and cannot be redefined. Each target has its own breaker and budget lane, and every booked run records its target; status, credits and the cost report list them grouped by organization id, and a target whose admin key is missing or failing shows \"no cost data\". A job can name a target with `--target <name>` (api-review.mjs, api-worker.mjs) or the brief line `API: target=<name>`. Key values are read in-process only. Empty (default) = no extra targets and behaviour is unchanged.",
+      "default": ""
+    },
+    "api_category_targets": {
+      "type": "string",
+      "title": "API targets: ordered target list per category",
+      "description": "Which targets each category tries, in order, with failover: \"review=primary,overflow-reviewers workers=overflow-workers\" (space-separated categories; review and workers). A run that ends on a spend-limit 400, the enforced 429 (error_code enforced_spend_limit_reached, never retried), credit exhausted, or a governor cap answer goes to the next target; when every target is exhausted the job falls back to the plan as before. An explicit target (`--target`, `API: target=`) fails over only to the targets after it in the list. Empty (default) = [primary] for every category.",
       "default": ""
     },
     "api_spend_alerts": {

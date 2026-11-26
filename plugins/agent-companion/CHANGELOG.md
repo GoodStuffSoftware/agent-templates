@@ -2,6 +2,10 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.72 — 2026-11-26
+
+- **Named API targets (scripts/lib/api-credits.mjs, api-run.mjs, api-sdk-run.mjs, api-spend.mjs, api-review.mjs, api-worker.mjs, hooks/lib/sg-review-route.mjs).** New options `api_targets` (named keys, optional workspace, admin key and budget) and `api_category_targets` (an ordered target list per category, review and workers). A run that ends on a spend-limit 400, the enforced 429 (`enforced_spend_limit_reached`, never retried; an ordinary 429 is still retried), credit exhausted or a governor cap answer fails over to the next target; with the list exhausted the job falls back to the plan as before. `--target <name>` (api-review, api-worker, `api-credits.mjs decide|record`) and the brief line `API: target=<name>` pick a target for one job (failover only to the targets after it; an unknown name is an error). Each target has its own breaker and budget lane and every booked run records its target; `status`, `credits` and the cost report group by organization id and show "no cost data" for a target whose admin key is missing or fails. With both options unset behaviour is unchanged.
+
 ## 0.31.71 — 2026-11-26
 
 - **Release-watch check counts fixed (scripts/release-watch.mjs).** Usage-limit errors no longer count toward `api-errors` (an info line "usage limit hit at <time>" shows instead); workers that ended on the usage limit are left out of both sides of `no-final-status` and reported as a separate count; `hook-signature` counts distinct workers (event count shown beside it) instead of events; `guard:delegation/deny` is measured per active lead-hour (leads with a spawn in the window), so more leads at once do not raise it.
