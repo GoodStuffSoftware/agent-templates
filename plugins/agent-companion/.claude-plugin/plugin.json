@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.73",
+  "version": "0.31.74",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -231,7 +231,7 @@
     "api_bws_token_source": {
       "type": "string",
       "title": "API credits: where the Bitwarden access token comes from",
-      "description": "Where the plugin finds the Bitwarden Secrets Manager access token it needs for every \"bws:<secret-name>\" source (api_credits_key_source, api_admin_key_source, api_targets keys and admin keys): \"env:<NAME>\" (default env:BWS_ACCESS_TOKEN) or \"file:<path-to-token-file>\" (a leading ~ is your home directory; the file is read by the plugin itself and trimmed). With a file source the BWS_ACCESS_TOKEN variable, when set, wins over the file. The token reaches only the environment of the bws child process; it is never printed, logged, written to the ledger or put on a command line. Errors name the source (file:<path> missing or empty), never the value.",
+      "description": "Where the plugin finds the Bitwarden Secrets Manager access token it needs for every \"bws:<secret-name>\" source (api_credits_key_source, api_admin_key_source, api_targets keys and admin keys): \"env:<NAME>\" (default env:BWS_ACCESS_TOKEN) or \"file:<path-to-token-file>\" (an absolute path or one starting with ~ for your home directory, never a relative path; the file may be UTF-8 or UTF-16 and is read by the plugin itself and trimmed; a token holding a NUL or other control character is rejected). With a file source the BWS_ACCESS_TOKEN variable, when set, wins over the file. The token reaches only the environment of the bws child process; it is never printed, logged, written to the ledger or put on a command line. Errors name the source (file:<path> missing or empty), never the value.",
       "default": "env:BWS_ACCESS_TOKEN"
     },
     "api_credits_budget_usd": {

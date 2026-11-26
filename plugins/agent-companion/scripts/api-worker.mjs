@@ -526,7 +526,7 @@ ${prompt}` : prompt, options });
       if (!r.capped && !r.keyFailed) break;
       const at = chain.findIndex((t) => t.name === (tgt || PRIMARY));
       const next = chain[at + 1];
-      noted.push(r.keyFailed ? `target ${tgt || PRIMARY} has no usable key, skipped` : `target ${tgt || PRIMARY} is capped`);
+      noted.push(r.keyFailed ? `target ${tgt || PRIMARY} has no usable key (${String(r.reason).slice(0, 80)}), skipped` : `target ${tgt || PRIMARY} is capped`);
       if (!next) break;
       tgt = next.name === PRIMARY ? null : next.name;
     }

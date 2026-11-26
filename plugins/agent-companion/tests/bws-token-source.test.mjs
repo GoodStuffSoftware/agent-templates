@@ -3,7 +3,8 @@
 import './isolate.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { makeFixture } from './helpers.mjs';
@@ -195,5 +196,164 @@ test('worker: a first target whose key cannot be read is skipped to the next; ex
   } finally {
     if (was === undefined) delete process.env.AGENT_COMPANION_BWS_BIN; else process.env.AGENT_COMPANION_BWS_BIN = was;
     w.cleanup();
+  }
+});
+
+// --- 0.31.74: hardening ---------------------------------------------------------------------------------------------
+
+const utf16le = (s, bom) => Buffer.concat([bom ? Buffer.from([0xff, 0xfe]) : Buffer.alloc(0), Buffer.from(s, 'utf16le')]);
+
+test('file source: a UTF-16LE file (PowerShell 5.1 `>`), with and without BOM, decodes to the token', () => {
+  const a = tokenFile(utf16le(`${FAKE}\r\n`, true), 'bom.txt');
+  const b = tokenFile(utf16le(FAKE, false), 'nobom.txt');
+  const c = tokenFile(Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(FAKE, 'utf16le').swap16()]), 'be.txt');
+  try {
+    assert.equal(bwsToken({}, `file:${a.p}`), FAKE);
+    assert.equal(bwsToken({}, `file:${b.p}`), FAKE);
+    assert.equal(bwsToken({}, `file:${c.p}`), FAKE);
+  } finally { a.fx.cleanup(); b.fx.cleanup(); c.fx.cleanup(); }
+});
+
+test('file source: a NUL or control character in the token is rejected with a fixed message naming only the source', () => {
+  const secretPart = 'fake-nul-part-for-tests-0003';
+  for (const body of [`${secretPart}\0tail`, `${secretPart}\x07tail`, `${secretPart}\nsecond-line`]) {
+    const t = tokenFile(body);
+    try {
+      assert.throws(() => bwsToken({}, `file:${t.p}`), (e) => e.keyFailure === true && /not plain text \(file:/.test(e.message) && !e.message.includes(secretPart));
+      assert.equal(keyConfigured('bws:x', {}, `file:${t.p}`), false);
+      assert.throws(() => resolveKey('bws:x', {}, `file:${t.p}`), (e) => e.keyFailure === true && !e.message.includes(secretPart));
+    } finally { t.fx.cleanup(); }
+  }
+  assert.throws(() => bwsToken({ MY_TOK: 'a\0b' }, 'env:MY_TOK'), (e) => e.keyFailure === true && /MY_TOK is not a plain-text token/.test(e.message) && !e.message.includes('a\0b'));
+});
+
+test('file source: a relative path is rejected with a fixed message (absolute or ~ only)', () => {
+  for (const rel of ['tok.txt', './tok.txt', '..\\tok.txt', '~other/tok.txt']) {
+    assert.throws(() => bwsToken({}, `file:${rel}`), (e) => e.keyFailure === true && /must be absolute or start with ~ \(file:/.test(e.message), rel);
+  }
+  assert.equal(keyConfigured('bws:x', {}, 'file:tok.txt'), false);
+});
+
+test('a throw from the bws spawn is rethrown as a fixed text with no value, as a key failure', () => {
+  // spawnSync throws a TypeError (quoting the value) on a NUL in an env value; here an unrelated variable carries it.
+  assert.throws(() => resolveKey('bws:some-secret', { BWS_ACCESS_TOKEN: FAKE, OTHER_VAR: 'fake-nul\0value' }, 'env:BWS_ACCESS_TOKEN'),
+    (e) => e.keyFailure === true && e.configFailure === true && e.message === 'bws could not be started' && !e.message.includes('fake-nul'));
+});
+
+// A fake bws: node itself runs a preload (NODE_OPTIONS --import) that checks the token arrived in its env and prints a fake secret.
+function fakeBws(dir) {
+  const stub = join(dir, 'fake-bws-stub.mjs');
+  writeFileSync(stub, `const ok = process.env.BWS_ACCESS_TOKEN === ${JSON.stringify(FAKE)};
+if (ok) process.stdout.write(JSON.stringify([{ key: 'some-secret', value: ${JSON.stringify(KB)} }]));
+process.exit(ok ? 0 : 1);
+`);
+  return { AGENT_COMPANION_BWS_BIN: process.execPath, NODE_OPTIONS: `--import ${pathToFileURL(stub).href}` };
+}
+
+test('positive path: the file token reaches the bws child as BWS_ACCESS_TOKEN and the secret comes back', () => {
+  const t = tokenFile(utf16le(FAKE, true));
+  const was = process.env.AGENT_COMPANION_BWS_BIN;
+  const f = fakeBws(t.fx.dir);
+  process.env.AGENT_COMPANION_BWS_BIN = f.AGENT_COMPANION_BWS_BIN;
+  try {
+    const env = { ...process.env, NODE_OPTIONS: f.NODE_OPTIONS };
+    delete env.BWS_ACCESS_TOKEN;
+    assert.equal(resolveKey('bws:some-secret', env, `file:${t.p}`), KB);
+    // A wrong token makes the stub exit 1: a key failure with the fixed text.
+    const bad = tokenFile('fake-wrong-token-0004');
+    try { assert.throws(() => resolveKey('bws:some-secret', env, `file:${bad.p}`), /bws failed to return the secret/); } finally { bad.fx.cleanup(); }
+  } finally {
+    if (was === undefined) delete process.env.AGENT_COMPANION_BWS_BIN; else process.env.AGENT_COMPANION_BWS_BIN = was;
+    t.fx.cleanup();
+  }
+});
+
+function filesUnder(dir) {
+  const out = [];
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) out.push(...filesUnder(p)); else out.push(p);
+  }
+  return out;
+}
+
+test('review: a malformed token file skips to the next target and leaks into no stdout, ledger, review-verdicts or telemetry row', async () => {
+  const t = rig();
+  try {
+    const part = 'fake-leak-part-for-tests-0005';
+    const tf = join(t.fx.dir, 'bad-token.txt');
+    writeFileSync(tf, `${part}\0more-bytes`);
+    const targets = JSON.stringify({ a: { key: 'bws:x' }, b: { key: 'env:AC_KEY_B' } });
+    const cfg = mk({ api_targets: targets, api_category_targets: 'review=a,b', api_credits_review_ratio: 1, api_bws_token_source: `file:${tf}` });
+    const f = okFetch();
+    const r = await t.run(cfg, { AC_KEY_B: KB }, f);
+    assert.equal(r.code, 0, r.out + r.err);
+    assert.deepEqual(f.calls, [KB]);
+    assert.match(r.err, /target a has no usable key \(Bitwarden token file is not plain text/);
+    const all = [r.out, r.err];
+    for (const p of filesUnder(t.fx.dir)) { if (p === tf) continue; try { all.push(readFileSync(p, 'utf8')); } catch { /* unreadable */ } }
+    for (const s of all) assert.ok(!s.includes(part) && !s.includes('more-bytes'), 'token fragment leaked');
+    assert.ok(filesUnder(t.fx.dir).some((p) => /review-verdicts\.jsonl$/.test(p)), 'review-verdicts row was written');
+  } finally { t.fx.cleanup(); }
+});
+
+test('worker: the skip note carries the reason and no secret', async () => {
+  const { runWorker } = await import('../scripts/api-worker.mjs');
+  const w = makeFixture();
+  try {
+    const part = 'fake-worker-part-for-tests-0006';
+    const tf = join(w.dir, 'bad-token.txt');
+    writeFileSync(tf, `${part}\0x`);
+    const sdk = { query: () => (async function* () {
+      yield { type: 'system', subtype: 'init', apiKeySource: 'ANTHROPIC_API_KEY' };
+      yield { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 1000, output_tokens: 100 } } };
+      yield { type: 'result', subtype: 'success', result: 'done', total_cost_usd: 0.01, usage: { input_tokens: 1000, output_tokens: 100 } };
+    })() };
+    const credits = { decide: (c, tg) => ({ decision: 'api', reason: 'ok', ...(tg && tg !== 'primary' ? { target: tg } : {}) }), record: () => {} };
+    const targets = JSON.stringify({ a: { key: 'bws:x' }, b: { key: 'env:AC_KEY_B' } });
+    const r = await runWorker({ prompt: 'x', cwd: w.dir, env: { AC_KEY_B: KB }, cfg: mk({ api_targets: targets, api_category_targets: 'workers=a,b', api_bws_token_source: `file:${tf}` }), credits, sdk, configDir: '' });
+    assert.equal(r.status, 'done', r.reason);
+    assert.equal(r.notes.length, 1);
+    assert.match(r.notes[0], /^target a has no usable key \(no API key: Bitwarden token file is not plain text .*\), skipped$/);
+    assert.ok(!JSON.stringify(r).includes(part));
+  } finally { w.cleanup(); }
+});
+
+test('worker: a failing PRIMARY key in a list also skips to the next target; an env token with a trailing newline still passes', async () => {
+  const { runWorker } = await import('../scripts/api-worker.mjs');
+  const w = makeFixture();
+  try {
+    const tf = join(w.dir, 'bad-token.txt');
+    writeFileSync(tf, 'fake-primary-part-0007\0x');
+    const sdk = { query: () => (async function* () {
+      yield { type: 'system', subtype: 'init', apiKeySource: 'ANTHROPIC_API_KEY' };
+      yield { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 1000, output_tokens: 100 } } };
+      yield { type: 'result', subtype: 'success', result: 'done', total_cost_usd: 0.01, usage: { input_tokens: 1000, output_tokens: 100 } };
+    })() };
+    const credits = { decide: (c, tg) => ({ decision: 'api', reason: 'ok', ...(tg && tg !== 'primary' ? { target: tg } : {}) }), record: () => {} };
+    const targets = JSON.stringify({ b: { key: 'env:AC_KEY_B' } });
+    const r = await runWorker({ prompt: 'x', cwd: w.dir, env: { AC_KEY_B: KB }, cfg: mk({ api_credits_key_source: 'bws:x', api_targets: targets, api_category_targets: 'workers=primary,b', api_bws_token_source: `file:${tf}` }), credits, sdk, configDir: '' });
+    assert.equal(r.status, 'done', r.reason);
+    assert.equal(r.target, 'b');
+    assert.match(r.notes[0], /^target primary has no usable key \(/);
+  } finally { w.cleanup(); }
+  assert.equal(bwsToken({ BWS_ACCESS_TOKEN: `${FAKE}\r\n` }, 'env:BWS_ACCESS_TOKEN'), FAKE);
+});
+
+test('readAdminKey honours an injected cfg.bwsTokenSource', async () => {
+  const { readAdminKey } = await import('../scripts/lib/api-spend.mjs');
+  const t = tokenFile(FAKE);
+  const was = process.env.AGENT_COMPANION_BWS_BIN;
+  const f = fakeBws(t.fx.dir);
+  process.env.AGENT_COMPANION_BWS_BIN = f.AGENT_COMPANION_BWS_BIN;
+  try {
+    const env = { ...process.env, NODE_OPTIONS: f.NODE_OPTIONS };
+    delete env.BWS_ACCESS_TOKEN;
+    // The stub's secret is not an admin key, so a read that got that far fails on the admin-key check, not on the token.
+    assert.throws(() => readAdminKey('bws:some-secret', { env, cfg: { bwsTokenSource: `file:${t.p}` } }), /not an admin key/);
+    assert.throws(() => readAdminKey('bws:some-secret', { env, cfg: { bwsTokenSource: 'file:rel.txt' } }), /must be absolute or start with ~/);
+  } finally {
+    if (was === undefined) delete process.env.AGENT_COMPANION_BWS_BIN; else process.env.AGENT_COMPANION_BWS_BIN = was;
+    t.fx.cleanup();
   }
 });

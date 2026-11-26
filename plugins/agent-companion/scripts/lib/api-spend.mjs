@@ -110,7 +110,7 @@ export function readAdminKey(src, opts = {}) {
   const p = parseAdminKeySource(src);
   if (!p || !p.name) throw new Error('no admin key source configured (api_admin_key_source)');
   const env = opts.env || process.env;
-  const key = String(p.kind === 'dpapi' ? readDpapi(p.name, opts) : resolveKey(`${p.kind}:${p.name}`, env)).trim();
+  const key = String(p.kind === 'dpapi' ? readDpapi(p.name, opts) : resolveKey(`${p.kind}:${p.name}`, env, opts.cfg && opts.cfg.bwsTokenSource)).trim();
   if (!key) throw new Error('admin key source returned nothing');
   if (!/^sk-ant-admin/.test(key)) throw new Error('the configured key is not an admin key (sk-ant-admin...)');
   return key;
@@ -223,7 +223,7 @@ export function unexplained(reviewers, ledger) {
 // Never throws. Returns { ok, line, notify, ... }.
 export async function check({
   now = Date.now(), cfg = loadSpendConfig(), env = process.env, fetchImpl = globalThis.fetch,
-  readKey = (src) => readAdminKey(src, { env }), ledgerPath, alertPath = alertStatePath(),
+  readKey = (src) => readAdminKey(src, { env, cfg }), ledgerPath, alertPath = alertStatePath(),
 } = {}) {
   let key = '';
   try {
@@ -389,7 +389,7 @@ function readBillingCache(path) {
 // (BILLING_TTL_MS, same window) answers without a request.
 export async function getBilling({
   now = Date.now(), cfg = loadSpendConfig(), env = process.env, fetchImpl = globalThis.fetch,
-  readKey = (src) => readAdminKey(src, { env }), cachePath = billingCachePath(), force = false,
+  readKey = (src) => readAdminKey(src, { env, cfg }), cachePath = billingCachePath(), force = false,
 } = {}) {
   const from = windowFrom(now, cfg.cycleDay);
   const hit = force ? null : readBillingCache(cachePath);
