@@ -434,7 +434,7 @@ export async function runApiSdk({
       if (isWorkspaceMissing({ text: why })) { noteFailure(WORKSPACE_HINT); return fail(true, WORKSPACE_HINT); }
       if (isSpendLimit({ status: 400, text: why })) { const r = `workspace limit: ${why}`.slice(0, 200); noteFailure(r, true); return fail(true, r, true); }
       if (/enforced_spend_limit_reached/.test(why)) { const r = `org spend cap: ${why}`.slice(0, 200); noteFailure(r, true); return fail(true, r, true); }
-      if ((lastAssistantError && AUTH_ERRORS.has(lastAssistantError)) || isUnavailable({ text: why })) { const r = `SDK: ${why}`.slice(0, 200); noteFailure(r); return fail(true, r, isCreditExhausted({ text: why })); }
+      if ((lastAssistantError && AUTH_ERRORS.has(lastAssistantError)) || isUnavailable({ text: why })) { const r = `SDK: ${why}`.slice(0, 200); noteFailure(r); return fail(true, r, lastAssistantError === 'billing_error' || isCreditExhausted({ text: why })); }
       return fail(false, `SDK: ${why}`.slice(0, 200));
     }
     const stop = result.stop_reason || lastStop;

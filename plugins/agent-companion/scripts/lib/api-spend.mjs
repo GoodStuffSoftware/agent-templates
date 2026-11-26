@@ -371,9 +371,11 @@ export async function fetchBilling(key, fetchImpl, { now = Date.now(), cfg = loa
   } catch { hourly = null; hourlyFrom = null; missing.push('hourly usage'); }
   try { keys = await fetchApiKeyNames(key, fetchImpl); } catch { missing.push('key names'); }
   // 0.31.72: the org this admin key belongs to (reports group by org id: two orgs can share one display name). Optional.
+  // Only when a named target with an admin key exists: with the options unset the Admin API calls and the cache shape are those of 0.31.71.
+  const namedAdmin = Object.values((cfg && cfg.targets) || {}).some((t) => !t.builtin && t.admin);
   let org = null;
-  try { const o = await adminGet('/v1/organizations/me', [], key, fetchImpl); if (o && o.id) org = { id: String(o.id), name: String(o.name || '') }; } catch { /* the cost data is still good without it */ }
-  return { v: 1, through, from, cost, usage, hourly, hourlyFrom, workspaces, keys, missing, org };
+  if (namedAdmin) try { const o = await adminGet('/v1/organizations/me', [], key, fetchImpl); if (o && o.id) org = { id: String(o.id), name: String(o.name || '') }; } catch { /* the cost data is still good without it */ }
+  return { v: 1, through, from, cost, usage, hourly, hourlyFrom, workspaces, keys, missing, ...(namedAdmin ? { org } : {}) };
 }
 
 function readBillingCache(path) {

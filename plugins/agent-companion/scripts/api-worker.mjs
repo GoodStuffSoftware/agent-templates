@@ -319,7 +319,7 @@ export function cliCredits(baseEnv = process.env, workspaceId = '') {
   return {
     // 0.31.72: target = a named API target (--target); the answer carries the target the governor chose ("target: <name>" line) when it is not the primary.
     decide: (category, target = null) => {
-      const lines = call(['decide', category, ...(target && target !== PRIMARY ? ['--target', target] : [])]);
+      const lines = call(['decide', category, ...(target ? ['--target', target] : [])]);
       const [decision, ...why] = lines.filter((l) => !/^target: /.test(l));
       const t = lines.map((l) => /^target: (.+)$/.exec(l)).find(Boolean);
       return { decision, reason: why.join(' '), ...(t ? { target: t[1] } : {}) };
@@ -426,7 +426,9 @@ export async function runWorker({
     // 4. Budget, through the api-credits CLI.
     const cr = credits || cliCredits(env, named ? '' : ws);
     let d;
-    try { d = named || explicitTarget ? cr.decide(CATEGORY, tgt || PRIMARY) : cr.decide(CATEGORY); } catch (e) { d = { decision: 'plan', reason: `budget check failed: ${String((e && e.message) || e)}` }; }
+    // Only the options-unset, flag-unset run asks the plain way (as 0.31.71 did); anything else names the target it is on, primary included.
+    const listed = named || explicitTarget || chain.length > 1;
+    try { d = listed ? cr.decide(CATEGORY, tgt || PRIMARY) : cr.decide(CATEGORY); } catch (e) { d = { decision: 'plan', reason: `budget check failed: ${String((e && e.message) || e)}` }; }
     if (d.decision !== 'api') return out('refused_budget', { reason: `api-credits decide ${CATEGORY}: ${d.decision} (${d.reason})` });
     if ((d.target || PRIMARY) !== (tgt || PRIMARY)) return { redirect: d.target && d.target !== PRIMARY ? d.target : null };
     // 5. The SDK.
@@ -510,7 +512,8 @@ ${prompt}` : prompt, options });
     // A run that did no work and ended on a cap (spend-limit 400, the enforced 429, credit exhausted) is capped: this target's lane trips at once and the loop below moves on.
     const why = `${errs} ${text}`;
     const capped = status === 'failed' && !(usd > 0) && (isCapFailure({ status: 400, text: why, raw: why }) || isEnforcedSpendCap({ status: 429, raw: why }));
-    if (capped) { try { recordFailure(`worker run capped: ${why.replace(/\s+/g, ' ').slice(0, 80)}`, { cfg, hard: true, target: named ? tgt : null }); } catch { /* the loop still moves on */ } }
+    // Only with named targets in play (a named lane, or a list with a later target to fail over to): with the options unset nothing is tripped, as 0.31.71.
+    if (capped && (named || chain.length > 1)) { try { recordFailure(`worker run capped: ${why.replace(/\s+/g, ' ').slice(0, 80)}`, { cfg, hard: true, target: named ? tgt : null }); } catch { /* the loop still moves on */ } }
     return out(status, { ...base, text, ...(capped ? { capped: true } : {}), reason: `${result.subtype}${errs ? `: ${errs}` : ''}${bookNote}` });
     };
     // The first target (primary only with the options unset); a capped run goes to the next target the governor still answers api for. Past the last, the refusal is the plan, as today.

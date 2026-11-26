@@ -228,9 +228,10 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   // 0.31.72: --target names an API target (api_targets); the review fails over only to the targets after it in the review list. An unknown name is a usage error.
   const cfgEff = cfg || loadConfig();
   let chain;
-  try { chain = resolveTargets('review', cfgEff, o.target === undefined ? null : o.target); } catch (e) { if (e instanceof TargetError) { out(e.message); return EXIT_USAGE; } throw e; }
-  if (o.target !== undefined && !String(o.target).trim()) { out('--target needs a target name'); return EXIT_USAGE; }
-  const reviewId = `rv-${randomUUID().slice(0, 8)}`; // the ledger entry's id, for api-credits.mjs record-fallback
+  try { chain = resolveTargets('review', cfgEff, 'target' in o ? o.target : null); } catch (e) { if (e instanceof TargetError) { out(e.message); return EXIT_USAGE; } throw e; }
+  if ('target' in o && !String(o.target || '').trim()) { out('--target needs a target name'); return EXIT_USAGE; }
+  const baseReviewId = `rv-${randomUUID().slice(0, 8)}`; // the ledger entry's id, for api-credits.mjs record-fallback
+  let reviewId = baseReviewId; // a failover attempt gets its own id (<base>-2, ...) so record-fallback marks the attempt that produced the result
   // 0.31.63: one telemetry row per API review (route 'api'), the count behind the share `api-credits.mjs status` prints; the guard's route and the manual path both end here.
   // A failed run is written with ok:false and the share leaves it out (the subagent retry counts as the review that happened). A run
   // that ends with a verdict carries the verdict fields (review_of_tool_use_id, review_verdict, branch, writer) the reviewer-quality
@@ -313,6 +314,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   // The first target of the list (primary only, with the options unset); a run that ends capped (spend-limit 400, the enforced 429, credit
   // exhausted) goes to the next target the governor still answers api for. Past the last, it is the unavailable result below: the plan, as today.
   let tgt = chain[0].name === PRIMARY ? null : chain[0].name;
+  let attempts = 1;
   let r = await runOnce(tgt);
   while (!r.ok && r.capped) {
     const at = chain.findIndex((t) => t.name === (tgt || PRIMARY));
@@ -322,7 +324,9 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     try { nd = decide('review', { cfg: cfgEff, env, target: next.name, ...(now ? { now } : {}) }); } catch { break; }
     if (nd.decision !== 'api') break;
     err(`API review note: target ${tgt || PRIMARY} is capped (${String(r.reason).slice(0, 80)}); failing over to ${nd.target || PRIMARY}`);
-    tgt = nd.target || null;
+    tgt = nd.target && nd.target !== PRIMARY ? nd.target : null;
+    attempts += 1;
+    reviewId = `${baseReviewId}-${attempts}`;
     r = await runOnce(tgt);
   }
   if (r.ledgerError) err(r.ledgerError); // the spend is not in the ledger: say so

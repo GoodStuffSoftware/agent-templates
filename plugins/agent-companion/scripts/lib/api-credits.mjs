@@ -397,7 +397,9 @@ export function decide(category, { now = Date.now(), cfg = loadConfig(), path = 
       }
       if (!hit) return plan(joined());
       const via = hit.t.name === PRIMARY ? '' : ` via ${hit.t.name}`;
-      const tgt = hit.t.name === PRIMARY ? {} : { target: hit.t.name };
+      // The answer names the target unless it is the primary AND the list starts at the primary (the old, unset-options shape): a list
+      // that starts elsewhere (review=spare,primary) would otherwise run the primary answer on its first entry.
+      const tgt = hit.t.name === PRIMARY && chain[0].name === PRIMARY ? {} : { target: hit.t.name };
       if (category === 'review' && !explicit) {
         const t = c.turn.review || 0;
         const r = cfg.reviewRatio;

@@ -37,6 +37,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   // --target <name>: the named API target (decide, record). Taken out of the arguments before the commands read them.
   let targetArg = null;
   { const ti = args.indexOf('--target'); if (ti >= 0) { targetArg = args[ti + 1] ?? ''; args.splice(ti, 2); } }
+  if (targetArg !== null && (!String(targetArg).trim() || String(targetArg).startsWith('--'))) { out('--target needs a target name'); return 2; }
   const [cmd, ...rest] = args;
   let cfg;
   try { cfg = cfgIn || loadSpendConfig(); } catch { cfg = null; }
