@@ -319,6 +319,27 @@ test('worker: the skip note carries the reason and no secret', async () => {
   } finally { w.cleanup(); }
 });
 
+test('worker: a failing PRIMARY key in a list also skips to the next target; an env token with a trailing newline still passes', async () => {
+  const { runWorker } = await import('../scripts/api-worker.mjs');
+  const w = makeFixture();
+  try {
+    const tf = join(w.dir, 'bad-token.txt');
+    writeFileSync(tf, 'fake-primary-part-0007\0x');
+    const sdk = { query: () => (async function* () {
+      yield { type: 'system', subtype: 'init', apiKeySource: 'ANTHROPIC_API_KEY' };
+      yield { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 1000, output_tokens: 100 } } };
+      yield { type: 'result', subtype: 'success', result: 'done', total_cost_usd: 0.01, usage: { input_tokens: 1000, output_tokens: 100 } };
+    })() };
+    const credits = { decide: (c, tg) => ({ decision: 'api', reason: 'ok', ...(tg && tg !== 'primary' ? { target: tg } : {}) }), record: () => {} };
+    const targets = JSON.stringify({ b: { key: 'env:AC_KEY_B' } });
+    const r = await runWorker({ prompt: 'x', cwd: w.dir, env: { AC_KEY_B: KB }, cfg: mk({ api_credits_key_source: 'bws:x', api_targets: targets, api_category_targets: 'workers=primary,b', api_bws_token_source: `file:${tf}` }), credits, sdk, configDir: '' });
+    assert.equal(r.status, 'done', r.reason);
+    assert.equal(r.target, 'b');
+    assert.match(r.notes[0], /^target primary has no usable key \(/);
+  } finally { w.cleanup(); }
+  assert.equal(bwsToken({ BWS_ACCESS_TOKEN: `${FAKE}\r\n` }, 'env:BWS_ACCESS_TOKEN'), FAKE);
+});
+
 test('readAdminKey honours an injected cfg.bwsTokenSource', async () => {
   const { readAdminKey } = await import('../scripts/lib/api-spend.mjs');
   const t = tokenFile(FAKE);

@@ -243,12 +243,14 @@ export function bwsToken(env = process.env, tokenSource = undefined) {
   if (!p) throw keyFailure('api_bws_token_source must be env:<NAME> or file:<path>');
   if (p.kind === 'env') {
     if (!env[p.name]) throw keyFailure(`${p.name} is not set`);
-    if (!PLAIN_TOKEN.test(String(env[p.name]))) throw keyFailure(`${p.name} is not a plain-text token`);
-    return env[p.name];
+    const ev = String(env[p.name]).trim(); // a trailing newline in a variable passed before; keep passing
+    if (!ev || !PLAIN_TOKEN.test(ev)) throw keyFailure(`${p.name} is not a plain-text token`);
+    return ev;
   }
   if (env[BWS_TOKEN_ENV]) {
-    if (!PLAIN_TOKEN.test(String(env[BWS_TOKEN_ENV]))) throw keyFailure(`${BWS_TOKEN_ENV} is not a plain-text token`);
-    return env[BWS_TOKEN_ENV];
+    const ev = String(env[BWS_TOKEN_ENV]).trim();
+    if (!ev || !PLAIN_TOKEN.test(ev)) throw keyFailure(`${BWS_TOKEN_ENV} is not a plain-text token`);
+    return ev;
   }
   if (!/^~([\\/]|$)/.test(p.name) && !isAbsolute(p.name)) throw keyFailure(`Bitwarden token file path must be absolute or start with ~ (file:${p.name})`);
   let v;
