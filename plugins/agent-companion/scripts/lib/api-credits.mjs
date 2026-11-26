@@ -370,41 +370,88 @@ export function spendView(billing, category, { cfg, cy, entries, now }) {
 
 // `peek` (0.31.63): answer without advancing the review alternation counter (turn.review), so status and diagnostics
 // never flip the next real routing decision. Only the spawn guard's call (and a writer's manual path) advances it.
-export function decide(category, { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), env = process.env, billing = null, peek = false } = {}) {
+export function decide(category, { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), env = process.env, billing = null, peek = false, target = null } = {}) {
   const plan = (reason) => ({ decision: 'plan', reason });
   try {
     if (!CATEGORIES.includes(category)) return plan(`unknown category "${category}"`);
-    if (!keyConfigured(cfg.keySource, env)) return plan('no API key configured (set api_credits_key_source and the variable it names)');
+    // 0.31.72: the category's ordered targets (primary only, unless api_category_targets or an explicit target says otherwise).
+    // Each has its own lane; a cap or credit "plan" answer (or a missing key) moves on to the next, alternation is applied once
+    // to whichever target takes the run (and not at all for an explicit target). With the options unset the chain is
+    // [primary] and every answer below is the one this function always gave.
+    const chain = resolveTargets(category, cfg, target);
+    const explicit = target !== null && target !== undefined && String(target).trim() !== '';
+    const reasons = [];
+    const usable = [];
+    for (const t of chain) {
+      if (keyConfigured(t.keySource, env)) usable.push(t);
+      else reasons.push(t.name === PRIMARY ? 'no API key configured (set api_credits_key_source and the variable it names)' : `target ${t.name}: no API key available (check its key source)`);
+    }
+    const joined = () => reasons.join('; then ');
+    if (!usable.length) return plan(joined());
     return mutate(now, cfg, path, (c, cy) => {
-      if (c.tripped) return plan(`API runs failed ${c.fails} ${c.fails === 1 ? 'time' : 'times'} in a row this cycle (${c.tripped.reason}); plan until the cycle ends or a probe succeeds`);
-      const sh = cfg.shares;
-      const view = spendView(billing, category, { cfg, cy, entries: c.entries, now });
-      const tag = view.verified ? '' : ` (${BOOKED_ONLY})`;
-      if (view.limit !== null && view.wsMonth >= view.limit) return plan(`workspace limit: ${view.wsName} at $${view.wsMonth.toFixed(2)} of its $${view.limit.toFixed(2)} monthly limit${tag}`);
-      const nonReserve = CATEGORIES.reduce((a, k) => a + (sh[k] || 0), 0) || 1;
-      const pool = cfg.budget * (cy.reserveReleased ? 1 : 1 - (sh.reserve || 0));
-      const total = view.verified ? view.total : sum(c.spent);
-      const spent = view.verified ? view.spent : (c.spent[category] || 0);
-      const cnt = c.n[category] || 0;
-      const avg = cnt > 0 ? (c.spent[category] || 0) / cnt : cfg.itemEstimate;
-      const basis = view.verified ? (view.wsMapped ? 'billed' : 'booked only, no workspace mapped') : 'booked';
-      if (pool - total < avg) return plan(`balance: $${(cfg.budget - total).toFixed(2)} left of $${cfg.budget} (${basis})${cy.reserveReleased ? '' : ', the rest is the held reserve'}${tag}`);
-      const share = cy.reserveReleased ? (sh[category] || 0) + (sh.reserve || 0) * ((sh[category] || 0) / nonReserve) : (sh[category] || 0);
-      const cap = share * cfg.budget * cy.frac + avg;
-      if (spent >= cap) return plan(`pace: ${category} spent $${spent.toFixed(2)} (${basis}) >= $${cap.toFixed(2)} allowed at ${(cy.frac * 100).toFixed(0)}% of the cycle${tag}`);
-      if (category === 'review') {
+      let hit = null;
+      for (const t of usable) {
+        const r = t.name === PRIMARY ? evalPrimary(category, { cfg, c, cy, billing, now }) : evalNamed(category, t, { c });
+        if (r.api) { hit = { t, tail: r.tail }; break; }
+        reasons.push(t.name === PRIMARY ? r.reason : `target ${t.name}: ${r.reason}`);
+      }
+      if (!hit) return plan(joined());
+      const via = hit.t.name === PRIMARY ? '' : ` via ${hit.t.name}`;
+      const tgt = hit.t.name === PRIMARY ? {} : { target: hit.t.name };
+      if (category === 'review' && !explicit) {
         const t = c.turn.review || 0;
         const r = cfg.reviewRatio;
         const api = Math.ceil((t + 1) * r - 1e-9) > Math.ceil(t * r - 1e-9);
         if (!peek) c.turn.review = t + 1;
         if (!api) return plan(`alternation: review turn ${t} stays on the plan (target ${(r * 100).toFixed(0)}% api)`);
-        return { decision: 'api', reason: `review turn ${t} on credits: spent $${spent.toFixed(2)} (${basis}) of $${cap.toFixed(2)} pace cap, $${(cfg.budget - total).toFixed(2)} left${tag}` };
+        return { decision: 'api', reason: `review turn ${t} on credits${via}: ${hit.tail}`, ...tgt };
       }
-      return { decision: 'api', reason: `${category} on credits: spent $${spent.toFixed(2)} (${basis}) of $${cap.toFixed(2)} pace cap, $${(cfg.budget - total).toFixed(2)} left${tag}` };
+      return { decision: 'api', reason: `${category} on credits${via}${explicit ? ' (explicit target)' : ''}: ${hit.tail}`, ...tgt };
     });
   } catch (e) {
     return plan(`failed closed: ${String((e && e.message) || e).slice(0, 120)}`);
   }
+}
+
+// A named target's lane in the cycle (the primary lane is the cycle's top level, so existing ledgers read unchanged).
+export const laneOf = (c, name) => (!name || name === PRIMARY ? c : ((c.lanes ||= {})[name] ||= { spent: {}, n: {}, fails: 0, tripped: null }));
+export const entriesOf = (entries, name) => (entries || []).filter((e) => (e.target || PRIMARY) === (name || PRIMARY));
+
+// The primary lane: the governor as it was before targets (billing snapshot, pace, reserve, workspace limit, breaker).
+function evalPrimary(category, { cfg, c, cy, billing, now }) {
+  const plan = (reason) => ({ api: false, reason });
+  if (c.tripped) return plan(`API runs failed ${c.fails} ${c.fails === 1 ? 'time' : 'times'} in a row this cycle (${c.tripped.reason}); plan until the cycle ends or a probe succeeds`);
+  const sh = cfg.shares;
+  const view = spendView(billing, category, { cfg, cy, entries: entriesOf(c.entries, PRIMARY), now });
+  const tag = view.verified ? '' : ` (${BOOKED_ONLY})`;
+  if (view.limit !== null && view.wsMonth >= view.limit) return plan(`workspace limit: ${view.wsName} at $${view.wsMonth.toFixed(2)} of its $${view.limit.toFixed(2)} monthly limit${tag}`);
+  const nonReserve = CATEGORIES.reduce((a, k) => a + (sh[k] || 0), 0) || 1;
+  const pool = cfg.budget * (cy.reserveReleased ? 1 : 1 - (sh.reserve || 0));
+  const total = view.verified ? view.total : sum(c.spent);
+  const spent = view.verified ? view.spent : (c.spent[category] || 0);
+  const cnt = c.n[category] || 0;
+  const avg = cnt > 0 ? (c.spent[category] || 0) / cnt : cfg.itemEstimate;
+  const basis = view.verified ? (view.wsMapped ? 'billed' : 'booked only, no workspace mapped') : 'booked';
+  if (pool - total < avg) return plan(`balance: $${(cfg.budget - total).toFixed(2)} left of $${cfg.budget} (${basis})${cy.reserveReleased ? '' : ', the rest is the held reserve'}${tag}`);
+  const share = cy.reserveReleased ? (sh[category] || 0) + (sh.reserve || 0) * ((sh[category] || 0) / nonReserve) : (sh[category] || 0);
+  const cap = share * cfg.budget * cy.frac + avg;
+  if (spent >= cap) return plan(`pace: ${category} spent $${spent.toFixed(2)} (${basis}) >= $${cap.toFixed(2)} allowed at ${(cy.frac * 100).toFixed(0)}% of the cycle${tag}`);
+  return { api: true, tail: `spent $${spent.toFixed(2)} (${basis}) of $${cap.toFixed(2)} pace cap, $${(cfg.budget - total).toFixed(2)} left${tag}` };
+}
+
+// A named target's lane: its own breaker and booked spend; its optional budget is a plain ceiling (no pacing: a failover target
+// is for the runs the earlier targets could not take). No budget set: only its breaker and the provider's own limits bound it.
+function evalNamed(category, t, { c }) {
+  const L = laneOf(c, t.name);
+  if (L.tripped) return { api: false, reason: `API runs failed ${L.fails} ${L.fails === 1 ? 'time' : 'times'} in a row this cycle (${L.tripped.reason}); plan until the cycle ends or a probe succeeds` };
+  const total = sum(L.spent);
+  const spent = L.spent[category] || 0;
+  if (t.budget) {
+    const cnt = L.n[category] || 0;
+    const avg = cnt > 0 ? spent / cnt : 0;
+    if (t.budget - total <= avg) return { api: false, reason: `balance: $${Math.max(0, t.budget - total).toFixed(2)} left of $${t.budget} (booked)` };
+  }
+  return { api: true, tail: `spent $${spent.toFixed(2)} (booked)${t.budget ? `, $${(t.budget - total).toFixed(2)} left of $${t.budget}` : ', no budget set'}` };
 }
 
 // --- record ----------------------------------------------------------------------------
@@ -459,7 +506,7 @@ export function rejectsInCycle({ now = Date.now(), cfg = loadConfig(), path = le
   return n;
 }
 
-export function record(category, usd, meta = '', { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), success = true, detail = null, alreadyBooked = 0, count = true, id = null, apiKeySource = null } = {}) {
+export function record(category, usd, meta = '', { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), success = true, detail = null, alreadyBooked = 0, count = true, id = null, apiKeySource = null, target = null } = {}) {
   if (!CATEGORIES.includes(category)) throw new Error(`unknown category "${category}"`);
   if (apiKeySource !== REQUIRED_API_KEY_SOURCE) {
     const reason = apiKeySource ? `api key source "${String(apiKeySource).slice(0, 40)}" is not ${REQUIRED_API_KEY_SOURCE}` : 'no api key source: the record carries no proof that the run billed the API key';
@@ -468,25 +515,27 @@ export function record(category, usd, meta = '', { now = Date.now(), cfg = loadC
   }
   const n = Number(usd);
   if (!Number.isFinite(n) || n < 0) throw new Error('usd must be a non-negative number');
+  const tn = target && target !== PRIMARY ? String(target) : null;
   return mutate(now, cfg, path, (c) => {
-    c.spent[category] = (c.spent[category] || 0) + n - (Number(alreadyBooked) || 0);
-    if (count) c.n[category] = (c.n[category] || 0) + 1;
+    const L = laneOf(c, tn);
+    L.spent[category] = (L.spent[category] || 0) + n - (Number(alreadyBooked) || 0);
+    if (count) L.n[category] = (L.n[category] || 0) + 1;
     c.entries.push({
-      ...(id ? { id: String(id).slice(0, 40) } : {}), t: new Date(now).toISOString(), cat: category, usd: n, meta: String(meta).slice(0, 200),
+      ...(id ? { id: String(id).slice(0, 40) } : {}), t: new Date(now).toISOString(), cat: category, ...(tn ? { target: tn.slice(0, 40) } : {}), usd: n, meta: String(meta).slice(0, 200),
       ...(detail ? { project: String(detail.project || '').slice(0, 80), model: String(detail.model || '').slice(0, 80), tokens: detail.tokens || null, turns: detail.turns ?? null, ...(detail.path ? { path: String(detail.path).slice(0, 20) } : {}), ...(detail.error ? { error: String(detail.error).slice(0, 200) } : {}), ...(Array.isArray(detail.notes) && detail.notes.length ? { notes: detail.notes.slice(0, 5).map((x) => String(x).slice(0, 120)) } : {}) } : {}),
     });
     if (c.entries.length > MAX_ENTRIES) c.entries.splice(0, c.entries.length - MAX_ENTRIES);
-    if (success && category !== 'workers') { c.fails = 0; c.tripped = null; }
-    return { spent: c.spent[category], n: c.n[category] };
+    if (success && category !== 'workers') { L.fails = 0; L.tripped = null; }
+    return { spent: L.spent[category], n: L.n[category] };
   });
 }
 
 // Spend of one paid turn, booked as it happens so a killed run still leaves its cost in the
 // ledger. The run's final record() passes the total with alreadyBooked set to this sum.
-export function recordSpend(category, usd, { now = Date.now(), cfg = loadConfig(), path = ledgerPath() } = {}) {
+export function recordSpend(category, usd, { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), target = null } = {}) {
   const n = Number(usd);
   if (!CATEGORIES.includes(category) || !Number.isFinite(n) || n <= 0) return;
-  mutate(now, cfg, path, (c) => { c.spent[category] = (c.spent[category] || 0) + n; });
+  mutate(now, cfg, path, (c) => { const L = laneOf(c, target); L.spent[category] = (L.spent[category] || 0) + n; });
 }
 
 // A review that ended partial, failed or stopped and was redone as a plan review: marks its ledger entry (looked up by the id
@@ -540,11 +589,12 @@ export function reviewStats({ since = null, until = null, path = ledgerPath() } 
 
 // A billing or auth failure of an API run. Two in a row trip the breaker for the cycle; a hard
 // failure (the workspace spend limit) trips it at once, so nothing retries against a wall.
-export function recordFailure(reason, { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), hard = false } = {}) {
+export function recordFailure(reason, { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), hard = false, target = null } = {}) {
   return mutate(now, cfg, path, (c) => {
-    c.fails = (c.fails || 0) + 1;
-    if (hard || c.fails >= TRIP_AFTER) c.tripped = { at: new Date(now).toISOString(), reason: String(reason).slice(0, 120) };
-    return { fails: c.fails, tripped: !!c.tripped };
+    const L = laneOf(c, target);
+    L.fails = (L.fails || 0) + 1;
+    if (hard || L.fails >= TRIP_AFTER) L.tripped = { at: new Date(now).toISOString(), reason: String(reason).slice(0, 120) };
+    return { fails: L.fails, tripped: !!L.tripped };
   });
 }
 
@@ -571,7 +621,54 @@ export function status({ now = Date.now(), cfg = loadConfig(), path = ledgerPath
   { const w = sharesWarning(sh); if (w) lines.push(w); }
   if (c.tripped) lines.push(`BREAKER TRIPPED ${c.tripped.at}: ${c.tripped.reason}; decide answers plan until the cycle ends or a probe succeeds`);
   else if (c.fails) lines.push(`${c.fails} billing/auth failure(s) in a row (trips at ${TRIP_AFTER})`);
-  return { text: lines.join('\n'), total, cycle: cy, ledger: c };
+  // The primary lane's entries only (named targets are reported by targetLines); allEntries has every lane.
+  return { text: lines.join('\n'), total, cycle: cy, ledger: { ...c, entries: entriesOf(c.entries, PRIMARY), allEntries: c.entries } };
+}
+
+/// --- per-target report (0.31.72) --------------------------------------------------------------
+// Empty unless api_targets names a target, so the output with the options unset is the output it always was.
+export const namedTargets = (cfg) => Object.values((cfg && cfg.targets) || {}).filter((t) => !t.builtin);
+
+// One lane's booked figures and breaker, as a line for target `t`.
+function laneLine(t, c) {
+  const L = laneOf(c, t.name);
+  const spent = sum(L.spent);
+  const n = sum(L.n);
+  const budget = t.name === PRIMARY ? null : t.budget;
+  const brk = L.tripped ? `BREAKER TRIPPED ${L.tripped.at}: ${L.tripped.reason}` : (L.fails ? `${L.fails} failure(s) in a row (trips at ${TRIP_AFTER})` : 'breaker ok');
+  return `${t.name}: booked $${spent.toFixed(2)} in ${n} item(s)${budget ? ` of its $${budget} budget` : ''}; ${brk}`;
+}
+
+// cycle: the ledger cycle (top level = primary lane, lanes = named). orgs: getTargetOrgs() result ([] before it is fetched), grouped
+// by org id with the org name only as secondary text. A group with no cost data says so and never fails the report.
+export function targetLines({ cfg, cycle = emptyCycle(), orgs = [], now = Date.now() }) {
+  const named = namedTargets(cfg);
+  const lines = [];
+  for (const e of cfg.targetErrors || []) lines.push(`api_targets: ${e}`);
+  if (!named.length && !Object.keys(cfg.categoryTargets || {}).length) return lines;
+  const cy = cycleOf(now, cfg.cycleDay);
+  const all = Object.values(cfg.targets || {});
+  lines.push('API targets (grouped by org; booked = this ledger, billed = Admin API):');
+  for (const cat of ['review', 'workers']) {
+    const l = (cfg.categoryTargets || {})[cat];
+    if (l && l.length) lines.push(`  ${cat} order: ${l.join(' > ')}, then the plan`);
+  }
+  const seen = new Set();
+  const groups = orgs.length ? orgs : [{ id: null, name: '', targets: all.map((t) => t.name), ok: false, snapshot: null, reason: 'billing not fetched' }];
+  for (const g of groups) {
+    const head = g.id ? `org ${g.id}${g.name ? ` (${g.name})` : ''}` : 'org unknown';
+    const billed = g.ok && g.snapshot ? `billed $${billedSince(g.snapshot, cy.start).toFixed(2)} this cycle through ${new Date(g.snapshot.through).toISOString().slice(0, 10)}` : `no cost data${g.reason ? ` (${g.reason})` : ''}`;
+    lines.push(`  ${head}: ${billed}`);
+    for (const name of g.targets) {
+      const t = (cfg.targets || {})[name];
+      if (!t) continue;
+      seen.add(name);
+      const ws = g.ok && g.snapshot && t.workspace ? `; workspace ${workspaceName(g.snapshot, t.workspace)} billed $${billedSince(g.snapshot, cy.start, t.workspace).toFixed(2)}` : '';
+      lines.push(`    ${laneLine(t, cycle)}${ws}`);
+    }
+  }
+  for (const t of all) if (!seen.has(t.name)) lines.push(`    ${laneLine(t, cycle)}`);
+  return lines;
 }
 
 // The API share of all reviews (0.31.63), from telemetry/review-verdicts.jsonl. An API review counts once, by the row api-review.mjs

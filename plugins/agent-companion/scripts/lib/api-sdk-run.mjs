@@ -54,11 +54,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { priceUsage } from './pricing.mjs';
 import { stateFile, REVIEWER_SESSION_ENV } from '../../hooks/lib/context.mjs';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
-import { loadConfig, resolveKey, record, recordFailure, recordSpend } from './api-credits.mjs';
+import { loadConfig, resolveKey, record, recordFailure, recordSpend, targetOf, PRIMARY } from './api-credits.mjs';
 import { spawnSyncHidden } from './proc.mjs';
 import { buildUserGuards } from './api-sdk-guards.mjs';
 import {
-  validKeyShape, scrub, resolveModel, isUnavailable, isSpendLimit, isWorkspaceMissing, hasVerdict, WORKSPACE_ENV, WORKSPACE_HINT,
+  validKeyShape, scrub, resolveModel, isUnavailable, isSpendLimit, isCreditExhausted, isWorkspaceMissing, hasVerdict, WORKSPACE_ENV, WORKSPACE_HINT,
   SLOW_REVIEW_MS, HUNG_MS, SOFT_USD, DEFAULT_HARD_USD, slowNote, softUsdNote, logSlowReview,
 } from './api-run.mjs';
 
@@ -255,8 +255,10 @@ export async function runApiSdk({
   maxUsd = DEFAULT_HARD_USD, softUsd = SOFT_USD, maxTurns = 30, requireVerdict = false, reviewId = null,
   hungMs = HUNG_MS, slowMs = SLOW_REVIEW_MS, logRow = null, sdkVersion = DEFAULT_SDK_VERSION, platform = process.platform,
   cfg = loadConfig(), env = process.env, now = Date.now(),
-  sdk = null, load = loadSdk, userGuards = true, userConfigDir = null,
+  sdk = null, load = loadSdk, userGuards = true, userConfigDir = null, target = null,
 }) {
+  const T = targetOf(cfg, target);
+  const tn = T.name === PRIMARY ? null : T.name; // the ledger lane; null = primary
   let key = '';
   let usd = 0;
   let booked = 0;
@@ -270,18 +272,18 @@ export async function runApiSdk({
   const bookCost = (ok, error = null) => {
     try {
       record(category, usd, `${meta} ${ok ? 'ok' : 'partial'}`.trim(), {
-        cfg, now, success: ok, alreadyBooked: booked, count: usd > 0 || ok, id: reviewId, apiKeySource: REQUIRED_KEY_SOURCE,
+        cfg, now, success: ok, alreadyBooked: booked, count: usd > 0 || ok, id: reviewId, apiKeySource: REQUIRED_KEY_SOURCE, target: tn,
         detail: { project: basename(resolve(cwd)), model: modelId, tokens: { ...tokens }, turns: turnCount, path: 'sdk', error: ok ? null : error, notes },
       });
     } catch (e) { ledgerFailed(`$${(usd - booked).toFixed(4)} not recorded`, e); }
   };
   const noteFailure = (reason, hard = false) => {
-    try { recordFailure(reason, { cfg, now, hard }); } catch (e) { ledgerFailed('the failure count was not recorded', e); }
+    try { recordFailure(reason, { cfg, now, hard, target: tn }); } catch (e) { ledgerFailed('the failure count was not recorded', e); }
   };
-  const fail = (unavailable, reason) => {
+  const fail = (unavailable, reason, capped = false) => {
     const r = scrub(reason, key).slice(0, 200);
     bookCost(false, r);
-    return { ok: false, unavailable, reason: r, usd, path: 'sdk', notes, ...(ledgerError ? { ledgerError } : {}) };
+    return { ok: false, unavailable, reason: r, usd, path: 'sdk', notes, ...(capped ? { capped: true } : {}), ...(tn ? { target: tn } : {}), ...(ledgerError ? { ledgerError } : {}) };
   };
   const hungReason = () => `no new message or tool result for ${Math.round((hungMs / 60000) * 10) / 10} minutes after ${turnCount} turn(s); falling back to the plan`;
   const capReason = () => `the review reached its spend backstop of $${Number(maxUsd).toFixed(2)} after ${turnCount} turn(s) without a verdict; falling back to the plan`;
@@ -300,9 +302,9 @@ export async function runApiSdk({
   };
   const stopTimers = () => { clearTimeout(hungTimer); clearTimeout(slowTimer); };
   try {
-    key = resolveKey(cfg.keySource, env);
+    key = resolveKey(T.keySource, env);
     if (!validKeyShape(key)) throw configError('the configured secret is not a Console API key (it must start sk-ant-, and sk-ant-admin and sk-ant-oat are refused)');
-    const ws = String(env[WORKSPACE_ENV] || '').trim();
+    const ws = tn ? String(T.workspace || '').trim() : String(env[WORKSPACE_ENV] || '').trim();
     if (ws && !/^[A-Za-z0-9_.-]+$/.test(ws)) throw configError(`${WORKSPACE_ENV} is malformed (letters, digits, _ . - only)`);
     const m = resolveModel(model);
     modelId = m.id;
@@ -341,7 +343,7 @@ export async function runApiSdk({
     let inited = false;
     let init = null;
     const book = (delta) => {
-      if (delta > 0) { try { recordSpend(category, delta, { cfg, now }); booked += delta; } catch { /* the final record() books the rest */ } }
+      if (delta > 0) { try { recordSpend(category, delta, { cfg, now, target: tn }); booked += delta; } catch { /* the final record() books the rest */ } }
     };
 
     const q = sdk.query({ prompt, options });
@@ -430,8 +432,9 @@ export async function runApiSdk({
       const errs = Array.isArray(result.errors) ? result.errors.join('; ') : '';
       const why = scrub(errs || (result.subtype === 'success' ? text : '') || `${result.subtype}${lastAssistantError ? ` (${lastAssistantError})` : ''}`, key).replace(/\s+/g, ' ').trim();
       if (isWorkspaceMissing({ text: why })) { noteFailure(WORKSPACE_HINT); return fail(true, WORKSPACE_HINT); }
-      if (isSpendLimit({ status: 400, text: why })) { const r = `workspace limit: ${why}`.slice(0, 200); noteFailure(r, true); return fail(true, r); }
-      if ((lastAssistantError && AUTH_ERRORS.has(lastAssistantError)) || isUnavailable({ text: why })) { const r = `SDK: ${why}`.slice(0, 200); noteFailure(r); return fail(true, r); }
+      if (isSpendLimit({ status: 400, text: why })) { const r = `workspace limit: ${why}`.slice(0, 200); noteFailure(r, true); return fail(true, r, true); }
+      if (/enforced_spend_limit_reached/.test(why)) { const r = `org spend cap: ${why}`.slice(0, 200); noteFailure(r, true); return fail(true, r, true); }
+      if ((lastAssistantError && AUTH_ERRORS.has(lastAssistantError)) || isUnavailable({ text: why })) { const r = `SDK: ${why}`.slice(0, 200); noteFailure(r); return fail(true, r, isCreditExhausted({ text: why })); }
       return fail(false, `SDK: ${why}`.slice(0, 200));
     }
     const stop = result.stop_reason || lastStop;
