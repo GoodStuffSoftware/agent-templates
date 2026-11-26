@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import './isolate.mjs';
 
@@ -1462,9 +1462,39 @@ test('owner-first: the prompt hook shows the owner first and holds the notice ba
   assert.ok(S.readFlag().shownTo['owner-s']);
 });
 
+test('owner-first: a cleared notice shown while the flag is held back does not start the countdown for that session', () => {
+  const tp = ownerFixture();
+  const at = T + 11 * MIN;
+  putOwner('owner-s', T + 2 * MIN, tp);
+  utimesSync(tp, new Date(at), new Date(at));
+  S.writeJson(S.paths().heldSessions, { holdSince: iso(T - HOUR), sessions: [{ sessionId: 'other-s', agentId: null, cwd: '/w' }], clearedAt: iso(at - MIN), noticed: {} });
+  const out = ctxOf(hookAt(['--watch'], { session_id: 'other-s', prompt: 'hello' }, at));
+  assert.match(out, /hold was cleared/, 'the cleared notice is shown');
+  assert.doesNotMatch(out, /RELEASE WATCH/, 'the flag is held back for the owner');
+  assert.equal((S.readFlag().shownTo || {})['other-s'], undefined, 'not recorded as shown the flag');
+});
+
+test('isAckText: ordinary acks match, near-misses and questions do not', () => {
+  const yes = ['ack', 'Ack.', 'ACK!', 'yes ack it', 'ok ack', 'ack thanks', 'acked', 'ack it please', 'ack — keep it', 'ack - keep it', 'keep 0.31.71', 'ack 0.31.71', 'yes, ack it', 'ok, ack', "ack'd", 'keep it', 'no rollback', 'all good'];
+  const no = ["don't ack", 'no, roll back', 'ack and roll back', 'ack?', 'ok ack?', 'keep 0.31.71?', 'Well analysis please', 'why did it flag?', 'ok', 'yes', 'please', 'ack, keep going', 'roll back 0.31.71'];
+  for (const t of yes) assert.equal(S.isAckText(t), true, `ack: ${t}`);
+  for (const t of no) assert.equal(S.isAckText(t), false, `not ack: ${t}`);
+});
+
+test('compat: a 0.31.70 flag with no chain field still matches its cooldown keys; an old hook-signature key holds for the normalised name', () => {
+  const raw = 'hook-signature:PreToolUse:Bash exit 12 in /a/b/c.mjs';
+  S.openFlag({ version: '1', T, chain: T, flags: [{ name: 'queue-clears', value: 3.6, level: 3.6 }, { name: raw, value: 3, level: 3 }], at: T + MIN });
+  S.clear({ by: 'operator', at: T + 2 * MIN });
+  const f = S.readFlag();
+  delete f.chain; // 0.31.70 shape: no chain field, the cooldown key is the baseline anchor
+  S.writeJson(S.paths().flag, f);
+  assert.equal(S.openFlag({ version: '1', T, chain: T, flags: [{ name: 'queue-clears', value: 3.6, level: 3.6 }], at: T + 3 * MIN }), null, 'the old cooldown key still answers');
+  assert.equal(S.openFlag({ version: '1', T, chain: T, flags: [{ name: 'hook-signature:PreToolUse:Bash exit N in <path>', value: 3, level: 3 }], at: T + 3 * MIN }), null, 'the old raw signature name answers the normalised one');
+});
+
 test('clear: removes a stale hold-session list; keeps one that still owes messages', () => {
   const listF = S.paths().heldSessions;
-  S.writeJson(listF, { holdSince: iso(T - HOUR), sessions: [{ sessionId: 'old', agentId: null }], clearedAt: iso(T - 30 * MIN), noticed: {}, owed: { ids: [], unmapped: [], claimedBy: 'x' } });
+  S.writeJson(listF, { holdSince: iso(T - HOUR), sessions: [{ sessionId: 'old', agentId: null }], clearedAt: iso(T - 13 * HOUR), noticed: {}, owed: { ids: [], unmapped: [], claimedBy: 'x' } });
   S.openFlag({ version: '1', flags: flag, at: T });
   S.clear({ by: 'operator', at: T + MIN });
   assert.equal(existsSync(listF), false, 'the stale list of an earlier hold is gone');
@@ -1476,7 +1506,19 @@ test('clear: removes a stale hold-session list; keeps one that still owes messag
   assert.ok(existsSync(listF), 'a second clear does not drop unclaimed owed messages');
   S.takeOwedMessages('lead-b', T + 4 * MIN);
   S.clear({ by: 'operator', at: T + 5 * MIN });
-  assert.equal(existsSync(listF), false, 'claimed: the next clear removes the list');
+  assert.ok(existsSync(listF), 'claimed but recent: a later clear keeps the list, unmapped leads still read it');
+  S.clear({ by: 'operator', at: T + 2 * MIN + S.OWED_TTL_MS + MIN });
+  assert.equal(existsSync(listF), false, 'older than the owed-message TTL: the next clear removes it');
+});
+
+test('clear: a second clear after the claim does not take the cleared notice from a held lead (review scenario)', () => {
+  const listF = S.paths().heldSessions;
+  S.writeJson(S.paths().hold, { since: iso(T), version: '1', reason: 'x', flags: [], clearedAt: null });
+  S.writeJson(listF, { holdSince: iso(T), sessions: [{ sessionId: 'lead-a', agentId: null, cwd: '/w' }], clearedAt: null, noticed: {} });
+  S.clear({ by: 'operator', at: T + MIN });                 // the lift: the list is kept and owes messages
+  S.takeOwedMessages('lead-b', T + 2 * MIN);                // the CLI clear's own hook claims them at once
+  S.clear({ by: 'operator', at: T + 3 * MIN });             // a retry or a flag-only clear
+  assert.match(S.clearedNotice('lead-a', T + 4 * MIN) || '', /hold was cleared/, 'the unmapped lead still gets its cleared notice');
 });
 
 test('clear: a list from an earlier hold is dropped when a new hold is lifted', () => {
@@ -1607,4 +1649,29 @@ test('designed-denies: prefixes and normalisation', async () => {
   assert.ok(D.isDesignedDeny('Heavy command (test (box 12)) not run')); assert.ok(!D.isDesignedDeny('Heavy command'));
   assert.ok(!D.isDesignedDeny('TypeError: x is not a function'));
   assert.equal(D.normalizeSignature('exit 12 in /a/b/c.mjs and C:\\x\\y.js'), 'exit N in <path> and <path>');
+});
+
+test('designed-denies: every guard deny text is listed, and a crash still is not', async () => {
+  const D = await import('../hooks/lib/designed-denies.mjs');
+  const { ENV_MSG } = await import('../hooks/lib/env-dump-guard.mjs');
+  const { KILL_MSG } = await import('../hooks/lib/process-kill-guard.mjs');
+  const { PUSH_DELETE_MSG } = await import('../hooks/lib/push-delete-guard.mjs');
+  const { PY_MSG } = await import('../hooks/lib/python-stdin.mjs');
+  const { WRITER_DENY_REASON } = await import('../hooks/lib/scope-tripwire.mjs');
+  const { denyText, streakPrefix } = await import('../hooks/lib/handoff-limit.mjs');
+  const { workerWaitDenyText } = await import('../hooks/lib/poll-guard.mjs');
+  const { HEAVY_DENY_PREFIX } = await import('../hooks/lib/resource-gate.mjs');
+  const { WORKTREE_DENY_PREFIX } = await import('../hooks/lib/worktree-remove.mjs');
+  const texts = { ENV_MSG, KILL_MSG, PUSH_DELETE_MSG, PY_MSG, WRITER_DENY_REASON, HEAVY: `${HEAVY_DENY_PREFIX}test, box 12) not run`, WORKTREE: `${WORKTREE_DENY_PREFIX}: on Windows`,
+    CONTEXT: denyText(150000, 140000), STREAK: streakPrefix(7) + denyText(150000, 140000), SLEEP: workerWaitDenyText('/p', 10),
+    GIT: 'DESTRUCTIVE GIT (backup rule, no exceptions): first create', JUNCTION: 'Git Bash `rm -rf` follows an NTFS junction INTO its target', SUBAGENT: 'Not shown: you are a subagent' };
+  for (const [k, t] of Object.entries(texts)) assert.ok(D.isDesignedDeny(t), `${k} is a designed deny`);
+  // a guard that exports a *_MSG constant has a deny the list must know: a new one that is missing fails here
+  const libDir = join(ROOT, 'hooks', 'lib');
+  for (const f of readdirSync(libDir).filter((x) => x.endsWith('.mjs'))) {
+    if (!/export const [A-Z_]*_MSG\b/.test(readFileSync(join(libDir, f), 'utf8'))) continue;
+    const mod = await import(pathToFileURL(join(libDir, f)).href);
+    for (const [name, val] of Object.entries(mod)) if (/_MSG$/.test(name) && typeof val === 'string') assert.ok(D.isDesignedDeny(val), `${f} ${name} is missing from designed-denies.mjs`);
+  }
+  for (const crash of ['TypeError: Cannot read properties of undefined', 'Error: Cannot find module', 'SyntaxError: Unexpected token', '[agent-companion] hook crashed']) assert.ok(!D.isDesignedDeny(crash), crash);
 });

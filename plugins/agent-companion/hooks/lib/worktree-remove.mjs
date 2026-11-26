@@ -23,6 +23,7 @@ import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { scanCommand, wordsOf, psScanText } from './resource-gate.mjs';
 import { findLinks } from '../../scripts/worktree-remove-safe.mjs';
+export const WORKTREE_DENY_PREFIX = 'git worktree remove not run'; // the deny text starts with it; designed-denies.mjs lists it
 
 export const SAFE_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'worktree-remove-safe.mjs');
 const WALK_ENTRIES = 20000; // the hook's look for a link; past this the script (unbounded, link-aware) decides
@@ -197,7 +198,7 @@ const MANUAL = 'Manual fix: 1. list the junctions and symlinks inside the tree (
   + '3. Only then run `git worktree remove`.';
 
 function denyText(why, scriptCmd) {
-  return `git worktree remove not run: on Windows it follows junctions and directory symlinks inside the tree and empties their targets (it emptied a primary checkout's node_modules). ${why} `
+  return `${WORKTREE_DENY_PREFIX}: on Windows it follows junctions and directory symlinks inside the tree and empties their targets (it emptied a primary checkout's node_modules). ${why} `
     + `Use the safe script, which unlinks each link as a link and then runs git: ${scriptCmd}\n${MANUAL}`;
 }
 

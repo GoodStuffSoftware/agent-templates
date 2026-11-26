@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { stateDir, opt } from './context.mjs';
 import { createRequire } from 'node:module';
+import { normalizeSignature } from './designed-denies.mjs';
 
 // Every read-modify-write of release-hold-sessions.json and release-hold-message-pending.json runs under the shared lock helper
 // (lib/file-lock.mjs): a lead's noteHeld and a worker's denied-call noteHeld, or two clears, would otherwise lose one update.
@@ -90,7 +91,13 @@ export function flagIsOpen(f = readFlag()) { return !!(f && Array.isArray(f.flag
 export const NO_HOLD_FLAGS = new Set(['usage-source-empty', 'harness-refusals', 'insufficient-data']);
 const holdable = (flags) => (Array.isArray(flags) ? flags : []).filter((x) => x && !NO_HOLD_FLAGS.has(x.name));
 const levelOf = (f) => (typeof f.level === 'number' ? f.level : typeof f.value === 'number' ? f.value : null);
-const answeredFor = (cool, name, T) => { const c = cool[name]; return c && c.T === T ? c : null; };
+// 0.31.70 named a hook-signature flag with the raw error text; 0.31.71 collapses paths and numbers first. An answer stored under the old name still holds for the new one, so the upgrade does not raise it again.
+const legacySigName = (k) => { const m = /^(hook-signature:\S+ )([\s\S]*)$/.exec(k); return m ? m[1] + normalizeSignature(m[2]).slice(0, 48) : k; };
+const answeredFor = (cool, name, T) => {
+  let c = cool[name];
+  if (!c && name.startsWith('hook-signature:')) { const k = Object.keys(cool).find((x) => x.startsWith('hook-signature:') && legacySigName(x) === name); if (k) c = cool[k]; }
+  return c && c.T === T ? c : null;
+};
 // T is the install time of the release that produced the flags; `chain` (optional) is the key the cooldown uses, so an answer given for one release of a chain holds for the next.
 export function openFlag({ version, T, chain, check, flags, at = now() } = {}) {
   try {
@@ -258,8 +265,8 @@ export const CLEAR_WORDS_RE = /^(please\s+)?(clear|release)\s+(the\s+)?hold[.!]*
 // equivalent counts too. Every clause of the reply must be an ack phrase or filler, and a question never counts, so "Well analysis
 // please" or "why did it flag?" leaves the flag open and the countdown running.
 const ACK_CLAUSES = [
-  /^(please )?ack(nowledge[ds]?)?( (it|this|that|the flag|the flags|the watch|the notice))?$/,
-  /^keep (it|this|the release|this release|that|0\.\d+\.\d+)( as is)?$/,
+  /^ack(s|ed|'d|nowledge[ds]?)?( (it|this|that|the flag|the flags|the watch|the notice|v?\d+\.\d+\.\d+))?$/,
+  /^keep (it|this|the release|this release|that|v?\d+\.\d+\.\d+)( as is)?$/,
   /^(it'?s|its|that'?s|this is|all|everything'?s|everything is) (fine|ok|okay|good)$/,
   /^(looks|seems) (fine|ok|okay|good)( to me)?$/,
   /^no roll ?back( needed)?$/,
@@ -267,11 +274,13 @@ const ACK_CLAUSES = [
   /^noted$/,
 ];
 const ACK_FILLER = /^(ok|okay|yes|yep|yeah|sure|thanks|thank you|please|well)$/;
+const ACK_FILLER_EDGE = /^(?:(?:ok|okay|yes|yep|yeah|sure|thanks|thank you|please)\s+)+|(?:\s+(?:ok|okay|yes|yep|yeah|sure|thanks|thank you|please))+$/g; // filler at either edge of a clause
 export function isAckText(text) {
   try {
     const t = String(text ?? '').trim().toLowerCase().replace(/[‘’]/g, "'");
     if (!t || t.length > 120 || t.includes('?')) return false;
-    const clauses = t.split(/[,;.!]+|\s+(?:and|then)\s+|\s+-\s+/).map((c) => c.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '')).filter(Boolean); // brackets and the like around a clause are ignored
+    const protectedT = t.replace(/(\d)\.(?=\d)/g, '$1\u0001'); // a version number is not a sentence end
+    const clauses = protectedT.split(/[,;.!—–]+|\s+(?:and|then)\s+|\s+-{1,2}\s+/).map((c) => c.replace(/\u0001/g, '.').replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '').replace(ACK_FILLER_EDGE, '').trim()).filter(Boolean); // brackets and the like around a clause are ignored
     return clauses.length > 0 && clauses.every((c) => ACK_FILLER.test(c) || ACK_CLAUSES.some((re) => re.test(c))) && clauses.some((c) => !ACK_FILLER.test(c));
   } catch { return false; }
 }
@@ -428,8 +437,8 @@ export function clear({ by = 'operator', at = now() } = {}) {
     // unless a clear still owes messages from it (unclaimed, inside OWED_TTL_MS).
     const lf = readHeld();
     if (lf) {
-      const owedPending = !!(lf.clearedAt && lf.owed && !lf.owed.claimedBy && at - Date.parse(lf.clearedAt) <= OWED_TTL_MS);
-      if (out.holdCleared ? (h && lf.holdSince !== h.since) : !owedPending) { try { unlinkSync(paths().heldSessions); } catch { /* fail open */ } }
+      const keepList = !!(lf.clearedAt && at - Date.parse(lf.clearedAt) <= OWED_TTL_MS); // a cleared, recent list stays whether or not the owed messages were claimed: "hold cleared" notices still read it
+      if (out.holdCleared ? (h && lf.holdSince !== h.since) : !keepList) { try { unlinkSync(paths().heldSessions); } catch { /* fail open */ } }
     }
     if (out.holdCleared) markHoldCleared(at, by, out.heldSessions);
     if (out.flagCleared || out.holdCleared) appendRow({ at: iso(at), event: 'clear', by, flagCleared: out.flagCleared, holdCleared: out.holdCleared, ...(out.holdCleared ? { clearedAt: iso(at), heldSessions: out.heldSessions } : {}) });

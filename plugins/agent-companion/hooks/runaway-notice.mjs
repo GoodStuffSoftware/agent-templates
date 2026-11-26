@@ -84,11 +84,12 @@ try {
             noteCandidate({ sessionId: p.session_id, transcriptPath: p.transcript_path, prompt, payloadOrigin: p.origin, at });
           }
           watch = releaseWatchLine({ at, sessionId: p.session_id });
+          const flagShown = !!watch;                      // only the flag line itself starts the countdown, not a cleared or owed notice
           if (watch && wantsClear) watch += ' The "clear hold" words could not be confirmed as typed by the operator yet: ask the operator to repeat "clear hold", or run the clear command after the operator says so.';
           if (watch && isHoldActive()) noteHeld(p, at);
           if (!watch) watch = clearedNotice(p.session_id, at);
           if (!isHoldActive()) { const extra = owedInstruction(); if (extra) watch = [watch, extra].filter(Boolean).join(' '); }
-          if (watch) noteShown(p.session_id, at);         // after the candidate: this turn's prompt was typed before the line was shown
+          if (flagShown) noteShown(p.session_id, at);         // after the candidate: this turn's prompt was typed before the line was shown
         }
       }
     } catch { watch = null; }
