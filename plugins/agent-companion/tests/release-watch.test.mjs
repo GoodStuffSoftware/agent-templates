@@ -117,7 +117,7 @@ test('evaluate: spawn rewrites, queue, context, status, bash, api, runaway, blee
   assert.ok(names(metrics({ telemetry: { 'gate:denied': t(25, 40, 25, 6) } })).includes('queue-denied'));
   assert.ok(names(metrics({ queueClears: { since: 31, base: 5, perHour: { since: 3.6, base: 0.06 } } })).includes('queue-clears'));
   assert.ok(names(metrics({ telemetry: { 'handoff:hard/deny': t(3, 0, 3, 0) } })).includes('handoff-hard-deny'));
-  const m = metrics(); m.workers.since = { ...m.workers.since, over150kPct: 8, noStatusPct: 20, partialPct: 40, blockedPct: 15, hookErrorWorkersPct: 60, apiErrorWorkers: 3, apiNonUsageWorkers: 1, unitsPerWorker: { mean: 2, p50: 1, p90: 4 } };
+  const m = metrics(); m.workers.since = { ...m.workers.since, over150kPct: 8, noStatusPct: 20, partialPct: 40, blockedPct: 15, hookErrorWorkersPct: 60, apiErrorWorkers: 3, apiNonUsageWorkers: 2, unitsPerWorker: { mean: 2, p50: 1, p90: 4 } };
   const n = names(m);
   for (const x of ['context-over-150k', 'no-final-status', 'partial-share', 'blocked-share', 'hook-error-share', 'api-errors', 'units-per-worker', 'units-p90']) assert.ok(n.includes(x), x);
   assert.ok(names(metrics({ bash: { since: { n: 300, realFails: 27, realFailPct: 9, refusals: 0, refusalPer100: 0 }, base: { n: 500, realFails: 5, realFailPct: 1, refusals: 0, refusalPer100: 0 } } })).includes('worker-bash-fail'));
@@ -1486,4 +1486,68 @@ test('clear: a list from an earlier hold is dropped when a new hold is lifted', 
   const r = S.clear({ by: 'operator', at: T + MIN });
   assert.equal(r.holdCleared, true);
   assert.equal(existsSync(listF), false);
+});
+
+// ---- 0.31.71 check fixes: usage limit, signature workers, lead-hours ----
+const putWorker = (id, recs, finished = true) => {
+  const sd = join(claude, 'projects', 'C--p71', 'sess', 'subagents'); mkdirSync(sd, { recursive: true });
+  writeFileSync(join(sd, `agent-${id}.jsonl`), recs.map((l) => JSON.stringify(l)).join('\n'));
+  writeFileSync(join(sd, `agent-${id}.meta.json`), JSON.stringify({ finished, agentType: 'ac-sonnet-low' }));
+};
+const wts = (min) => new Date(T + HOUR + min * 60e3).toISOString();
+const prompt71 = (min) => ({ type: 'user', timestamp: wts(min), message: { role: 'user', content: 'Do the invented task.' } });
+const apiErr = (min, err) => ({ type: 'assistant', timestamp: wts(min), isApiErrorMessage: true, apiError: err, message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'error' }] } });
+const say = (min, text) => ({ type: 'assistant', timestamp: wts(min), requestId: `r${min}${text.length}`, message: { role: 'assistant', model: 'claude-sonnet-4', usage: { input_tokens: 10, output_tokens: 5 }, content: [{ type: 'text', text }] } });
+
+test('0.31.71 api-errors: usage-limit errors never count, an info line names the time; real api errors still flag', () => {
+  for (let i = 0; i < 4; i++) putWorker(`ul${i}`, [prompt71(i), apiErr(10 + i, 'usage_limit_reached')]);
+  let m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(m.workers.since.apiNonUsageWorkers, 0); assert.equal(m.workers.since.usageLimitWorkers, 4);
+  assert.ok(!W.evaluate(m, { minWorkers: 1 }).flags.some((f) => f.name === 'api-errors'), 'four usage-limit workers raise no flag');
+  const ev = W.evaluate(m, { minWorkers: 1 }).metrics.find((x) => x.name === 'api-errors');
+  assert.equal(ev.status, 'ok'); assert.match(ev.detail, /usage limit hit at 2026-03-01T11:10Z/);
+  for (let i = 0; i < 2; i++) putWorker(`real${i}`, [prompt71(i), apiErr(20 + i, 'overloaded_error')]);
+  m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(m.workers.since.apiNonUsageWorkers, 2);
+  assert.ok(W.evaluate(m, { minWorkers: 1 }).flags.some((f) => f.name === 'api-errors'));
+});
+
+test('0.31.71 no-final-status: workers that ended on the usage limit are out of numerator and denominator, counted apart', () => {
+  putWorker('ulA', [prompt71(0), say(1, 'working'), apiErr(5, 'usage_limit_reached')]);
+  putWorker('ulB', [prompt71(0), apiErr(6, 'usage_limit_reached')]);
+  putWorker('resumed', [prompt71(0), apiErr(5, 'usage_limit_reached'), say(30, 'done.\nSTATUS: done')]);
+  putWorker('none1', [prompt71(0), say(2, 'no status line here')]);
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR }); const ws = m.workers.since;
+  assert.equal(ws.usageLimitEnded, 2); assert.equal(ws.finished, 4); assert.equal(ws.noStatusFinished, 2);
+  assert.equal(ws.noStatusPct, 50, '1 none of 2 counted workers');
+  const ns = W.evaluate(m, { minWorkers: 1 }).metrics.find((x) => x.name === 'no-final-status');
+  assert.equal(ns.n, 2); assert.match(ns.detail, /2 usage-limit endings left out/);
+});
+
+test('0.31.71 hook-signature: distinct workers are counted, events shown next to them', () => {
+  const sig = (id, i) => ({ type: 'user', timestamp: wts(i), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `${id}-${i}`, is_error: true, content: 'PreToolUse:Write hook error: Check in with the lead before building more' }] } });
+  putWorker('loop', [prompt71(0), ...[1, 2, 3, 4, 5].map((i) => sig('loop', i))]);
+  let m = W.analyze({ T, nowMs: T + 3 * HOUR }); const k = Object.keys(m.hookSignatures.since)[0];
+  assert.equal(m.hookSignatures.since[k], 1, 'one worker'); assert.equal(m.hookSignatureEvents.since[k], 5, 'five events');
+  const flags = (mm) => W.evaluate(mm, { minWorkers: 1 }).flags.filter((f) => f.name.startsWith('hook-signature'));
+  assert.equal(flags(m).length, 0, 'one looping worker is not a new-signature flag');
+  for (let i = 0; i < 4; i++) putWorker(`w${i}`, [prompt71(0), sig(`w${i}`, 1)]);
+  m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(m.hookSignatures.since[k], 5);
+  const f = flags(m); assert.equal(f.length, 1); assert.match(f[0].detail, /5 workers, 9 events/);
+});
+
+test('0.31.71 guard:delegation/deny: rate per active lead-hour, more leads at once do not raise it', () => {
+  const base = Array.from({ length: 24 }, (_, i) => ({ at: T - 7 * DAY + i * HOUR + 60e3, session_id: 'L0' }));
+  const baseDen = base.map((r) => ({ at: r.at + 1000, guard: 'delegation', outcome: 'deny', session_id: 'L0' }));
+  const since = []; const den = [];
+  for (const L of ['A', 'B', 'C']) for (let h = 0; h < 4; h++) { since.push({ at: T + h * HOUR + 60e3, session_id: L }); den.push({ at: T + h * HOUR + 2000, guard: 'delegation', outcome: 'deny', session_id: L }); }
+  putRows('spawns.jsonl', [...base, ...since]); putRows('denials.jsonl', [...baseDen, ...den]);
+  let m = W.analyze({ T, nowMs: T + 4 * HOUR });
+  assert.deepEqual(m.leadHours, { since: 12, base: 24 });
+  const dg = (mm) => W.evaluate(mm).metrics.find((x) => x.name === 'guard:delegation/deny');
+  assert.equal(dg(m).value, 1); assert.equal(dg(m).base, 1); assert.equal(dg(m).status, 'ok', 'three leads at once: the old per-clock-hour rate (3/h vs 0.14/h) would have flagged');
+  putRows('denials.jsonl', [...baseDen, ...den, ...den.map((r) => ({ ...r, at: r.at + 500 })), ...den.map((r) => ({ ...r, at: r.at + 900 })), ...den.map((r) => ({ ...r, at: r.at + 1500 }))]);
+  m = W.analyze({ T, nowMs: T + 4 * HOUR });
+  assert.equal(dg(m).status, 'flag', 'four times the rate per lead-hour still flags');
 });

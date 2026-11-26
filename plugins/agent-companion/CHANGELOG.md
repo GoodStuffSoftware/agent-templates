@@ -2,6 +2,13 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.71 (unreleased)
+
+- **Release-watch check counts fixed (scripts/release-watch.mjs).** Usage-limit errors no longer count toward `api-errors` (an info line "usage limit hit at <time>" shows instead); workers that ended on the usage limit are left out of both sides of `no-final-status` and reported as a separate count; `hook-signature` counts distinct workers (event count shown beside it) instead of events; `guard:delegation/deny` is measured per active lead-hour (leads with a spawn in the window), so more leads at once do not raise it.
+- **Release-watch ack needs ack intent.** A reply answers an open flag only when it says so ("ack", "acknowledged", "keep it", "it's fine", "no rollback" and plain equivalents; the notice now names the wording) and is still human-origin. A question or a request for analysis ("Well analysis please") leaves the flag open and the countdown running.
+- **The release owner sees the watch notice first.** `hooks/hold-message.mjs` notes the lead that ran `claude plugin install|update agent-companion` (`state/release-owner.json`). While that session's transcript is live (within 2 h), other leads see the notice only 20 minutes after the flag opens. No known owner: unchanged.
+- **`clear` removes the hold-session list.** `state/release-hold-sessions.json` is deleted on clear (a list from an earlier hold at once; the one a lift just wrote stays until its owed messages are claimed, then the next clear removes it).
+
 ## 0.31.70 — 2026-11-25
 
 - **Artifact watch alert fix text corrected.** The directive no longer says sharing the artifact as editor fixes a failed watch (tested: it does not for an artifact owned by another organization). It now says to switch back to the owning account; re-sharing may help only within this account's own organization (unverified).

@@ -145,7 +145,7 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
   const seen = new Set(); const WR = [];
   for (const fp of pick) {
     let L; try { L = readFileSync(fp, 'utf8').split('\n'); } catch { continue; }
-    let first = null; let u = 0; let peak = 0; let hook = 0; let terr = 0; let api = null; let txt = ''; let stLine = null; let probe = false; let seenUser = false;
+    let first = null; let u = 0; let peak = 0; let hook = 0; let terr = 0; let api = null; let apiOther = false; let usageAt = null; let endUsage = false; let txt = ''; let stLine = null; let probe = false; let seenUser = false;
     const bashIds = new Set(); const resIds = new Set(); let bash = 0; let refusal = 0; let bashFail = 0; const sigs = [];
     for (const l of L) {
       if (!l) continue; let o; try { o = JSON.parse(l); } catch { continue; }
@@ -159,7 +159,9 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
           peak = Math.max(peak, (us.input_tokens || 0) + (us.cache_read_input_tokens || 0) + (us.cache_creation_input_tokens || 0));
         }
       }
-      if (o.isApiErrorMessage) api = o.apiError || 'api';
+      // A usage-limit error is not a defect: it is kept apart (usageAt, endUsage) and never counts as an api error; a later reply from the worker clears endUsage (resumed).
+      if (o.isApiErrorMessage) { api = o.apiError || 'api'; if (/usage_limit/.test(String(api))) { endUsage = true; if (usageAt == null) usageAt = Date.parse(o.timestamp) || null; } else apiOther = true; }
+      else if (o.type === 'assistant' && o.message?.model !== '<synthetic>' && o.message?.usage) endUsage = false;
       if (Array.isArray(c)) for (const b of c) {
         // Transcripts repeat a tool_result inside api-request-blob records: one tool_use_id counts once, for every signature below.
         if (b && b.type === 'tool_result' && b.tool_use_id) { if (resIds.has(b.tool_use_id)) continue; resIds.add(b.tool_use_id); }
@@ -187,7 +189,7 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
     const status0 = st ? st[1].toLowerCase() : stLine;
     let fin = false; let atype = ''; try { const mt = JSON.parse(readFileSync(fp.replace(/\.jsonl$/, '.meta.json'), 'utf8')); fin = mt.finished === true; atype = String(mt.agentType || ''); } catch { /* none */ }
     const ex = probe ? 'probe' : NON_CONTRACT_TYPES.has(atype) ? atype : null;
-    WR.push({ w, first, sigs, u, peak, hook, terr, api, bash, refusal, bashFail, ex, status: status0 || (fin ? 'none' : 'running') });
+    WR.push({ w, first, sigs, u, peak, hook, terr, api, apiOther, usageAt, endUsage, bash, refusal, bashFail, ex, status: status0 || (fin ? 'none' : 'running') });
   }
   // The whole result for the since side restricted to release `vf` (null = the whole chain); the baseline side is always the shared one.
   const build = (vf) => {
@@ -234,6 +236,10 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
       const hrs = { since: new Set(), base: new Set() }; const days = { since: new Set(), base: new Set() };
       for (const r of rd('spawns')) { const w = win(r, vf); if (w) { hrs[w].add(Math.floor(ts(r) / HOUR)); days[w].add(new Date(ts(r)).toISOString().slice(0, 10)); } }
       out.activeHours = { since: hrs.since.size, base: hrs.base.size };
+      // Lead-hours: for each lead (session with a spawn row in the window) the distinct clock hours it spawned in; more leads at once raise the base, not the rate.
+      const lh = { since: new Set(), base: new Set() };
+      for (const r of rd('spawns')) { const w = win(r, vf); if (w) lh[w].add(`${r.session_id || 'row'}@${Math.floor(ts(r) / HOUR)}`); }
+      out.leadHours = { since: lh.since.size, base: lh.base.size };
       out.activeDays = { since: days.since.size, base: days.base.size };
     }
     {
@@ -241,10 +247,10 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
       for (const f of clearsFiles) for (const r of jsonl(f)) { if (!isFailureClear(r)) continue; const w = win(r, vf); if (w) c[w]++; }
       out.queueClears = { since: c.since, base: c.base, perHour: { since: +(c.since / span.since).toFixed(2), base: +(c.base / span.base).toFixed(2) } };
     }
-    const W = { since: [], base: [] }; const sig = { since: {}, base: {} };
+    const W = { since: [], base: [] }; const sig = { since: {}, base: {} }; const sigEv = { since: {}, base: {} };
     for (const x of WR) {
       if (x.w === 'since' && vf != null && verAt(x.first) !== vf) continue;
-      W[x.w].push(x); for (const k of x.sigs) sig[x.w][k] = (sig[x.w][k] || 0) + 1;
+      W[x.w].push(x); for (const k of x.sigs) sigEv[x.w][k] = (sigEv[x.w][k] || 0) + 1; for (const k of new Set(x.sigs)) sig[x.w][k] = (sig[x.w][k] || 0) + 1;
     }
     out.workers = {}; out.bash = {};
     for (const w of ['since', 'base']) {
@@ -254,6 +260,8 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
     }
     for (const w of ['since', 'base']) {
       const a = W[w]; const fin = a.filter((x) => x.status !== 'running' && !x.ex);
+      // Workers that ended on the usage limit are out of the no-final-status numerator and denominator, and counted apart.
+      const finNs = fin.filter((x) => !x.endUsage); const usageEnded = fin.length - finNs.length;
       // Workers left out of the status and Bash metrics (types off the reporting contract, hook-verification probes), named, never dropped silently.
       const excluded = { probes: 0, byType: {} };
       for (const x of a) if (x.ex === 'probe') excluded.probes++; else if (x.ex) excluded.byType[x.ex] = (excluded.byType[x.ex] || 0) + 1;
@@ -262,17 +270,21 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
         unitsPerWorker: { mean: +(sum(a, (x) => x.u) / Math.max(1, a.length)).toFixed(2), p50: quant(a.map((x) => x.u), 0.5), p90: quant(a.map((x) => x.u), 0.9) },
         peakCtxP90: quant(a.map((x) => x.peak), 0.9),
         over110kPct: per(a.filter((x) => x.peak > 110000).length, a.length), over150kPct: per(a.filter((x) => x.peak > 150000).length, a.length),
-        noStatusPct: per(fin.filter((x) => x.status === 'none').length, fin.length),
+        noStatusFinished: finNs.length, usageLimitEnded: usageEnded,
+        noStatusPct: per(finNs.filter((x) => x.status === 'none').length, finNs.length),
         partialPct: per(fin.filter((x) => x.status === 'partial').length, fin.length),
         blockedPct: per(fin.filter((x) => x.status === 'blocked').length, fin.length),
         hookErrorWorkersPct: per(a.filter((x) => x.hook > 0).length, a.length),
         apiErrorWorkers: a.filter((x) => x.api).length,
-        apiNonUsageWorkers: a.filter((x) => x.api && !/usage_limit/.test(String(x.api))).length,
+        apiNonUsageWorkers: a.filter((x) => x.apiOther).length,
+        usageLimitWorkers: a.filter((x) => x.usageAt != null).length, usageLimitFirstAt: a.reduce((m, x) => (x.usageAt != null && (m == null || x.usageAt < m) ? x.usageAt : m), null),
       };
     }
     out.estUnitsPerHour = { since: +(out.spawns.perHour.since * out.workers.since.unitsPerWorker.mean).toFixed(2), base: +(out.spawns.perHour.base * out.workers.base.unitsPerWorker.mean).toFixed(2) };
     out.usage = usageOf(out);
+    // hookSignatures counts distinct workers (the unit the thresholds are labelled in); hookSignatureEvents counts occurrences.
     out.hookSignatures = { since: sig.since, base: sig.base };
+    out.hookSignatureEvents = { since: sigEv.since, base: sigEv.base };
     return out;
   };
   const out = build(null);
@@ -349,9 +361,11 @@ export function evaluate(m, opts = {}) {
     const guard = k.slice(7).split('/')[0];
     if (REWRITE_GUARDS.has(guard)) continue;
     if (guard === 'delegation') {
-      const hs = v.since / spanH; const hb = v.base / m.span.base;
-      add(`guard:${k.slice(7)}`, { value: +hs.toFixed(1), limit: +(TH.guardFactor * hb).toFixed(1), base: +hb.toFixed(1), n: active, minN: TH.minActiveHours, events: v.since, minEv: TH.guardMinN,
-        over: hb > 0 && hs > TH.guardFactor * hb, unit: '/h', detail: `per hour ${hs.toFixed(1)} vs ${hb.toFixed(1)}` });
+      // Per active lead-hour (leads with a spawn in the window); an analysis without lead-hours falls back to clock hours.
+      const lh = m.leadHours && m.leadHours.since > 0 && m.leadHours.base > 0 ? m.leadHours : null;
+      const hs = v.since / (lh ? lh.since : spanH); const hb = v.base / (lh ? lh.base : m.span.base);
+      add(`guard:${k.slice(7)}`, { value: +hs.toFixed(2), limit: +(TH.guardFactor * hb).toFixed(2), base: +hb.toFixed(2), n: active, minN: TH.minActiveHours, events: v.since, minEv: TH.guardMinN,
+        over: hb > 0 && hs > TH.guardFactor * hb, unit: lh ? '/lead-h' : '/h', detail: lh ? `per active lead-hour ${hs.toFixed(2)} vs ${hb.toFixed(2)} (${lh.since} lead-hours, ${lh.base} before)` : `per hour ${hs.toFixed(1)} vs ${hb.toFixed(1)}` });
       continue;
     }
     const ps = v.per100spawns.since; const pb = v.per100spawns.base;
@@ -405,18 +419,21 @@ export function evaluate(m, opts = {}) {
       over: ws.hookErrorWorkersPct != null && wb.hookErrorWorkersPct != null && ws.hookErrorWorkersPct - wb.hookErrorWorkersPct >= TH.hookErrorPp, unit: '%', detail: `vs ${wb.hookErrorWorkersPct}% before` });
   }
   for (const [sg, n] of Object.entries(m.hookSignatures.since)) {
-    add(`hook-signature:${sg}`, { value: n, limit: TH.newSigWorkers, base: m.hookSignatures.base[sg] || 0, n: wn, minN: FL.workers, events: n, minEv: TH.newSigWorkers, over: !m.hookSignatures.base[sg], unit: 'workers', detail: 'new hook-error signature', level: +(n / spanH).toFixed(3) });
+    add(`hook-signature:${sg}`, { value: n, limit: TH.newSigWorkers, base: m.hookSignatures.base[sg] || 0, n: wn, minN: FL.workers, events: n, minEv: TH.newSigWorkers, over: !m.hookSignatures.base[sg], unit: 'workers', detail: `new hook-error signature, ${n} workers, ${(m.hookSignatureEvents && m.hookSignatureEvents.since[sg]) ?? n} events`, level: +(n / spanH).toFixed(3) });
   }
   {
     const lim150 = Math.max(TH.over150Pct, wb.n >= FL.workers ? 1.5 * (wb.over150kPct || 0) : 0);
     add('context-over-150k', { value: ws.over150kPct, limit: +lim150.toFixed(1), base: wb.over150kPct, n: wn, minN: FL.workers, events: cnt(ws.over150kPct, wn), minEv: TH.over150MinEv, over: ws.over150kPct > lim150, unit: '%', detail: `p90 ${ws.peakCtxP90}, baseline ${wb.over150kPct}%` });
   }
-  add('no-final-status', { value: ws.noStatusPct, limit: TH.noStatusPct, base: wb.noStatusPct, n: ws.finished, minN: TH.noStatusMinFinished, events: cnt(ws.noStatusPct, ws.finished), minEv: TH.noStatusMinEv,
-    over: ws.noStatusPct > TH.noStatusPct || (wb.noStatusPct != null && ws.noStatusPct - wb.noStatusPct > TH.noStatusPp), unit: '%', detail: `vs ${wb.noStatusPct}% before` });
+  const nsFin = ws.noStatusFinished ?? ws.finished;
+  add('no-final-status', { value: ws.noStatusPct, limit: TH.noStatusPct, base: wb.noStatusPct, n: nsFin, minN: TH.noStatusMinFinished, events: cnt(ws.noStatusPct, nsFin), minEv: TH.noStatusMinEv,
+    over: ws.noStatusPct > TH.noStatusPct || (wb.noStatusPct != null && ws.noStatusPct - wb.noStatusPct > TH.noStatusPp), unit: '%', detail: `vs ${wb.noStatusPct}% before${ws.usageLimitEnded ? `, ${ws.usageLimitEnded} usage-limit endings left out` : ''}` });
   add('partial-share', { value: ws.partialPct, limit: TH.partialPct, base: wb.partialPct, n: ws.finished, minN: TH.partialMinFinished, events: cnt(ws.partialPct, ws.finished), minEv: TH.partialMinEv, over: ws.partialPct > TH.partialPct, unit: '%' });
   add('blocked-share', { value: ws.blockedPct, limit: TH.blockedPct, base: wb.blockedPct, n: ws.finished, minN: TH.partialMinFinished, events: cnt(ws.blockedPct, ws.finished), minEv: TH.blockedMinEv, over: ws.blockedPct > TH.blockedPct, unit: '%' });
-  add('api-errors', { value: ws.apiErrorWorkers, limit: TH.apiWorkers, base: wb.apiErrorWorkers ?? null, n: wn, minN: FL.workers, events: ws.apiErrorWorkers, minEv: 1,
-    over: ws.apiNonUsageWorkers >= TH.apiNonUsage || ws.apiErrorWorkers >= TH.apiWorkers, unit: 'workers', detail: `${ws.apiNonUsageWorkers} non-usage-limit`, level: +(ws.apiErrorWorkers / spanH).toFixed(3) });
+  // Usage-limit errors never count; they show only as an info line.
+  const apiN = ws.apiNonUsageWorkers ?? 0; const ul = ws.usageLimitWorkers || 0;
+  add('api-errors', { value: apiN, limit: TH.apiNonUsage, base: wb.apiNonUsageWorkers ?? null, n: wn, minN: FL.workers, events: apiN, minEv: 1,
+    over: apiN >= TH.apiNonUsage, unit: 'workers', detail: `${apiN} non-usage-limit${ul ? `; usage limit hit at ${new Date(ws.usageLimitFirstAt).toISOString().slice(0, 16)}Z (${ul} workers)` : ''}`, level: +(apiN / spanH).toFixed(3) });
   {
     const lim = wb.n >= FL.workers ? TH.unitsFactor * wb.unitsPerWorker.mean : TH.unitsAbs;
     add('units-per-worker', { value: ws.unitsPerWorker.mean, limit: +lim.toFixed(2), base: wb.unitsPerWorker.mean, n: wn, minN: FL.workers, events: wn, minEv: TH.unitsMinEv, over: ws.unitsPerWorker.mean > lim, unit: 'units', detail: `mean, baseline ${wb.unitsPerWorker.mean}` });
@@ -595,7 +612,7 @@ export function standing({ at = S.now(), run = analyze } = {}) {
       { name: 'worker-bash-fail', value: bs.realFailPct, ok: bs.realFails >= 50, events: bs.realFails || 0, prior: bb.realFailPct, priorEvents: bb.realFails || 0, unit: '%' },
       { name: 'harness-refusals', value: bs.refusalPer100, ok: bs.refusals >= 50, events: bs.refusals || 0, prior: bb.refusalPer100, priorEvents: bb.refusals || 0, unit: '/100 bash' },
       { name: 'hook-error-share', value: ws.hookErrorWorkersPct, ok: ws.n >= 30, events: cnt(ws.hookErrorWorkersPct, ws.n), prior: wb.hookErrorWorkersPct, priorEvents: cnt(wb.hookErrorWorkersPct, wb.n), unit: '%' },
-      { name: 'no-final-status', value: ws.noStatusPct, ok: ws.finished >= 30, events: cnt(ws.noStatusPct, ws.finished), prior: wb.noStatusPct, priorEvents: cnt(wb.noStatusPct, wb.finished), unit: '%' },
+      { name: 'no-final-status', value: ws.noStatusPct, ok: (ws.noStatusFinished ?? ws.finished) >= 30, events: cnt(ws.noStatusPct, ws.noStatusFinished ?? ws.finished), prior: wb.noStatusPct, priorEvents: cnt(wb.noStatusPct, wb.noStatusFinished ?? wb.finished), unit: '%' },
       { name: 'partial-share', value: ws.partialPct, ok: ws.finished >= 30, events: cnt(ws.partialPct, ws.finished), prior: wb.partialPct, priorEvents: cnt(wb.partialPct, wb.finished), unit: '%' },
       { name: 'units-per-worker', value: ws.unitsPerWorker && ws.unitsPerWorker.mean, ok: ws.n >= 30, events: ws.n || 0, prior: wb.unitsPerWorker && wb.unitsPerWorker.mean, priorEvents: wb.n || 0, unit: 'units' },
       { name: 'worker-usage', value: usage && +(usage.since.pctPerHour * 24).toFixed(1), ok: ws.n >= 30, events: ws.n || 0, prior: usage && +(usage.base.pctPerHour * 24).toFixed(1), priorEvents: wb.n || 0, unit: '%/day' },
