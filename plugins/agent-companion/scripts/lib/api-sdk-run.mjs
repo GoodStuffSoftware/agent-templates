@@ -302,7 +302,7 @@ export async function runApiSdk({
   };
   const stopTimers = () => { clearTimeout(hungTimer); clearTimeout(slowTimer); };
   try {
-    key = resolveKey(T.keySource, env);
+    key = resolveKey(T.keySource, env, cfg.bwsTokenSource);
     if (!validKeyShape(key)) throw configError('the configured secret is not a Console API key (it must start sk-ant-, and sk-ant-admin and sk-ant-oat are refused)');
     const ws = tn ? String(T.workspace || '').trim() : String(env[WORKSPACE_ENV] || '').trim();
     if (ws && !/^[A-Za-z0-9_.-]+$/.test(ws)) throw configError(`${WORKSPACE_ENV} is malformed (letters, digits, _ . - only)`);
@@ -451,6 +451,6 @@ export async function runApiSdk({
     if (abortReason === 'hung') return fail(false, hungReason());
     if (abortReason === 'spend-cap') return fail(false, capReason());
     if (e && e.configFailure) noteFailure(reason);
-    return fail(!!(e && e.configFailure), reason);
+    return { ...fail(!!(e && e.configFailure), reason), ...(e && e.keyFailure ? { keyFailed: true } : {}) };
   }
 }

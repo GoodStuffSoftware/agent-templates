@@ -416,7 +416,7 @@ export async function runWorker({
     const T = targetOf(cfg, tgt);
     // 2. Key.
     key = '';
-    try { key = resolveKey(T.keySource, env); } catch (e) { return out('refused_key', { reason: `no API key: ${String((e && e.message) || e)}` }); }
+    try { key = resolveKey(T.keySource, env, cfg.bwsTokenSource); } catch (e) { return out('refused_key', { keyFailed: true, reason: `no API key: ${String((e && e.message) || e)}` }); }
     if (!validKeyShape(key)) return out('refused_key', { reason: 'the configured secret is not a Console API key (it must start sk-ant-; admin and OAuth tokens are refused)' });
     // 3. Workspace: without the header a personal key bills to no workspace. A named target brings its own (optional) workspace.
     const named = !!tgt && tgt !== PRIMARY;
@@ -523,15 +523,16 @@ ${prompt}` : prompt, options });
     for (let hops = 0; hops <= 2 * chain.length + 2; hops++) {
       r = await attempt(tgt);
       if (r.redirect !== undefined) { tgt = r.redirect; r = null; continue; }
-      if (!r.capped) break;
+      if (!r.capped && !r.keyFailed) break;
       const at = chain.findIndex((t) => t.name === (tgt || PRIMARY));
       const next = chain[at + 1];
-      noted.push(`target ${tgt || PRIMARY} is capped`);
+      noted.push(r.keyFailed ? `target ${tgt || PRIMARY} has no usable key, skipped` : `target ${tgt || PRIMARY} is capped`);
       if (!next) break;
       tgt = next.name === PRIMARY ? null : next.name;
     }
     if (!r) return out('refused_budget', { reason: 'no target answered api' });
-    return { ...r, ...(tgt ? { target: tgt } : {}), ...(noted.length ? { notes: noted } : {}) };
+    const { keyFailed: _kf, ...res } = r; // keyFailed is the loop's own signal, not part of the result
+    return { ...res, ...(tgt ? { target: tgt } : {}), ...(noted.length ? { notes: noted } : {}) };
   } catch (e) {
     return out('failed', { reason: String((e && e.message) || e) });
   }
