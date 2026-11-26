@@ -46,6 +46,12 @@ export function apiMarker(brief) {
   return m ? m[1].toLowerCase() : null;
 }
 
+// 0.31.72: `API: target=<name>` names the API target this review should run on (api_targets); its failover is only the targets after it in the review list.
+export function apiTarget(brief) {
+  const m = /^[ \t>*_`-]*API[ \t]*:[ \t]*\**[ \t]*target[ \t]*=[ \t]*`?([a-z0-9][a-z0-9_-]*)/im.exec(String(brief || ''));
+  return m ? m[1].toLowerCase() : null;
+}
+
 // The range the brief means: tokens on a line that names the review's range (`Diff:`, `diff range`, `range`) win over the same shape
 // anywhere else (a tag range in prose, `tests...pass`); two different candidates at the winning level are ambiguous (no route).
 export function diffRangeInfo(brief) {
@@ -105,9 +111,9 @@ function writerOf(decls) {
 }
 
 // The ac-haiku prompt that runs the API review and hands its stdout back unchanged.
-export function runnerPrompt({ briefFile, reviewFile, range, writer, risk, cwd, sid, tu, reviewModel = 'sonnet', reviewEffort = 'high' }) {
+export function runnerPrompt({ briefFile, reviewFile, range, writer, risk, cwd, sid, tu, reviewModel = 'sonnet', reviewEffort = 'high', target = null }) {
   // --session-id and --tool-use-id are the ORIGINAL spawn's: the runner writes them on its verdict row so the reviewer-quality readers join it.
-  const cmd = `node ${q(`${PLUGIN_ROOT}/scripts/api-review.mjs`)} run --brief-file ${q(briefFile)} --diff-ref ${q(range)} --model ${reviewModel} --effort ${reviewEffort}${writer ? ` --writer ${writer}` : ''}${risk ? ` --risk ${risk}` : ''}${sid && tu ? ` --session-id ${q(sid)} --tool-use-id ${q(tu)}` : ''} --review-file ${q(reviewFile)} --cwd ${q(cwd)}`;
+  const cmd = `node ${q(`${PLUGIN_ROOT}/scripts/api-review.mjs`)} run --brief-file ${q(briefFile)} --diff-ref ${q(range)} --model ${reviewModel} --effort ${reviewEffort}${target ? ` --target ${target}` : ''}${writer ? ` --writer ${writer}` : ''}${risk ? ` --risk ${risk}` : ''}${sid && tu ? ` --session-id ${q(sid)} --tool-use-id ${q(tu)}` : ''} --review-file ${q(reviewFile)} --cwd ${q(cwd)}`;
   return [
     'TYPE: operate',
     'ROLE: other',
@@ -149,12 +155,16 @@ export async function routeReview({
     if ((risk === 'high' && highMode !== 'api') || (/opus/i.test(String(model || '')) && marker !== 'opus')) return row('subagent', 'high-risk');
     const tdir = deps.telemetryDir ? deps.telemetryDir() : telemetryDir();
     if (failedRecently(briefHash(brief), join(tdir, 'review-verdicts.jsonl'), Date.now())) return row('subagent', 'repeat');
-    let d;
-    if (deps.decide) d = deps.decide('review', { billing: null, env: process.env });
-    else {
-      const mod = await import(pathToFileURL(join(PLUGIN_ROOT, 'scripts', 'lib', 'api-credits.mjs')).href);
-      d = mod.decide('review', { billing: null, env: process.env });
+    const tgt = apiTarget(brief);
+    const mod = await import(pathToFileURL(join(PLUGIN_ROOT, 'scripts', 'lib', 'api-credits.mjs')).href);
+    const cfg = mod.loadConfig(deps.opt);
+    // An `API: target=<name>` naming no configured target (the list decide walks) is never a silent default: the review runs on the
+    // plan as for `API: no`, and the lead is told which name was unknown and which are known.
+    if (tgt && !(cfg.targets && cfg.targets[tgt])) {
+      const known = Object.keys(cfg.targets || {}).join(', ');
+      return { ...row('subagent', 'unknown-target'), notice: `agent-companion: this review's brief says \`API: target=${tgt}\`, but no API target of that name is configured (known: ${known}). It was NOT sent to the API: it runs as a plan subagent, as for \`API: no\`. Fix the target name in the brief (targets are set in api_targets) or drop the line.` };
     }
+    const d = (deps.decide || mod.decide)('review', { billing: null, env: process.env, cfg, ...(tgt ? { target: tgt } : {}) });
     if (!d || d.decision !== 'api') {
       const why = String((d && d.reason) || '');
       if (/^alternation/.test(why)) return row('subagent', 'plan-alternation');
@@ -172,7 +182,7 @@ export async function routeReview({
       ...(updatedInput || input),
       subagent_type: 'agent-companion:ac-haiku',
       model: 'haiku',
-      prompt: runnerPrompt({ briefFile, reviewFile, range, writer: writerOf(decls || {}), risk, cwd: worktreeOf(brief, p && p.cwd), sid: (p && p.session_id) || sid, tu: p && p.tool_use_id, reviewModel: marker === 'opus' ? 'opus' : 'sonnet' }),
+      prompt: runnerPrompt({ briefFile, reviewFile, range, writer: writerOf(decls || {}), risk, cwd: worktreeOf(brief, p && p.cwd), sid: (p && p.session_id) || sid, tu: p && p.tool_use_id, reviewModel: marker === 'opus' ? 'opus' : 'sonnet', target: d.target || tgt || null }),
     };
     delete out.effort;
     delete out.isolation; // a worktree for a command runner is wasted, and the runner must see the brief's own worktree path

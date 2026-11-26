@@ -35,7 +35,7 @@
 import { basename, resolve } from 'node:path';
 import { priceUsage } from './pricing.mjs';
 import { modelTiers } from '../../hooks/lib/context.mjs';
-import { loadConfig, resolveKey, record, recordFailure, recordSpend } from './api-credits.mjs';
+import { loadConfig, resolveKey, record, recordFailure, recordSpend, targetOf, PRIMARY } from './api-credits.mjs';
 import { makeTools } from './api-tools.mjs';
 
 export const EXIT_OK = 0;
@@ -46,6 +46,8 @@ export const OFFICIAL_ENDPOINT = 'https://api.anthropic.com/v1/messages';
 export const API_VERSION = '2023-06-01';
 export const WORKSPACE_ENV = 'AC_API_WORKSPACE_ID';
 export const WORKSPACE_HINT = `set ${WORKSPACE_ENV}: the key is not scoped to a workspace (HTTP 400, the request must include the anthropic-workspace-id header)`;
+// A named target carries its own workspace in api_targets ("workspace"); the primary uses the env variable.
+export const workspaceHint = (tn) => (tn ? `set "workspace" for target ${tn} in api_targets: the key is not scoped to a workspace (HTTP 400, the request must include the anthropic-workspace-id header)` : WORKSPACE_HINT);
 
 // A Console API key starts sk-ant- (today sk-ant-usr...; older keys sk-ant-api...). Admin keys
 // and OAuth tokens are not API keys for this purpose.
@@ -73,6 +75,17 @@ const SPEND_LIMIT_RE = /spend(?:ing)? limit|usage limit|workspace.{0,60}limit|sp
 export function isSpendLimit({ status, text }) {
   return Number(status) === 400 && SPEND_LIMIT_RE.test(String(text || ''));
 }
+
+// 0.31.72: the org tier cap answers 429 rate_limit_error with error.details.error_code enforced_spend_limit_reached. Unlike an
+// ordinary 429 it is a wall until the next month: never retried, the lane trips at once, and a job with a later target fails over.
+export function isEnforcedSpendCap({ status, raw }) {
+  if (Number(status) !== 429) return false;
+  try { const j = JSON.parse(String(raw || '')); return !!(j && j.error && j.error.details && j.error.details.error_code === 'enforced_spend_limit_reached'); } catch { return /enforced_spend_limit_reached/.test(String(raw || '')); }
+}
+const CREDIT_RE = /credit balance|insufficient (?:credit|fund|balance)|payment required/i;
+export const isCreditExhausted = ({ status, text }) => Number(status) === 402 || CREDIT_RE.test(String(text || ''));
+// A failure that means "this target cannot take more work this cycle": the failover triggers (spend-limit 400, the enforced 429, credit exhausted).
+export const isCapFailure = ({ status, text, raw }) => isSpendLimit({ status, text }) || isEnforcedSpendCap({ status, raw }) || isCreditExhausted({ status, text });
 
 export function isUnavailable({ status, text }) {
   if ([401, 402, 403].includes(Number(status))) return true;
@@ -217,8 +230,10 @@ export async function runApi({
   tools = true, maxUsd = DEFAULT_HARD_USD, softUsd = SOFT_USD, maxTurns = 30, maxTokens = DEFAULT_MAX_TOKENS, reviewId = null,
   hungMs = HUNG_MS, requestTimeoutMs = hungMs, slowMs = SLOW_REVIEW_MS, logRow = null, clock = Date.now, requireVerdict = false,
   cfg = loadConfig(), env = process.env, now = Date.now(), fetchImpl = globalThis.fetch, endpoint = OFFICIAL_ENDPOINT,
-  sleep = sleepMs, retries = 2,
+  sleep = sleepMs, retries = 2, target = null,
 }) {
+  const T = targetOf(cfg, target);
+  const tn = T.name === PRIMARY ? null : T.name; // the ledger lane; null = primary
   let key = '';
   let usd = 0;
   let booked = 0; // spend already in the ledger, turn by turn
@@ -234,23 +249,24 @@ export async function runApi({
   const bookCost = (ok, error = null) => {
     try {
       record(category, usd, `${meta} ${ok ? 'ok' : 'partial'}`.trim(), {
-        cfg, now, success: ok, alreadyBooked: booked, count: usd > 0 || ok, id: reviewId, apiKeySource: 'ANTHROPIC_API_KEY',
+        cfg, now, success: ok, alreadyBooked: booked, count: usd > 0 || ok, id: reviewId, apiKeySource: 'ANTHROPIC_API_KEY', target: tn,
         detail: { project: basename(resolve(cwd)), model: modelId, tokens: { ...tokens }, turns: turnCount, path: 'fetch', error: ok ? null : error, notes },
       });
     } catch (e) { ledgerFailed(`$${(usd - booked).toFixed(4)} not recorded`, e); }
   };
   const noteFailure = (reason, hard = false) => {
-    try { recordFailure(reason, { cfg, now, hard }); } catch (e) { ledgerFailed('the failure count was not recorded', e); }
+    try { recordFailure(reason, { cfg, now, hard, target: tn }); } catch (e) { ledgerFailed('the failure count was not recorded', e); }
   };
-  const fail = (unavailable, reason) => {
+  const fail = (unavailable, reason, capped = false) => {
     const r = scrub(reason, key).slice(0, 200);
     bookCost(false, r);
-    return { ok: false, unavailable, reason: r, usd, path: 'fetch', notes, ...(ledgerError ? { ledgerError } : {}) };
+    return { ok: false, unavailable, reason: r, usd, path: 'fetch', notes, ...(capped ? { capped: true } : {}), ...(tn ? { target: tn } : {}), ...(ledgerError ? { ledgerError } : {}) };
   };
   try {
-    key = resolveKey(cfg.keySource, env);
+    key = resolveKey(T.keySource, env);
     if (!validKeyShape(key)) throw configError('the configured secret is not a Console API key (it must start sk-ant-, and sk-ant-admin and sk-ant-oat are refused)');
-    const ws = String(env[WORKSPACE_ENV] || '').trim();
+    // A named target sends only its own workspace id (none when unset: its key may be workspace-scoped); primary keeps the env variable.
+    const ws = tn ? String(T.workspace || '').trim() : String(env[WORKSPACE_ENV] || '').trim();
     if (ws && !/^[A-Za-z0-9_.-]+$/.test(ws)) throw configError(`${WORKSPACE_ENV} is malformed (letters, digits, _ . - only)`);
     const m = resolveModel(model);
     modelId = m.id;
@@ -296,6 +312,7 @@ export async function runApi({
           res = null; raw = String((e && e.message) || e);
         }
         const st = res ? res.status : 0;
+        if (isEnforcedSpendCap({ status: st, raw })) break; // a wall, not a rate limit: no retry
         if ((st === 0 || st === 429 || st >= 500) && attempt < retries && !hung()) { await sleep(1000 * 3 ** attempt); continue; }
         break;
       }
@@ -306,13 +323,14 @@ export async function runApi({
       if (status !== 200 || !j || j.type === 'error') {
         const msg = scrub((j && j.error && j.error.message) || raw || 'no response', key).replace(/\s+/g, ' ').trim().slice(0, 200);
         if (isWorkspaceMissing({ status, text: msg })) {
-          noteFailure(WORKSPACE_HINT);
-          return fail(true, WORKSPACE_HINT);
+          noteFailure(workspaceHint(tn));
+          return fail(true, workspaceHint(tn));
         }
-        if (isUnavailable({ status, text: msg }) || isSpendLimit({ status, text: msg })) {
+        const cap = isCapFailure({ status, text: msg, raw });
+        if (isUnavailable({ status, text: msg }) || cap) {
           const reason = `HTTP ${status || '?'}: ${msg}`.slice(0, 200);
-          noteFailure(reason, isSpendLimit({ status, text: msg }));
-          return fail(true, reason);
+          noteFailure(reason, isSpendLimit({ status, text: msg }) || isEnforcedSpendCap({ status, raw }));
+          return fail(true, reason, cap);
         }
         return fail(false, `HTTP ${status || '?'}: ${msg}`);
       }
@@ -325,7 +343,7 @@ export async function runApi({
       const p = priceUsage(u, modelId);
       usd += p ? p.usd : 0;
       // Book this paid turn now: a run that is killed or times out later still leaves its spend.
-      if (p && p.usd > 0) { try { recordSpend(category, p.usd, { cfg, now }); booked += p.usd; } catch { /* the final record() books the rest and reports a failure */ } }
+      if (p && p.usd > 0) { try { recordSpend(category, p.usd, { cfg, now, target: tn }); booked += p.usd; } catch { /* the final record() books the rest and reports a failure */ } }
       last = j;
       if (usd >= softUsd && !notes.some((n) => n.startsWith('passed the $'))) {
         notes.push(softUsdNote(softUsd)); // also a long-runs row, so the scout lists the review (unless the slow row below already is one)

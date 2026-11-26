@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // api-credits.mjs — the API-credit governor (ledger: <state root>/state/api-credits.json).
 //
-//   node api-credits.mjs decide <category> [--peek]     (--peek: do not advance the review alternation counter) prints "api" or "plan", then one reason line (billed spend from the Admin API plus booked spend after the last complete day; "booked only, not verified against billing" without an admin key or network)
-//   node api-credits.mjs record <category> <usd> <meta> --api-key-source ANTHROPIC_API_KEY  appends spend; without the flag it is refused (exit 2, nothing booked, a line in api-credits-rejects.jsonl)
+//   node api-credits.mjs decide <category> [--peek] [--target <name>]  (--target: a named API target, with failover to the targets after it; a non-primary api answer adds a line "target: <name>")     (--peek: do not advance the review alternation counter) prints "api" or "plan", then one reason line (billed spend from the Admin API plus booked spend after the last complete day; "booked only, not verified against billing" without an admin key or network)
+//   node api-credits.mjs record <category> <usd> <meta> --api-key-source ANTHROPIC_API_KEY [--target <name>]  appends spend; without the flag it is refused (exit 2, nothing booked, a line in api-credits-rejects.jsonl)
 //   node api-credits.mjs status                         spend by category, the pace, what is left, the review limits in force, then billed spend (month and cycle, by workspace, key and model), the booked figure beside it, gaps, credits left (estimate), workspace limits
 //   node api-credits.mjs credits [--json]               used this cycle (billed per workspace and model, booked not yet billed), remaining (Console balance anchor minus billed since), caps
 //   node api-credits.mjs credits anchor <usd> [--date <ISO>]  records the Console balance and its date (agent-companion state); replaces the last anchor
@@ -16,10 +16,10 @@
 // options (see README "API credits"). Exit codes: 0 ok, 2 bad usage, 1 probe failed.
 
 import { isMain } from './lib/is-main.mjs';
-import { CATEGORIES, decide, record, recordFallback, reviewStats, reviewSummaryLine, reviewShareLines, status, summaryLine, billingStatusLines } from './lib/api-credits.mjs';
+import { CATEGORIES, TargetError, namedTargets, resolveTargets, targetLines, decide, record, recordFallback, reviewStats, reviewSummaryLine, reviewShareLines, status, summaryLine, billingStatusLines } from './lib/api-credits.mjs';
 import { creditsView, creditsLines, readAnchor, writeAnchor } from './lib/api-credits.mjs';
 import { runApi, reviewLimitsLine } from './lib/api-run.mjs';
-import { getBilling, loadSpendConfig } from './lib/api-spend.mjs';
+import { getBilling, getTargetOrgs, loadSpendConfig } from './lib/api-spend.mjs';
 import { opt } from '../hooks/lib/context.mjs';
 
 // Overall wait for the billing snapshot; past it decide and status fall back to booked spend only.
@@ -34,6 +34,10 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   const peekAt = args.indexOf('--peek'); // 0.31.63: decide without advancing the review counter
   const peek = peekAt >= 0;
   if (peek) args.splice(peekAt, 1);
+  // --target <name>: the named API target (decide, record). Taken out of the arguments before the commands read them.
+  let targetArg = null;
+  { const ti = args.indexOf('--target'); if (ti >= 0) { targetArg = args[ti + 1] ?? ''; args.splice(ti, 2); } }
+  if (targetArg !== null && (!String(targetArg).trim() || String(targetArg).startsWith('--'))) { out('--target needs a target name'); return 2; }
   const [cmd, ...rest] = args;
   let cfg;
   try { cfg = cfgIn || loadSpendConfig(); } catch { cfg = null; }
@@ -48,8 +52,10 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     if (!cfg) { out('plan'); out('failed closed: unreadable configuration'); return 0; }
     // Nothing is fetched for a category that fails closed anyway, and a failed or absent billing source never blocks the decision.
     const b = CATEGORIES.includes(rest[0]) ? await billing() : { ok: false };
-    const d = decide(rest[0], { now, cfg, env, billing: b.ok ? b.snapshot : null, peek });
+    if (targetArg !== null && CATEGORIES.includes(rest[0])) { try { resolveTargets(rest[0], cfg, targetArg); } catch (e) { if (e instanceof TargetError) { out(e.message); return 2; } throw e; } }
+    const d = decide(rest[0], { now, cfg, env, billing: b.ok ? b.snapshot : null, peek, target: targetArg });
     out(d.decision); out(d.reason);
+    if (d.target) out(`target: ${d.target}`);
     return 0;
   }
   if (!cfg) { out('unreadable configuration'); return 2; }
@@ -58,7 +64,9 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     const apiKeySource = ki >= 0 ? (rest[ki + 1] ?? '') : null;
     const rr = ki >= 0 ? rest.filter((_, i) => i !== ki && i !== ki + 1) : rest;
     if (!CATEGORIES.includes(rr[0]) || rr[1] === undefined) { out('usage: api-credits.mjs record <review|overflow|rater|workers> <usd> <meta> --api-key-source ANTHROPIC_API_KEY'); return 2; }
-    try { const r = record(rr[0], rr[1], rr.slice(2).join(' '), { now, cfg, apiKeySource }); out(`recorded; ${rr[0]} total $${r.spent.toFixed(2)} in ${r.n} item(s)`); return 0; } catch (e) { out(`record failed: ${e.message}`); return 2; }
+    const tgt = targetArg === null ? null : String(targetArg).toLowerCase();
+    if (tgt !== null && !(cfg.targets || { primary: 1 })[tgt]) { out(`unknown target "${String(targetArg).slice(0, 40)}" (known: ${Object.keys(cfg.targets || { primary: 1 }).join(', ')})`); return 2; }
+    try { const r = record(rr[0], rr[1], rr.slice(2).join(' '), { now, cfg, apiKeySource, target: tgt }); out(`recorded; ${rr[0]} total $${r.spent.toFixed(2)} in ${r.n} item(s)`); return 0; } catch (e) { out(`record failed: ${e.message}`); return 2; }
   }
   if (cmd === 'record-fallback') {
     const ri = rest.indexOf('--reason');
@@ -84,10 +92,11 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     const b = await billing();
     let share = '';
     try { share = `\n${reviewShareLines({ now }).join('\n')}`; } catch { /* the share never hides the ledger */ }
-    out(st.text + limits + share + '\n' + billingStatusLines(b.ok ? b.snapshot : null, { cfg, entries: (st.ledger && st.ledger.entries) || [], now, reason: b.reason || '', cacheAgeMs: b.ok ? b.ageMs : null }).join('\n'));
+    const tl = await targetReport({ st, cfg, now, env, b, fetchImpl: billingFetch, readKey });
+    out(st.text + limits + share + '\n' + billingStatusLines(b.ok ? b.snapshot : null, { cfg, entries: (st.ledger && st.ledger.entries) || [], now, reason: b.reason || '', cacheAgeMs: b.ok ? b.ageMs : null }).join('\n') + (tl.length ? `\n${tl.join('\n')}` : ''));
     return 0;
   }
-  if (cmd === 'credits') return creditsCommand(rest, { out, now, cfg, env, billing });
+  if (cmd === 'credits') return creditsCommand(rest, { out, now, cfg, env, billing, fetchImpl: billingFetch, readKey });
   if (cmd === 'summary') { out(summaryLine({ now, cfg })); return 0; }
   if (cmd === 'probe') {
     const r = await runApi({
@@ -106,10 +115,21 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
   return 2;
 }
 
+// Per-target lines for status and credits: empty when nothing about targets is configured (and then nothing is fetched). A failing
+// admin key shows as "no cost data" for its org, never as an error.
+async function targetReport({ st, cfg, now, env, b, fetchImpl, readKey }) {
+  try {
+    const named = namedTargets(cfg).length;
+    if (!named && !(cfg.targetErrors || []).length && !Object.keys(cfg.categoryTargets || {}).length) return [];
+    const orgs = named ? await getTargetOrgs({ now, cfg, env, primary: b, ...(fetchImpl ? { fetchImpl } : {}), ...(readKey ? { readKey } : {}) }) : [];
+    return targetLines({ cfg, cycle: st && st.ledger ? st.ledger : undefined, orgs, now });
+  } catch (e) { return [`API targets: report failed (${String((e && e.message) || e).slice(0, 80)})`]; }
+}
+
 // `credits [--json]` and `credits anchor <usd> [--date <ISO>]`. The view never fails: without an admin key, or when the Admin API
 // call fails, it prints the ledger-only view with the reason in one line and exits 0. The anchor is the Console balance on a date
 // (the Admin API cannot read the balance); it is stored in the agent-companion state.
-async function creditsCommand(rest, { out, now, cfg, env, billing }) {
+async function creditsCommand(rest, { out, now, cfg, env, billing, fetchImpl, readKey }) {
   if (rest[0] === 'anchor') {
     const di = rest.indexOf('--date');
     const dateRaw = di >= 0 ? rest[di + 1] : null;
@@ -128,7 +148,8 @@ async function creditsCommand(rest, { out, now, cfg, env, billing }) {
   try { st = status({ now, cfg, env }); } catch { /* the view says the ledger is unreadable */ }
   const b = await billing();
   const view = creditsView({ snap: b.ok ? b.snapshot : null, reason: b.reason || '', cfg, ledgerCycle: st.ledger || {}, ledgerOk: !/ledger unreadable/.test(st.text), anchor: readAnchor(), now, fetchedAgeMs: b.ok ? b.ageMs : null });
-  out(json ? JSON.stringify(view, null, 2) : creditsLines(view).join('\n'));
+  const tl = await targetReport({ st, cfg, now, env, b, fetchImpl, readKey });
+  if (json) { if (tl.length) view.targets = tl; out(JSON.stringify(view, null, 2)); } else out(creditsLines(view).join('\n') + (tl.length ? `\n${tl.join('\n')}` : ''));
   return 0;
 }
 

@@ -29,8 +29,8 @@ import { isMain } from './lib/is-main.mjs';
 import { spawnSyncHidden } from './lib/proc.mjs';
 import { priceUsage } from './lib/pricing.mjs';
 import { opt, stateFile, REVIEWER_SESSION_ENV } from '../hooks/lib/context.mjs';
-import { loadConfig, resolveKey } from './lib/api-credits.mjs';
-import { validKeyShape, scrub, resolveModel } from './lib/api-run.mjs';
+import { loadConfig, resolveKey, resolveTargets, targetOf, recordFailure, TargetError, PRIMARY } from './lib/api-credits.mjs';
+import { validKeyShape, scrub, resolveModel, isCapFailure, isEnforcedSpendCap } from './lib/api-run.mjs';
 import { parseCommands, baseName } from '../hooks/lib/process-kill-guard.mjs';
 import { envDumpHits } from '../hooks/lib/env-dump-guard.mjs';
 import { accessReason, bashPathReason, normDirs, validateAllowDir, normPath, expandHome, staticDir, claudeDir, isUnder, denyNameReason, WRITE_BLOCKED } from './lib/api-worker-paths.mjs';
@@ -317,9 +317,15 @@ export function cliCredits(baseEnv = process.env, workspaceId = '') {
     return String(r.stdout || '').trim().split(/\r?\n/);
   };
   return {
-    decide: (category) => { const [decision, ...why] = call(['decide', category]); return { decision, reason: why.join(' ') }; },
-    record: (category, usd, meta) => {
-      const [first] = call(['record', category, String(usd), meta, '--api-key-source', 'ANTHROPIC_API_KEY']);
+    // 0.31.72: target = a named API target (--target); the answer carries the target the governor chose ("target: <name>" line) when it is not the primary.
+    decide: (category, target = null) => {
+      const lines = call(['decide', category, ...(target ? ['--target', target] : [])]);
+      const [decision, ...why] = lines.filter((l) => !/^target: /.test(l));
+      const t = lines.map((l) => /^target: (.+)$/.exec(l)).find(Boolean);
+      return { decision, reason: why.join(' '), ...(t ? { target: t[1] } : {}) };
+    },
+    record: (category, usd, meta, target = null) => {
+      const [first] = call(['record', category, String(usd), meta, '--api-key-source', 'ANTHROPIC_API_KEY', ...(target && target !== PRIMARY ? ['--target', target] : [])]);
       if (!/^recorded/.test(first || '')) throw new Error(String(first || 'no answer').slice(0, 80));
     },
   };
@@ -374,7 +380,7 @@ const textOf = (m) => (m && Array.isArray(m.content) ? m.content.filter((b) => b
 export async function runWorker({
   prompt, cwd = process.cwd(), model = null, mode = 'write', planFile = '', maxUsd = DEFAULT_MAX_USD, maxTurns = DEFAULT_MAX_TURNS, workspaceId = '', meta = 'worker',
   env = process.env, cfg = null, credits = null, sdk = null, load = loadSdk, sdkVersion = DEFAULT_SDK_VERSION,
-  opusPolicy = null, hungMs = HUNG_MS, configDir = null, allowRead = [], allowWrite = [],
+  opusPolicy = null, hungMs = HUNG_MS, configDir = null, allowRead = [], allowWrite = [], target = null,
 }) {
   const allowR = normDirs(allowRead, cwd);
   const allowW = normDirs(allowWrite, cwd);
@@ -399,19 +405,32 @@ export async function runWorker({
     // Allow-list: only sonnet and haiku write; Opus and anything else (a new family included) need opus_writer_policy allow.
     if (!plan && !/sonnet|haiku/i.test(m.id) && policy !== 'allow') return out('refused_model', { reason: `Opus plans, Sonnet writes (opus_writer_policy): an API worker runs on sonnet or haiku only, not ${m.id}; use sonnet` });
     if (!priceUsage({ input: 1 }, m.id)) return out('refused_model', { reason: `no price for model ${m.id} in config/model-pricing.json, so its cost cannot be metered` });
-    // 2. Key.
     cfg = cfg || loadConfig();
-    try { key = resolveKey(cfg.keySource, env); } catch (e) { return out('refused_key', { reason: `no API key: ${String((e && e.message) || e)}` }); }
+    // 0.31.72: the ordered targets for workers (primary only with the options unset), or --target <name> and the ones after it in the list.
+    let chain;
+    try { chain = resolveTargets(CATEGORY, cfg, target); } catch (e) { if (e instanceof TargetError) return out('refused_target', { reason: e.message }); throw e; }
+    const explicitTarget = target !== null && target !== undefined && String(target).trim() !== '';
+    // One attempt on one target: 2 key, 3 workspace, 4 budget, 5 the SDK, the run, the booking. A "redirect" answer means the governor chose another
+    // target for this run; a result with capped:true means the run ended on a spend-limit 400, the enforced 429 or credit exhausted, before it did any work.
+    const attempt = async (tgt) => {
+    const T = targetOf(cfg, tgt);
+    // 2. Key.
+    key = '';
+    try { key = resolveKey(T.keySource, env); } catch (e) { return out('refused_key', { reason: `no API key: ${String((e && e.message) || e)}` }); }
     if (!validKeyShape(key)) return out('refused_key', { reason: 'the configured secret is not a Console API key (it must start sk-ant-; admin and OAuth tokens are refused)' });
-    // 3. Workspace: without the header a personal key bills to no workspace.
-    const ws = String(workspaceId || env[WORKSPACE_ENV] || opt('api_workers_workspace_id', '') || '').trim();
-    if (!ws) return out('refused_workspace', { reason: `no workers workspace id: set ${WORKSPACE_ENV} (or the api_workers_workspace_id option, or --workspace-id). A personal key is not tied to a workspace, so the run would not be billed to the workers workspace` });
-    if (!/^[A-Za-z0-9_.-]+$/.test(ws)) return out('refused_workspace', { reason: 'the workspace id is malformed (letters, digits, _ . - only)' });
+    // 3. Workspace: without the header a personal key bills to no workspace. A named target brings its own (optional) workspace.
+    const named = !!tgt && tgt !== PRIMARY;
+    const ws = named ? String(T.workspace || '').trim() : String(workspaceId || env[WORKSPACE_ENV] || opt('api_workers_workspace_id', '') || '').trim();
+    if (!ws && !named) return out('refused_workspace', { reason: `no workers workspace id: set ${WORKSPACE_ENV} (or the api_workers_workspace_id option, or --workspace-id). A personal key is not tied to a workspace, so the run would not be billed to the workers workspace` });
+    if (ws && !/^[A-Za-z0-9_.-]+$/.test(ws)) return out('refused_workspace', { reason: 'the workspace id is malformed (letters, digits, _ . - only)' });
     // 4. Budget, through the api-credits CLI.
-    credits = credits || cliCredits(env, ws);
+    const cr = credits || cliCredits(env, named ? '' : ws);
     let d;
-    try { d = credits.decide(CATEGORY); } catch (e) { d = { decision: 'plan', reason: `budget check failed: ${String((e && e.message) || e)}` }; }
+    // Only the options-unset, flag-unset run asks the plain way (as 0.31.71 did); anything else names the target it is on, primary included.
+    const listed = named || explicitTarget || chain.length > 1;
+    try { d = listed ? cr.decide(CATEGORY, tgt || PRIMARY) : cr.decide(CATEGORY); } catch (e) { d = { decision: 'plan', reason: `budget check failed: ${String((e && e.message) || e)}` }; }
     if (d.decision !== 'api') return out('refused_budget', { reason: `api-credits decide ${CATEGORY}: ${d.decision} (${d.reason})` });
+    if ((d.target || PRIMARY) !== (tgt || PRIMARY)) return { redirect: d.target && d.target !== PRIMARY ? d.target : null };
     // 5. The SDK.
     try { sdk = sdk || await load({ version: sdkVersion }); } catch (e) { return out('refused_auth', { reason: `the Agent SDK is not available: ${String((e && e.message) || e)}`.slice(0, 200) }); }
 
@@ -481,7 +500,7 @@ ${prompt}` : prompt, options });
     let booked = false;
     let bookNote = '';
     if (usd > 0) {
-      try { credits.record(CATEGORY, usd, `${meta} ${basename(resolve(cwd))}`.trim()); booked = true; } catch (e) { bookNote = ` (booking failed: ${String((e && e.message) || e).slice(0, 80)})`; }
+      try { cr.record(CATEGORY, usd, `${meta} ${basename(resolve(cwd))}`.trim(), named ? tgt : null); booked = true; } catch (e) { bookNote = ` (booking failed: ${String((e && e.message) || e).slice(0, 80)})`; }
     }
     const base = { usd, turns, apiKeySource, booked, denied: state.denied, model: m.id };
     if (abortReason === 'hung') return out('failed', { ...base, text: lastText, reason: `no message for ${Math.round(hungMs / 60000)} minutes; stopped${bookNote}` });
@@ -490,7 +509,29 @@ ${prompt}` : prompt, options });
     if (result.subtype === 'success' && !result.is_error) return out('done', { ...base, text, reason: bookNote.trim() });
     const errs = Array.isArray(result.errors) ? result.errors.join('; ') : '';
     const status = result.subtype === 'error_max_budget_usd' ? 'stopped_budget' : result.subtype === 'error_max_turns' ? 'stopped_turns' : 'failed';
-    return out(status, { ...base, text, reason: `${result.subtype}${errs ? `: ${errs}` : ''}${bookNote}` });
+    // A run that did no work and ended on a cap (spend-limit 400, the enforced 429, credit exhausted) is capped: this target's lane trips at once and the loop below moves on.
+    const why = `${errs} ${text}`;
+    const capped = status === 'failed' && !(usd > 0) && (isCapFailure({ status: 400, text: why, raw: why }) || isEnforcedSpendCap({ status: 429, raw: why }));
+    // Only with named targets in play (a named lane, or a list with a later target to fail over to): with the options unset nothing is tripped, as 0.31.71.
+    if (capped && (named || chain.length > 1)) { try { recordFailure(`worker run capped: ${why.replace(/\s+/g, ' ').slice(0, 80)}`, { cfg, hard: true, target: named ? tgt : null }); } catch { /* the loop still moves on */ } }
+    return out(status, { ...base, text, ...(capped ? { capped: true } : {}), reason: `${result.subtype}${errs ? `: ${errs}` : ''}${bookNote}` });
+    };
+    // The first target (primary only with the options unset); a capped run goes to the next target the governor still answers api for. Past the last, the refusal is the plan, as today.
+    let tgt = chain[0].name === PRIMARY ? null : chain[0].name;
+    const noted = [];
+    let r = null;
+    for (let hops = 0; hops <= 2 * chain.length + 2; hops++) {
+      r = await attempt(tgt);
+      if (r.redirect !== undefined) { tgt = r.redirect; r = null; continue; }
+      if (!r.capped) break;
+      const at = chain.findIndex((t) => t.name === (tgt || PRIMARY));
+      const next = chain[at + 1];
+      noted.push(`target ${tgt || PRIMARY} is capped`);
+      if (!next) break;
+      tgt = next.name === PRIMARY ? null : next.name;
+    }
+    if (!r) return out('refused_budget', { reason: 'no target answered api' });
+    return { ...r, ...(tgt ? { target: tgt } : {}), ...(noted.length ? { notes: noted } : {}) };
   } catch (e) {
     return out('failed', { reason: String((e && e.message) || e) });
   }
@@ -525,14 +566,19 @@ export async function main(argv, { write = (s) => process.stdout.write(`${s}\n`)
   const modeBad = !MODES.includes(mode) || (mode === 'plan' && !a['plan-file']) || (mode === 'write' && a['plan-file'] !== undefined);
   if (cmd !== 'run' || !a['brief-file'] || !a.cwd || !(maxUsd > 0) || !(maxTurns > 0) || modeBad) {
     if (modeBad && cmd === 'run') write(mode === 'plan' ? '--mode plan needs --plan-file <path>' : mode === 'write' ? '--plan-file is only valid with --mode plan' : `--mode must be write or plan, not ${mode}`);
-    write('usage: api-worker.mjs run --brief-file <f> --cwd <worktree> [--mode write|plan --plan-file <f> (plan only)] [--model sonnet (opus in plan mode)] [--max-usd 3] [--max-turns 60] [--workspace-id <id>] [--result-file <f>] [--meta <label>] [--allow-read <dir>]... [--allow-write <dir>]...');
+    write('usage: api-worker.mjs run --brief-file <f> --cwd <worktree> [--mode write|plan --plan-file <f> (plan only)] [--model sonnet (opus in plan mode)] [--max-usd 3] [--max-turns 60] [--workspace-id <id>] [--target <name>] [--result-file <f>] [--meta <label>] [--allow-read <dir>]... [--allow-write <dir>]...');
     return EXIT.usage;
+  }
+  // 0.31.72: --target names an API target (api_targets); an unknown name is a usage error. Only an explicit flag is passed on (unset = the configured list, as today).
+  if (a.target !== undefined) {
+    if (!String(a.target).trim() || String(a.target).startsWith('--')) { write('--target needs a target name'); return EXIT.usage; }
+    try { resolveTargets(CATEGORY, inject.cfg || loadConfig(), a.target); } catch (e) { if (e instanceof TargetError) { write(e.message); return EXIT.usage; } throw e; }
   }
   let prompt;
   try { prompt = readFileSync(a['brief-file'], 'utf8'); } catch { write(`cannot read the brief file ${a['brief-file']}`); return EXIT.usage; }
   if (!prompt.trim()) { write('the brief file is empty'); return EXIT.usage; }
-  const r = await runWorker({ prompt, cwd: resolve(a.cwd), model: a.model || (mode === 'plan' ? 'opus' : 'sonnet'), mode, planFile: mode === 'plan' ? resolve(resolve(a.cwd), a['plan-file']) : '', maxUsd, maxTurns, workspaceId: a['workspace-id'] || '', allowRead: a['allow-read'] || [], allowWrite: a['allow-write'] || [], meta: a.meta || 'worker', env, ...inject });
-  const summary = { status: r.status, cost_usd: Number(r.usd.toFixed(4)), turns: r.turns, model: r.model, mode: r.mode, ...(r.mode === 'plan' ? { planFile: r.planFile } : {}), apiKeySource: r.apiKeySource, booked: r.booked, allow_read: r.allow_read, allow_write: r.allow_write, denied_commands: r.denied.length, reason: r.reason || undefined };
+  const r = await runWorker({ prompt, cwd: resolve(a.cwd), model: a.model || (mode === 'plan' ? 'opus' : 'sonnet'), mode, planFile: mode === 'plan' ? resolve(resolve(a.cwd), a['plan-file']) : '', maxUsd, maxTurns, workspaceId: a['workspace-id'] || '', ...(a.target !== undefined ? { target: a.target } : {}), allowRead: a['allow-read'] || [], allowWrite: a['allow-write'] || [], meta: a.meta || 'worker', env, ...inject });
+  const summary = { status: r.status, cost_usd: Number(r.usd.toFixed(4)), turns: r.turns, model: r.model, mode: r.mode, ...(r.mode === 'plan' ? { planFile: r.planFile } : {}), apiKeySource: r.apiKeySource, ...(r.target ? { target: r.target } : {}), booked: r.booked, allow_read: r.allow_read, allow_write: r.allow_write, denied_commands: r.denied.length, reason: r.reason || undefined };
   if (a['result-file']) { try { writeFileSync(a['result-file'], `${JSON.stringify({ ...summary, text: r.text }, null, 2)}\n`); } catch { /* the stdout copy stands */ } }
   if (r.text) write(r.text);
   write(`API-WORKER ${JSON.stringify(summary)}`);

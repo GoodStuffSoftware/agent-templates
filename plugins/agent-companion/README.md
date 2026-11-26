@@ -1363,6 +1363,21 @@ Path guard (both modes): a Read, Grep or Glob search root is expanded first (`~`
 - Known limit (0.31.56): the text guard matches the `git` binary name only, so a hyphenated `git-send-pack`, `git-http-push` or `git-push` on PATH is not seen by it (normally they live in git-core, off PATH).
 - Known limit (0.31.56): tests cover `git send-pack` and `-C x http-push` as denied cases, but not `git+ssh://` or `ssh+git://` in the env backstop.
 
+## API targets (0.31.72)
+
+Work can be sent to any API key (and optional workspace) you name, with an ordered list per category and failover. Two options, both empty by default (then the only target is the built-in `primary`, `api_credits_key_source`, and behaviour is unchanged):
+
+- `api_targets`: JSON, `{"name":{"key":"bws:<secret>" | "env:<NAME>","workspace":"<id, optional>","admin":"<admin key source, optional>","budget":<USD, optional>}}`. `primary` is built in and cannot be redefined.
+- `api_category_targets`: the order each category tries, `review=primary,second-org-reviewers workers=second-org-workers` (categories `review` and `workers`).
+
+Example (names only): target `second-org-workers` = `bws:<your-workers-key-name>`, target `second-org-reviewers` = `bws:<your-reviewers-key-name>`, both with admin key `bws:<your-admin-key-name>`.
+
+- **Failover.** A run that ends on a spend-limit 400, the enforced 429 (`error.details.error_code` `enforced_spend_limit_reached`: a wall, never retried on the fetch engine; an ordinary 429 is still retried. On the SDK engine the bundled Claude Code CLI makes its own retries of a 429 before the runner sees the error, and they cannot be switched off for this one case, so the retries happen there and the run then fails over once the error surfaces; `CLAUDE_CODE_MAX_RETRIES` would lower them for every error, so it is left at the CLI default), credit exhausted, or a governor cap answer goes to the next target. When every target is exhausted the job falls back to the plan as before. Alternation and the other plan answers are unchanged.
+- **One job, one target.** `--target <name>` on `api-review.mjs`, `api-worker.mjs` and `api-credits.mjs decide|record`, or the brief line `API: target=<name>` (read by the review route). An explicit target fails over only to the targets after it in that category's list. An unknown name is a usage error (the route falls back to the subagent).
+- **Lanes and reports.** Each target has its own breaker and budget lane, and every booked run records its target. `api-credits.mjs status` and `credits` print the targets grouped by organization id (two orgs can share one display name, so the name is secondary text), with booked and billed figures per target; a target with no admin key, or whose admin key fails, shows "no cost data" and never fails the report.
+- **Secrets.** Key values are read in-process only and are never logged or printed.
+- **Undo.** Unset both options.
+
 ## API spend watch (what the credits actually billed)
 
 The governor's ledger is the plugin's own record of API-credit spend. The spend watch checks it against the organization's cost report, so a runaway or an unrelated user of the same key does not go unnoticed. It needs an organization (only an organization has an Admin API) and an Admin API key (`sk-ant-admin...`); without one it reports `unavailable` and nothing else changes.
