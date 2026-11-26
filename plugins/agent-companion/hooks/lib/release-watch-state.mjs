@@ -5,6 +5,7 @@
 //   release-watch-flag.json   the open flag: flags[], notifiedAt, ackedAt, clearedAt, cooldown{}
 //   release-hold.json         the hold: { since, version, reason, flags, workers, clearedAt }
 //   release-hold-sessions.json  sessions shown the hold notice or refused by it: { holdSince, sessions[], clearedAt, noticed{} }
+//   release-owner.json          the session that last ran `claude plugin install|update agent-companion`: { session, at, transcriptPath }
 //   release-watch-checks.jsonl  one row per check and per clear
 // AGENT_COMPANION_FAKE_NOW moves the clock for tests. Nothing here throws.
 
@@ -13,6 +14,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { stateDir, opt } from './context.mjs';
 import { createRequire } from 'node:module';
+import { normalizeSignature } from './designed-denies.mjs';
 
 // Every read-modify-write of release-hold-sessions.json and release-hold-message-pending.json runs under the shared lock helper
 // (lib/file-lock.mjs): a lead's noteHeld and a worker's denied-call noteHeld, or two clears, would otherwise lose one update.
@@ -43,6 +45,7 @@ export const paths = () => {
     standing: join(d, 'release-watch-standing.json'),
     heldSessions: join(d, 'release-hold-sessions.json'),
     messagePending: join(d, 'release-hold-message-pending.json'),
+    owner: join(d, 'release-owner.json'),
   };
 };
 
@@ -88,14 +91,21 @@ export function flagIsOpen(f = readFlag()) { return !!(f && Array.isArray(f.flag
 export const NO_HOLD_FLAGS = new Set(['usage-source-empty', 'harness-refusals', 'insufficient-data']);
 const holdable = (flags) => (Array.isArray(flags) ? flags : []).filter((x) => x && !NO_HOLD_FLAGS.has(x.name));
 const levelOf = (f) => (typeof f.level === 'number' ? f.level : typeof f.value === 'number' ? f.value : null);
-const answeredFor = (cool, name, T) => { const c = cool[name]; return c && c.T === T ? c : null; };
-export function openFlag({ version, T, check, flags, at = now() } = {}) {
+// 0.31.70 named a hook-signature flag with the raw error text; 0.31.71 collapses paths and numbers first. An answer stored under the old name still holds for the new one, so the upgrade does not raise it again.
+const legacySigName = (k) => { const m = /^(hook-signature:\S+ )([\s\S]*)$/.exec(k); return m ? m[1] + normalizeSignature(m[2]).slice(0, 48) : k; };
+const answeredFor = (cool, name, T) => {
+  let c = cool[name];
+  if (!c && name.startsWith('hook-signature:')) { const k = Object.keys(cool).find((x) => x.startsWith('hook-signature:') && legacySigName(x) === name); if (k) c = cool[k]; }
+  return c && c.T === T ? c : null;
+};
+// T is the install time of the release that produced the flags; `chain` (optional) is the key the cooldown uses, so an answer given for one release of a chain holds for the next.
+export function openFlag({ version, T, chain, check, flags, at = now() } = {}) {
   try {
     const old = readFlag();
     const cool = (old && old.cooldown) || {};
     const fresh = (Array.isArray(flags) ? flags : []).filter((f) => {
       if (!f || !f.name) return false;
-      const c = answeredFor(cool, f.name, T ?? null);
+      const c = answeredFor(cool, f.name, chain ?? T ?? null);
       if (!c) return true;
       const l = levelOf(f);
       return l != null && typeof c.level === 'number' && c.level > 0 && l > c.level * WORSEN_FACTOR;
@@ -111,6 +121,7 @@ export function openFlag({ version, T, check, flags, at = now() } = {}) {
       v: 2,
       version: version ?? old?.version ?? null,
       T: T ?? old?.T ?? null,
+      chain: chain ?? old?.chain ?? null,
       check: check ?? old?.check ?? null,
       flags: merged,
       openedAt: open ? old.openedAt : iso(at),
@@ -129,7 +140,7 @@ export function openFlag({ version, T, check, flags, at = now() } = {}) {
 
 const answerLevels = (f, at, cool = {}) => {
   const c = { ...cool };
-  for (const x of f.flags || []) c[x.name] = { level: levelOf(x), T: f.T ?? null, at: iso(at) };
+  for (const x of f.flags || []) c[x.name] = { level: levelOf(x), T: f.chain ?? f.T ?? null, at: iso(at) };
   return c;
 };
 
@@ -250,6 +261,30 @@ export function noteShown(sessionId, at = now()) {
 
 // The operator's words that lift a hold: a short prompt saying "clear hold" or "release hold".
 export const CLEAR_WORDS_RE = /^(please\s+)?(clear|release)\s+(the\s+)?hold[.!]*$/i;
+// Ack intent: a reply answers the flag only when it SAYS so. The notice asks for "ack" (or "keep it" / "no rollback"); a plain
+// equivalent counts too. Every clause of the reply must be an ack phrase or filler, and a question never counts, so "Well analysis
+// please" or "why did it flag?" leaves the flag open and the countdown running.
+const ACK_CLAUSES = [
+  /^ack(s|ed|'d|nowledge[ds]?)?( (it|this|that|the flag|the flags|the watch|the notice|v?\d+\.\d+\.\d+))?$/,
+  /^keep (it|this|the release|this release|that|v?\d+\.\d+\.\d+)( as is)?$/,
+  /^(it'?s|its|that'?s|this is|all|everything'?s|everything is) (fine|ok|okay|good)$/,
+  /^(looks|seems) (fine|ok|okay|good)( to me)?$/,
+  /^no roll ?back( needed)?$/,
+  /^(do not|don'?t|dont) roll ?back( (it|the release))?$/,
+  /^noted$/,
+];
+const ACK_FILLER = /^(ok|okay|yes|yep|yeah|sure|thanks|thank you|please|well)$/;
+const ACK_FILLER_EDGE = /^(?:(?:ok|okay|yes|yep|yeah|sure|thanks|thank you|please)\s+)+|(?:\s+(?:ok|okay|yes|yep|yeah|sure|thanks|thank you|please))+$/g; // filler at either edge of a clause
+export function isAckText(text) {
+  try {
+    const t = String(text ?? '').trim().toLowerCase().replace(/[‘’]/g, "'");
+    if (!t || t.length > 120 || t.includes('?')) return false;
+    const protectedT = t.replace(/(\d)\.(?=\d)/g, '$1\u0001'); // a version number is not a sentence end
+    const clauses = protectedT.split(/[,;.!—–]+|\s+(?:and|then)\s+|\s+-{1,2}\s+/).map((c) => c.replace(/\u0001/g, '.').replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '').replace(ACK_FILLER_EDGE, '').trim()).filter(Boolean); // brackets and the like around a clause are ignored
+    return clauses.length > 0 && clauses.every((c) => ACK_FILLER.test(c) || ACK_CLAUSES.some((re) => re.test(c))) && clauses.some((c) => !ACK_FILLER.test(c));
+  } catch { return false; }
+}
+
 const ackWrite = (f, { session, promptAt, confirmedAt, signal }) => {
   const ack = { session, promptAt: iso(promptAt), confirmedAt: iso(confirmedAt), signal, shownAt: (f.shownTo || {})[session] ?? null };
   const next = { ...f, ackedAt: iso(promptAt), ack, candidates: [], cooldown: answerLevels(f, promptAt, f.cooldown) };
@@ -266,6 +301,7 @@ export function noteCandidate({ sessionId, transcriptPath, prompt, payloadOrigin
     const text = String(prompt ?? '').trim();
     const held = isHoldActive();
     if (held && !CLEAR_WORDS_RE.test(text)) return false;
+    if (!held && !isAckText(text)) return false; // a question or a request for analysis is not an ack: the flag stays open
     const shown = Date.parse((f.shownTo || {})[sessionId]);
     if (!(shown > 0) || !(shown < at)) return false;
     if (!held && payloadOrigin && payloadOrigin.kind === 'human') {
@@ -396,6 +432,13 @@ export function clear({ by = 'operator', at = now() } = {}) {
       out.holdCleared = !isHoldActive();
     } else if (existsSync(paths().hold)) {
       try { unlinkSync(paths().hold); } catch { /* fail open */ }
+    }
+    // A list left by an earlier hold is stale: drop it before the lift records its own. When no hold was lifted here, the list goes too,
+    // unless a clear still owes messages from it (unclaimed, inside OWED_TTL_MS).
+    const lf = readHeld();
+    if (lf) {
+      const keepList = !!(lf.clearedAt && at - Date.parse(lf.clearedAt) <= OWED_TTL_MS); // a cleared, recent list stays whether or not the owed messages were claimed: "hold cleared" notices still read it
+      if (out.holdCleared ? (h && lf.holdSince !== h.since) : !keepList) { try { unlinkSync(paths().heldSessions); } catch { /* fail open */ } }
     }
     if (out.holdCleared) markHoldCleared(at, by, out.heldSessions);
     if (out.flagCleared || out.holdCleared) appendRow({ at: iso(at), event: 'clear', by, flagCleared: out.flagCleared, holdCleared: out.holdCleared, ...(out.holdCleared ? { clearedAt: iso(at), heldSessions: out.heldSessions } : {}) });
@@ -611,10 +654,47 @@ export function standingLine({ at = now() } = {}) {
   } catch { return null; }
 }
 
+// ---- the release owner ----
+// Who installed the release is the one session that ran `claude plugin install|update agent-companion` (hooks/hold-message.mjs notes it
+// after that Bash call). Without that record (an auto-update, an install outside a session) there is no owner and every lead gets the
+// notice at once, as before. A known, live owner gets the notice first; other leads only after OWNER_GRACE_MS.
+export const INSTALL_CMD_RE = /\bplugin\s+(?:install|update)\s+["']?agent-companion\b/;
+export const OWNER_GRACE_MS = 20 * 60e3;
+export const OWNER_LIVE_MS = 2 * 3600e3;
+export function noteInstaller(sessionId, transcriptPath = null, at = now()) {
+  try {
+    if (!sessionId) return false;
+    return writeJson(paths().owner, { session: String(sessionId), at: iso(at), transcriptPath: transcriptPath || null });
+  } catch { return false; }
+}
+// The owner of the newest install: the recorded installer when it acted within minutes of that install and its transcript is live.
+export function releaseOwner(at = now()) {
+  try {
+    const o = readJson(paths().owner);
+    const oa = o && Date.parse(o.at);
+    if (!o || !o.session || !(oa > 0) || !o.transcriptPath) return null;
+    const rs = readJson(paths().run);
+    const rel = rs && Array.isArray(rs.releases) && rs.releases.length ? rs.releases[rs.releases.length - 1] : null;
+    const T = rel && Number(rel.T);
+    if (T > 0 && !(oa >= T - 5 * 60e3 && oa <= T + 30 * 60e3)) return null; // it noted an older install
+    return at - statSync(o.transcriptPath).mtimeMs <= OWNER_LIVE_MS ? { session: o.session, at: o.at } : null;
+  } catch { return null; }
+}
+// True when this session may be shown the open flag now.
+export function mayShowFlag(f, sessionId, at = now()) {
+  try {
+    if (!sessionId) return true;
+    const o = releaseOwner(at);
+    if (!o || o.session === sessionId) return true;
+    const opened = Date.parse(f && f.openedAt);
+    return !(opened > 0) || at - opened >= OWNER_GRACE_MS;
+  } catch { return true; }
+}
+
 // ---- the line shown to lead sessions ----
 // Open and unanswered flag: tell the lead to push-notify the operator at once and relay the answer.
 // Held: say so and how to lift it. Open and answered: silence. Returns null when there is nothing to say.
-export function flagLine({ at = now() } = {}) {
+export function flagLine({ at = now(), sessionId = null } = {}) {
   try {
     if (isHoldActive()) {
       const h = readHold();
@@ -626,6 +706,7 @@ export function flagLine({ at = now() } = {}) {
     }
     const f = readFlag();
     if (!flagIsOpen(f) || f.ackedAt) return null;
+    if (!mayShowFlag(f, sessionId, at)) return null; // the release owner sees it first
     const names = f.flags.map((x) => x.name + (x.detail ? ` (${x.detail})` : '')).join('; ');
     let when = '';
     if (holdable(f.flags).length) {
@@ -636,7 +717,7 @@ export function flagLine({ at = now() } = {}) {
         when = `Hold countdown: ${left} min left; unanswered, new agents and heavy jobs are held at ${iso(start + d * 60e3)} (option release_watch_hold_minutes). `;
       }
     }
-    return `[agent-companion] RELEASE WATCH ${f.version || ''} check ${f.check ?? '?'}: ${names}. Push-notify the operator at once (PushNotification) and relay their answer. ${when || (holdable(f.flags).length ? 'Unanswered, new agents and heavy jobs are held after the delay (option release_watch_hold_minutes); ' : 'This flag never starts a hold; ')}run \`node <plugin>/scripts/release-watch.mjs status\` for detail.`;
+    return `[agent-companion] RELEASE WATCH ${f.version || ''} check ${f.check ?? '?'}: ${names}. Push-notify the operator at once (PushNotification) and relay their answer. The flag is acknowledged only when the operator says so ("ack", "keep it", "no rollback"); a question or a request for analysis leaves it open and the countdown running. ${when || (holdable(f.flags).length ? 'Unanswered, new agents and heavy jobs are held after the delay (option release_watch_hold_minutes); ' : 'This flag never starts a hold; ')}run \`node <plugin>/scripts/release-watch.mjs status\` for detail.`;
   } catch { return null; }
 }
 

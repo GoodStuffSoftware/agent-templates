@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import './isolate.mjs';
 
@@ -29,7 +29,7 @@ const flag = [{ name: 'queue-clears', value: 3.6, detail: 'x' }];
 const iso = (t) => new Date(t).toISOString();
 // A reply the way the hook records it: the flag was shown to the session, then a typed prompt (origin human in the transcript) is confirmed.
 const humanRec = (at, prompt) => JSON.stringify({ type: 'user', origin: { kind: 'human' }, timestamp: iso(at), message: { content: prompt } });
-const humanAck = (at, { session = 's1', prompt = 'hi' } = {}) => {
+const humanAck = (at, { session = 's1', prompt = 'ack' } = {}) => {
   S.noteShown(session, at);
   S.noteCandidate({ sessionId: session, transcriptPath: 'fake', prompt, at: at + 1000 });
   return S.confirmCandidates({ at: at + 2000, readTail: () => [humanRec(at + 1000, prompt)] });
@@ -117,7 +117,7 @@ test('evaluate: spawn rewrites, queue, context, status, bash, api, runaway, blee
   assert.ok(names(metrics({ telemetry: { 'gate:denied': t(25, 40, 25, 6) } })).includes('queue-denied'));
   assert.ok(names(metrics({ queueClears: { since: 31, base: 5, perHour: { since: 3.6, base: 0.06 } } })).includes('queue-clears'));
   assert.ok(names(metrics({ telemetry: { 'handoff:hard/deny': t(3, 0, 3, 0) } })).includes('handoff-hard-deny'));
-  const m = metrics(); m.workers.since = { ...m.workers.since, over150kPct: 8, noStatusPct: 20, partialPct: 40, blockedPct: 15, hookErrorWorkersPct: 60, apiErrorWorkers: 3, apiNonUsageWorkers: 1, unitsPerWorker: { mean: 2, p50: 1, p90: 4 } };
+  const m = metrics(); m.workers.since = { ...m.workers.since, over150kPct: 8, noStatusPct: 20, partialPct: 40, blockedPct: 15, hookErrorWorkersPct: 60, apiErrorWorkers: 3, apiNonUsageWorkers: 2, unitsPerWorker: { mean: 2, p50: 1, p90: 4 } };
   const n = names(m);
   for (const x of ['context-over-150k', 'no-final-status', 'partial-share', 'blocked-share', 'hook-error-share', 'api-errors', 'units-per-worker', 'units-p90']) assert.ok(n.includes(x), x);
   assert.ok(names(metrics({ bash: { since: { n: 300, realFails: 27, realFailPct: 9, refusals: 0, refusalPer100: 0 }, base: { n: 500, realFails: 5, realFailPct: 1, refusals: 0, refusalPer100: 0 } } })).includes('worker-bash-fail'));
@@ -298,7 +298,7 @@ test('hooks: lead sees the line on every prompt, a subagent never does, a prompt
   assert.match(lead.stdout, /RELEASE WATCH 9/);
   const plain = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'again', cwd: tmp });
   assert.match(plain.stdout, /RELEASE WATCH/, 'a prompt with no human origin proof no longer acks');
-  const after = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'typed', origin: { kind: 'human' }, cwd: tmp });
+  const after = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'ack', origin: { kind: 'human' }, cwd: tmp });
   assert.doesNotMatch(after.stdout, /RELEASE WATCH/, 'answered by the typed prompt');
 });
 test('hooks: a task notification is not a reply', () => {
@@ -342,7 +342,7 @@ test('delivery timeline: the tick writes the flag, the lead is idle for 2 h, the
 test('delivery: a later prompt of the same session shows the shrinking countdown without moving the start; showing never acks; a worse flag restarts it', () => {
   S.openFlag({ version: '7.7.7', flags: [{ name: 'queue-clears', value: 3, level: 3, detail: 'x' }], at: T });
   hookAt(['--watch'], { session_id: 'lead-a', prompt: 'one' }, T + HOUR);
-  const later = ctxOf(hookAt(['--watch'], { session_id: 'lead-a', prompt: 'two' }, T + HOUR + 10 * 60e3));
+  const later = ctxOf(hookAt(['--watch'], { session_id: 'lead-a', prompt: 'ack' }, T + HOUR + 10 * 60e3));
   assert.match(later, /Hold countdown: 20 min left/);
   assert.equal(S.readFlag().notifiedAt, iso(T + HOUR)); assert.equal(S.readFlag().ackedAt, null);
   // a flag that is new, or has more than doubled, is a new notification: unseen again until a session shows it
@@ -719,7 +719,7 @@ test('same-turn-not-ack', () => {
   assert.match(first.stdout, /RELEASE WATCH/, 'the first typed prompt is the turn that shows the flag');
   assert.equal(S.readFlag().ackedAt, null, 'the prompt typed before the flag was shown does not answer it');
   assert.ok(S.readFlag().shownTo.s);
-  const next = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'second', origin: { kind: 'human' }, cwd: tmp });
+  const next = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'ack', origin: { kind: 'human' }, cwd: tmp });
   assert.doesNotMatch(next.stdout, /RELEASE WATCH/);
   assert.ok(S.readFlag().ackedAt, 'the next typed prompt in that session answers it');
 });
@@ -737,7 +737,7 @@ test('payload-origin', () => {
   S.openFlag({ version: '1', flags: flag, at: Date.now() });
   hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'one', cwd: tmp });
   assert.equal(S.readFlag().ackedAt, null);
-  hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'two', origin: { kind: 'human' }, cwd: tmp });
+  hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'ack', origin: { kind: 'human' }, cwd: tmp });
   const f = S.readFlag();
   assert.ok(f.ackedAt, 'acked at once, no transcript read'); assert.equal(f.ack.signal, 'payload-origin-human');
 });
@@ -1373,4 +1373,305 @@ test('status: an install newer than the armed releases is reported as not armed 
   assert.equal(JSON.parse(W.status(T2 + 60e3, { json: true, installed: inst2 })).pending.version, '9.9.9');
   assert.doesNotMatch(W.status(T2, { installed: installed() }), /not armed yet/);
   assert.equal(readFileSync(file('release-watch-run.json'), 'utf8'), before);
+});
+
+// ---- 0.31.71: ack intent, release owner first, clear removes the hold-session list (temp state dirs only) ----
+test('ack-intent: the ack wording acks; a question or a request for analysis does not', () => {
+  for (const yes of ['ack', 'Ack.', 'acknowledged', 'please acknowledge it', 'keep it', "it's fine", 'no rollback', 'ok, keep it, no rollback', 'looks fine', 'ack and no rollback', '[ack]']) assert.equal(S.isAckText(yes), true, yes);
+  for (const no of ['Well analysis please', 'why did it flag?', 'ack?', 'show me the numbers', 'ok', 'please', 'keep going with the other task', '', 'x'.repeat(200)]) assert.equal(S.isAckText(no), false, no);
+});
+
+test('ack-intent: a non-ack reply leaves the flag open and the countdown running', () => {
+  S.openFlag({ version: '1', flags: flag, at: T });
+  assert.ok(S.noteShown('s1', T));
+  assert.equal(S.noteCandidate({ sessionId: 's1', transcriptPath: 'fake', prompt: 'Well analysis please', at: T + 5 * MIN }), false);
+  assert.equal(S.noteCandidate({ sessionId: 's1', transcriptPath: 'fake', prompt: 'typed', payloadOrigin: { kind: 'human' }, at: T + 6 * MIN }), false, 'a human payload origin alone no longer acks');
+  assert.deepEqual(S.readFlag().candidates, []);
+  assert.equal(S.readFlag().ackedAt, null);
+  assert.ok(S.maybeHold({ holdMinutes: 30, at: T + 31 * MIN }), 'the countdown ran on: hold written');
+});
+
+test('ack-intent: an ack reply still needs the human origin', () => {
+  S.openFlag({ version: '1', flags: flag, at: T });
+  S.noteShown('s1', T);
+  assert.ok(S.noteCandidate({ sessionId: 's1', transcriptPath: 'fake', prompt: 'ack', at: T + 5 * MIN }));
+  assert.equal(S.confirmCandidates({ at: T + 6 * MIN, readTail: tailOf(urec(T + 5 * MIN, 'ack', { origin: { kind: 'peer' }, isMeta: true })) }), null);
+  assert.equal(S.readFlag().ackedAt, null);
+  assert.ok(S.noteCandidate({ sessionId: 's1', transcriptPath: 'fake', prompt: 'ack', payloadOrigin: { kind: 'human' }, at: T + 7 * MIN }), 'payload human origin plus ack wording acks');
+  assert.equal(S.readFlag().ack.signal, 'payload-origin-human');
+});
+
+test('ack-intent: the notice names the ack wording', () => {
+  S.openFlag({ version: '1', flags: flag, at: T });
+  assert.match(S.flagLine({ at: T }), /"ack", "keep it", "no rollback"/);
+});
+
+const putOwner = (session, at, transcriptPath) => S.writeJson(S.paths().owner, { session, at: iso(at), transcriptPath });
+function ownerFixture() {
+  const tp = join(tmp, 'owner.jsonl'); writeFileSync(tp, '{}\n');
+  S.writeJson(S.paths().run, { v: 2, releases: [{ version: '2', T }] });
+  S.openFlag({ version: '2', flags: flag, at: T + 10 * MIN });
+  return tp;
+}
+
+test('owner-first: a live owner sees the notice; other leads only after the delay', () => {
+  const tp = ownerFixture();
+  const at = T + 11 * MIN;
+  putOwner('owner-s', T + 2 * MIN, tp);
+  utimesSync(tp, new Date(at), new Date(at));
+  assert.match(S.flagLine({ at, sessionId: 'owner-s' }), /RELEASE WATCH/);
+  assert.equal(S.flagLine({ at, sessionId: 'other-s' }), null, 'others wait');
+  utimesSync(tp, new Date(T + 10 * MIN + S.OWNER_GRACE_MS), new Date(T + 10 * MIN + S.OWNER_GRACE_MS));
+  assert.equal(S.flagLine({ at: T + 10 * MIN + S.OWNER_GRACE_MS - 1000, sessionId: 'other-s' }), null);
+  assert.match(S.flagLine({ at: T + 10 * MIN + S.OWNER_GRACE_MS, sessionId: 'other-s' }), /RELEASE WATCH/, 'after the delay others see it too');
+  assert.match(S.flagLine({ at, sessionId: null }), /RELEASE WATCH/, 'an unknown caller keeps today\'s behaviour');
+});
+
+test('owner-first: no owner, an owner of an older install, an idle owner or a missing transcript keep today\'s behaviour', () => {
+  const tp = ownerFixture();
+  const at = T + 11 * MIN;
+  assert.match(S.flagLine({ at, sessionId: 'other-s' }), /RELEASE WATCH/, 'no owner record');
+  utimesSync(tp, new Date(at), new Date(at));
+  putOwner('owner-s', T - 3 * HOUR, tp);
+  assert.match(S.flagLine({ at, sessionId: 'other-s' }), /RELEASE WATCH/, 'owner noted an older install');
+  putOwner('owner-s', T + 2 * MIN, tp);
+  utimesSync(tp, new Date(at - 5 * HOUR), new Date(at - 5 * HOUR));
+  assert.match(S.flagLine({ at, sessionId: 'other-s' }), /RELEASE WATCH/, 'owner transcript idle for hours: not live');
+  putOwner('owner-s', T + 2 * MIN, join(tmp, 'missing.jsonl'));
+  assert.match(S.flagLine({ at, sessionId: 'other-s' }), /RELEASE WATCH/, 'owner transcript missing');
+});
+
+test('owner-first: the install hook records the installing lead as owner (a worker or another command does not)', () => {
+  const run = (payload) => spawnSync(process.execPath, [join(ROOT, 'hooks', 'hold-message.mjs'), '--event', 'post'], { input: JSON.stringify({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_response: '', ...payload }), env: env(), encoding: 'utf8', windowsHide: true, cwd: tmp });
+  run({ session_id: 'w', agent_id: 'a1', transcript_path: 't', tool_input: { command: 'claude plugin update agent-companion@agent-templates --scope user' } });
+  run({ session_id: 'l0', transcript_path: 't', tool_input: { command: 'ls' } });
+  assert.equal(S.readJson(S.paths().owner), null);
+  run({ session_id: 'lead-1', transcript_path: 'tp1', tool_input: { command: 'claude plugin marketplace update agent-templates && claude plugin update agent-companion@agent-templates --scope user' } });
+  assert.equal(S.readJson(S.paths().owner).session, 'lead-1');
+  assert.equal(S.readJson(S.paths().owner).transcriptPath, 'tp1');
+});
+
+test('owner-first: the prompt hook shows the owner first and holds the notice back from others', () => {
+  const tp = ownerFixture();
+  const at = T + 11 * MIN;
+  putOwner('owner-s', T + 2 * MIN, tp);
+  utimesSync(tp, new Date(at), new Date(at));
+  assert.equal(ctxOf(hookAt(['--watch'], { session_id: 'other-s', prompt: 'hello' }, at)), '');
+  assert.equal((S.readFlag().shownTo || {})['other-s'], undefined, 'not recorded as shown');
+  assert.match(ctxOf(hookAt(['--watch'], { session_id: 'owner-s', prompt: 'hello' }, at)), /RELEASE WATCH/);
+  assert.ok(S.readFlag().shownTo['owner-s']);
+});
+
+test('owner-first: a cleared notice shown while the flag is held back does not start the countdown for that session', () => {
+  const tp = ownerFixture();
+  const at = T + 11 * MIN;
+  putOwner('owner-s', T + 2 * MIN, tp);
+  utimesSync(tp, new Date(at), new Date(at));
+  S.writeJson(S.paths().heldSessions, { holdSince: iso(T - HOUR), sessions: [{ sessionId: 'other-s', agentId: null, cwd: '/w' }], clearedAt: iso(at - MIN), noticed: {} });
+  const out = ctxOf(hookAt(['--watch'], { session_id: 'other-s', prompt: 'hello' }, at));
+  assert.match(out, /hold was cleared/, 'the cleared notice is shown');
+  assert.doesNotMatch(out, /RELEASE WATCH/, 'the flag is held back for the owner');
+  assert.equal((S.readFlag().shownTo || {})['other-s'], undefined, 'not recorded as shown the flag');
+});
+
+test('isAckText: ordinary acks match, near-misses and questions do not', () => {
+  const yes = ['ack', 'Ack.', 'ACK!', 'yes ack it', 'ok ack', 'ack thanks', 'acked', 'ack it please', 'ack — keep it', 'ack - keep it', 'keep 0.31.71', 'ack 0.31.71', 'yes, ack it', 'ok, ack', "ack'd", 'keep it', 'no rollback', 'all good'];
+  const no = ["don't ack", 'no, roll back', 'ack and roll back', 'ack?', 'ok ack?', 'keep 0.31.71?', 'Well analysis please', 'why did it flag?', 'ok', 'yes', 'please', 'ack, keep going', 'roll back 0.31.71'];
+  for (const t of yes) assert.equal(S.isAckText(t), true, `ack: ${t}`);
+  for (const t of no) assert.equal(S.isAckText(t), false, `not ack: ${t}`);
+});
+
+test('compat: a 0.31.70 flag with no chain field still matches its cooldown keys; an old hook-signature key holds for the normalised name', () => {
+  const raw = 'hook-signature:PreToolUse:Bash exit 12 in /a/b/c.mjs';
+  S.openFlag({ version: '1', T, chain: T, flags: [{ name: 'queue-clears', value: 3.6, level: 3.6 }, { name: raw, value: 3, level: 3 }], at: T + MIN });
+  S.clear({ by: 'operator', at: T + 2 * MIN });
+  const f = S.readFlag();
+  delete f.chain; // 0.31.70 shape: no chain field, the cooldown key is the baseline anchor
+  S.writeJson(S.paths().flag, f);
+  assert.equal(S.openFlag({ version: '1', T, chain: T, flags: [{ name: 'queue-clears', value: 3.6, level: 3.6 }], at: T + 3 * MIN }), null, 'the old cooldown key still answers');
+  assert.equal(S.openFlag({ version: '1', T, chain: T, flags: [{ name: 'hook-signature:PreToolUse:Bash exit N in <path>', value: 3, level: 3 }], at: T + 3 * MIN }), null, 'the old raw signature name answers the normalised one');
+});
+
+test('clear: removes a stale hold-session list; keeps one that still owes messages', () => {
+  const listF = S.paths().heldSessions;
+  S.writeJson(listF, { holdSince: iso(T - HOUR), sessions: [{ sessionId: 'old', agentId: null }], clearedAt: iso(T - 13 * HOUR), noticed: {}, owed: { ids: [], unmapped: [], claimedBy: 'x' } });
+  S.openFlag({ version: '1', flags: flag, at: T });
+  S.clear({ by: 'operator', at: T + MIN });
+  assert.equal(existsSync(listF), false, 'the stale list of an earlier hold is gone');
+  S.writeJson(S.paths().hold, { since: iso(T), version: '1', reason: 'x', flags: [], clearedAt: null });
+  S.writeJson(listF, { holdSince: iso(T), sessions: [{ sessionId: 'lead-a', agentId: null, cwd: '/w' }], clearedAt: null, noticed: {} });
+  S.clear({ by: 'operator', at: T + 2 * MIN });
+  assert.ok(S.readJson(listF).owed, 'a lift keeps the list: its messages are owed to the next lead');
+  S.clear({ by: 'operator', at: T + 3 * MIN });
+  assert.ok(existsSync(listF), 'a second clear does not drop unclaimed owed messages');
+  S.takeOwedMessages('lead-b', T + 4 * MIN);
+  S.clear({ by: 'operator', at: T + 5 * MIN });
+  assert.ok(existsSync(listF), 'claimed but recent: a later clear keeps the list, unmapped leads still read it');
+  S.clear({ by: 'operator', at: T + 2 * MIN + S.OWED_TTL_MS + MIN });
+  assert.equal(existsSync(listF), false, 'older than the owed-message TTL: the next clear removes it');
+});
+
+test('clear: a second clear after the claim does not take the cleared notice from a held lead (review scenario)', () => {
+  const listF = S.paths().heldSessions;
+  S.writeJson(S.paths().hold, { since: iso(T), version: '1', reason: 'x', flags: [], clearedAt: null });
+  S.writeJson(listF, { holdSince: iso(T), sessions: [{ sessionId: 'lead-a', agentId: null, cwd: '/w' }], clearedAt: null, noticed: {} });
+  S.clear({ by: 'operator', at: T + MIN });                 // the lift: the list is kept and owes messages
+  S.takeOwedMessages('lead-b', T + 2 * MIN);                // the CLI clear's own hook claims them at once
+  S.clear({ by: 'operator', at: T + 3 * MIN });             // a retry or a flag-only clear
+  assert.match(S.clearedNotice('lead-a', T + 4 * MIN) || '', /hold was cleared/, 'the unmapped lead still gets its cleared notice');
+});
+
+test('clear: a list from an earlier hold is dropped when a new hold is lifted', () => {
+  const listF = S.paths().heldSessions;
+  S.writeJson(listF, { holdSince: iso(T - 5 * HOUR), sessions: [{ sessionId: 'old', agentId: null }], clearedAt: null, noticed: {} });
+  S.writeJson(S.paths().hold, { since: iso(T), version: '1', reason: 'x', flags: [], clearedAt: null });
+  const r = S.clear({ by: 'operator', at: T + MIN });
+  assert.equal(r.holdCleared, true);
+  assert.equal(existsSync(listF), false);
+});
+
+// ---- 0.31.71 check fixes: usage limit, signature workers, lead-hours ----
+const putWorker = (id, recs, finished = true) => {
+  const sd = join(claude, 'projects', 'C--p71', 'sess', 'subagents'); mkdirSync(sd, { recursive: true });
+  writeFileSync(join(sd, `agent-${id}.jsonl`), recs.map((l) => JSON.stringify(l)).join('\n'));
+  writeFileSync(join(sd, `agent-${id}.meta.json`), JSON.stringify({ finished, agentType: 'ac-sonnet-low' }));
+};
+const wts = (min) => new Date(T + HOUR + min * 60e3).toISOString();
+const prompt71 = (min) => ({ type: 'user', timestamp: wts(min), message: { role: 'user', content: 'Do the invented task.' } });
+const apiErr = (min, err) => ({ type: 'assistant', timestamp: wts(min), isApiErrorMessage: true, apiError: err, message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'error' }] } });
+const say = (min, text) => ({ type: 'assistant', timestamp: wts(min), requestId: `r${min}${text.length}`, message: { role: 'assistant', model: 'claude-sonnet-4', usage: { input_tokens: 10, output_tokens: 5 }, content: [{ type: 'text', text }] } });
+
+test('0.31.71 api-errors: usage-limit errors never count, an info line names the time; real api errors still flag', () => {
+  for (let i = 0; i < 4; i++) putWorker(`ul${i}`, [prompt71(i), apiErr(10 + i, 'usage_limit_reached')]);
+  let m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(m.workers.since.apiNonUsageWorkers, 0); assert.equal(m.workers.since.usageLimitWorkers, 4);
+  assert.ok(!W.evaluate(m, { minWorkers: 1 }).flags.some((f) => f.name === 'api-errors'), 'four usage-limit workers raise no flag');
+  const ev = W.evaluate(m, { minWorkers: 1 }).metrics.find((x) => x.name === 'api-errors');
+  assert.equal(ev.status, 'ok'); assert.match(ev.detail, /usage limit hit at 2026-03-01T11:10Z/);
+  for (let i = 0; i < 2; i++) putWorker(`real${i}`, [prompt71(i), apiErr(20 + i, 'overloaded_error')]);
+  m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(m.workers.since.apiNonUsageWorkers, 2);
+  assert.ok(W.evaluate(m, { minWorkers: 1 }).flags.some((f) => f.name === 'api-errors'));
+});
+
+test('0.31.71 no-final-status: workers that ended on the usage limit are out of numerator and denominator, counted apart', () => {
+  putWorker('ulA', [prompt71(0), say(1, 'working'), apiErr(5, 'usage_limit_reached')]);
+  putWorker('ulB', [prompt71(0), apiErr(6, 'usage_limit_reached')]);
+  putWorker('resumed', [prompt71(0), apiErr(5, 'usage_limit_reached'), say(30, 'done.\nSTATUS: done')]);
+  putWorker('none1', [prompt71(0), say(2, 'no status line here')]);
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR }); const ws = m.workers.since;
+  assert.equal(ws.usageLimitEnded, 2); assert.equal(ws.finished, 4); assert.equal(ws.noStatusFinished, 2);
+  assert.equal(ws.noStatusPct, 50, '1 none of 2 counted workers');
+  const ns = W.evaluate(m, { minWorkers: 1 }).metrics.find((x) => x.name === 'no-final-status');
+  assert.equal(ns.n, 2); assert.match(ns.detail, /2 usage-limit endings left out/);
+});
+
+test('0.31.71 hook-signature: distinct workers are counted, events shown next to them', () => {
+  const sig = (id, i) => ({ type: 'user', timestamp: wts(i), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `${id}-${i}`, is_error: true, content: 'PreToolUse:Write hook error: Failed running the hook script, exit code 2' }] } });
+  putWorker('loop', [prompt71(0), ...[1, 2, 3, 4, 5].map((i) => sig('loop', i))]);
+  let m = W.analyze({ T, nowMs: T + 3 * HOUR }); const k = Object.keys(m.hookSignatures.since)[0];
+  assert.equal(m.hookSignatures.since[k], 1, 'one worker'); assert.equal(m.hookSignatureEvents.since[k], 5, 'five events');
+  const flags = (mm) => W.evaluate(mm, { minWorkers: 1 }).flags.filter((f) => f.name.startsWith('hook-signature'));
+  assert.equal(flags(m).length, 0, 'one looping worker is not a new-signature flag');
+  for (let i = 0; i < 4; i++) putWorker(`w${i}`, [prompt71(0), sig(`w${i}`, 1)]);
+  m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(m.hookSignatures.since[k], 5);
+  const f = flags(m); assert.equal(f.length, 1); assert.match(f[0].detail, /5 workers, 9 events/);
+});
+
+test('0.31.71 guard:delegation/deny: rate per active lead-hour, more leads at once do not raise it', () => {
+  const base = Array.from({ length: 24 }, (_, i) => ({ at: T - 7 * DAY + i * HOUR + 60e3, session_id: 'L0' }));
+  const baseDen = base.map((r) => ({ at: r.at + 1000, guard: 'delegation', outcome: 'deny', session_id: 'L0' }));
+  const since = []; const den = [];
+  for (const L of ['A', 'B', 'C']) for (let h = 0; h < 4; h++) { since.push({ at: T + h * HOUR + 60e3, session_id: L }); den.push({ at: T + h * HOUR + 2000, guard: 'delegation', outcome: 'deny', session_id: L }); }
+  putRows('spawns.jsonl', [...base, ...since]); putRows('denials.jsonl', [...baseDen, ...den]);
+  let m = W.analyze({ T, nowMs: T + 4 * HOUR });
+  assert.deepEqual(m.leadHours, { since: 12, base: 24 });
+  const dg = (mm) => W.evaluate(mm).metrics.find((x) => x.name === 'guard:delegation/deny');
+  assert.equal(dg(m).value, 1); assert.equal(dg(m).base, 1); assert.equal(dg(m).status, 'ok', 'three leads at once: the old per-clock-hour rate (3/h vs 0.14/h) would have flagged');
+  putRows('denials.jsonl', [...baseDen, ...den, ...den.map((r) => ({ ...r, at: r.at + 500 })), ...den.map((r) => ({ ...r, at: r.at + 900 })), ...den.map((r) => ({ ...r, at: r.at + 1500 }))]);
+  m = W.analyze({ T, nowMs: T + 4 * HOUR });
+  assert.equal(dg(m).status, 'flag', 'four times the rate per lead-hour still flags');
+});
+
+// ---- 0.31.71 leg C: per-version worker split, flag stamps, designed denies ----
+test('0.31.71 per-version split: a worker belongs to the release in its spawn row; time-based only when the row is missing, and labelled', () => {
+  const T2 = T + 3 * HOUR;
+  const tdir = join(claude, 'agent-companion', 'telemetry'); mkdirSync(tdir, { recursive: true });
+  writeFileSync(join(tdir, 'spawns.jsonl'), [rowj({ at: T + 3.5 * HOUR, guard_version: '1.0.0', tool_use_id: 'toolu_A', session_id: 's' }), rowj({ at: T - 2 * HOUR })].join(''));
+  const sd = join(claude, 'projects', 'C--p71c', 'sess', 'subagents'); mkdirSync(sd, { recursive: true });
+  const mk = (id, toolUseId) => {
+    writeFileSync(join(sd, `agent-${id}.jsonl`), JSON.stringify({ type: 'user', timestamp: iso(T2 + HOUR), message: { role: 'user', content: 'task' } }));
+    writeFileSync(join(sd, `agent-${id}.meta.json`), JSON.stringify({ finished: true, agentType: 'ac-sonnet-low', ...(toolUseId ? { toolUseId } : {}) }));
+  };
+  mk('A', 'toolu_A'); mk('B', null);
+  const rel = [{ version: '1.0.0', T }, { version: '1.1.0', T: T2 }];
+  const m = W.analyze({ T: T2, nowMs: T2 + 6 * HOUR, winFrom: T, baseFrom: T - 7 * 24 * HOUR, baseTo: T, releases: rel });
+  assert.equal(m.byVersion['1.0.0'].workers.since.n, 1, 'worker A started after the second install but its spawn row says 1.0.0');
+  assert.equal(m.byVersion['1.1.0'].workers.since.n, 1, 'worker B has no spawn row: time-attributed to the newest release');
+  assert.deepEqual(m.workerVersionBasis, { spawn: 1, time: 1 });
+});
+
+test('0.31.71 flag stamps: T, version and check name the release and the check that produced the flags, not the chain base', () => {
+  const T1 = T + 2 * HOUR;
+  W.tick({ at: T + HOUR, installed: instV('1.0.0', T), run: () => metrics(), standingRun: none });
+  W.tick({ at: T1 + 1.5 * HOUR, installed: instV('1.1.0', T1), run: flagged, standingRun: none });
+  const f = S.readFlag();
+  assert.equal(f.version, '1.1.0'); assert.equal(Date.parse(f.T), T1); assert.equal(f.check, '+1h'); assert.equal(Date.parse(f.chain), T, 'the chain base is kept apart');
+});
+
+test('0.31.71 flag stamps: an older release due alone is named, not the newest installed one', () => {
+  W.tick({ at: T + HOUR, installed: instV('1.0.0', T), run: () => metrics(), standingRun: none });
+  W.tick({ at: T + 4 * HOUR + 60e3, installed: instV('1.1.0', T + 3.5 * HOUR), run: flagged, standingRun: none });
+  const f = S.readFlag();
+  assert.equal(f.version, '1.0.0'); assert.equal(Date.parse(f.T), T); assert.equal(f.check, '+4h');
+});
+
+test('0.31.71 designed denies: a guard deny that works as designed is not a hook error and not a signature; real errors still flag', () => {
+  const res = (id, i, text) => ({ type: 'user', timestamp: wts(i), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `${id}-${i}`, is_error: true, content: text }] } });
+  const designed = [
+    'PreToolUse:PowerShell hook error: Heavy command (build (box 6)) not run (rewrite does not apply in this permission mode). Run it as: node queue.mjs',
+    'PreToolUse:Bash hook error: git worktree remove not run: on Windows it follows junctions and directory symlinks inside the tree.',
+    'PreToolUse:Write hook error: Check in with the lead before building more beyond the brief.',
+  ];
+  designed.forEach((txt, i) => putWorker(`d${i}`, [prompt71(0), res(`d${i}`, 1, txt)]));
+  putWorker('real1', [prompt71(0), res('real1', 1, 'PreToolUse:Bash hook error: Failed running /opt/tools/a/x.mjs: exit code 3 in box 4')]);
+  putWorker('real2', [prompt71(0), res('real2', 1, 'PreToolUse:Bash hook error: Failed running /opt/tools/b/x.mjs: exit code 7 in box 9')]);
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(m.workers.since.hookErrorWorkersPct, 40, 'only the two real errors count');
+  const keys = Object.keys(m.hookSignatures.since);
+  assert.equal(keys.length, 1, `one normalised signature, got ${JSON.stringify(keys)}`);
+  assert.equal(m.hookSignatures.since[keys[0]], 2);
+});
+
+test('designed-denies: prefixes and normalisation', async () => {
+  const D = await import('../hooks/lib/designed-denies.mjs');
+  assert.ok(D.isDesignedDeny('Heavy command (test (box 12)) not run')); assert.ok(!D.isDesignedDeny('Heavy command'));
+  assert.ok(!D.isDesignedDeny('TypeError: x is not a function'));
+  assert.equal(D.normalizeSignature('exit 12 in /a/b/c.mjs and C:\\x\\y.js'), 'exit N in <path> and <path>');
+});
+
+test('designed-denies: every guard deny text is listed, and a crash still is not', async () => {
+  const D = await import('../hooks/lib/designed-denies.mjs');
+  const { ENV_MSG } = await import('../hooks/lib/env-dump-guard.mjs');
+  const { KILL_MSG } = await import('../hooks/lib/process-kill-guard.mjs');
+  const { PUSH_DELETE_MSG } = await import('../hooks/lib/push-delete-guard.mjs');
+  const { PY_MSG } = await import('../hooks/lib/python-stdin.mjs');
+  const { WRITER_DENY_REASON } = await import('../hooks/lib/scope-tripwire.mjs');
+  const { denyText, streakPrefix } = await import('../hooks/lib/handoff-limit.mjs');
+  const { workerWaitDenyText } = await import('../hooks/lib/poll-guard.mjs');
+  const { HEAVY_DENY_PREFIX } = await import('../hooks/lib/resource-gate.mjs');
+  const { WORKTREE_DENY_PREFIX } = await import('../hooks/lib/worktree-remove.mjs');
+  const texts = { ENV_MSG, KILL_MSG, PUSH_DELETE_MSG, PY_MSG, WRITER_DENY_REASON, HEAVY: `${HEAVY_DENY_PREFIX}test, box 12) not run`, WORKTREE: `${WORKTREE_DENY_PREFIX}: on Windows`,
+    CONTEXT: denyText(150000, 140000), STREAK: streakPrefix(7) + denyText(150000, 140000), SLEEP: workerWaitDenyText('/p', 10),
+    GIT: 'DESTRUCTIVE GIT (backup rule, no exceptions): first create', JUNCTION: 'Git Bash `rm -rf` follows an NTFS junction INTO its target', SUBAGENT: 'Not shown: you are a subagent' };
+  for (const [k, t] of Object.entries(texts)) assert.ok(D.isDesignedDeny(t), `${k} is a designed deny`);
+  // a guard that exports a *_MSG constant has a deny the list must know: a new one that is missing fails here
+  const libDir = join(ROOT, 'hooks', 'lib');
+  for (const f of readdirSync(libDir).filter((x) => x.endsWith('.mjs'))) {
+    if (!/export const [A-Z_]*_MSG\b/.test(readFileSync(join(libDir, f), 'utf8'))) continue;
+    const mod = await import(pathToFileURL(join(libDir, f)).href);
+    for (const [name, val] of Object.entries(mod)) if (/_MSG$/.test(name) && typeof val === 'string') assert.ok(D.isDesignedDeny(val), `${f} ${name} is missing from designed-denies.mjs`);
+  }
+  for (const crash of ['TypeError: Cannot read properties of undefined', 'Error: Cannot find module', 'SyntaxError: Unexpected token', '[agent-companion] hook crashed']) assert.ok(!D.isDesignedDeny(crash), crash);
 });

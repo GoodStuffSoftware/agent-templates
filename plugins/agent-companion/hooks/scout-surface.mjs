@@ -295,7 +295,7 @@ try {
 
   // Release watch: an open unanswered flag or a hold shows at every session start until answered or cleared (never marked seen).
   let watchLine = null;
-  try { watchLine = unattended() ? null : releaseWatchLine(); } catch { watchLine = null; }
+  try { watchLine = unattended() ? null : releaseWatchLine({ sessionId: p.session_id }); } catch { watchLine = null; }
   // Standing health: one attended line per day when the daily look has findings (reports only, never a hold).
   let standingPart = null;
   try { standingPart = unattended() ? null : standingLine(); } catch { standingPart = null; }

@@ -35,6 +35,7 @@ import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isCloudSession } from './context.mjs';
 import { holdDenyMessage } from './release-watch-state.mjs';
+export const HEAVY_DENY_PREFIX = 'Heavy command ('; // the deny text starts with it; designed-denies.mjs lists it
 
 const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts');
 export const GATE_MODES = ['rewrite', 'deny', 'hint', 'off'];
@@ -969,7 +970,7 @@ export async function gateDecision(command, { cwd, mode = DEFAULT_GATE_MODE, env
     try { listed = (await import('./project-commands.mjs')).listedCommandFor(classes, cwd).trim(); } catch { /* fail open */ }
     return {
       action: 'deny', classes, command: wrapped,
-      text: `Heavy command (${weight}) not run${why}. ${how}${bg}${listed ? `${listed} ` : ''}Prefix RESOURCE_QUEUE=0 only when the queue itself is broken.`,
+      text: `${HEAVY_DENY_PREFIX}${weight}) not run${why}. ${how}${bg}${listed ? `${listed} ` : ''}Prefix RESOURCE_QUEUE=0 only when the queue itself is broken.`,
     };
   } catch { return none; }
 }
