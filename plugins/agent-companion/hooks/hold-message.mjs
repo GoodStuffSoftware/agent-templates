@@ -10,7 +10,7 @@
 
 import { openSync, readSync, closeSync, fstatSync } from 'node:fs';
 import { readStdin, passthrough } from './lib/context.mjs';
-import { MESSAGE_LINE, withoutSelf, clearInstruction, notePendingMessages, readPendingMessages, settlePendingMessages, takeOwedMessages } from './lib/release-watch-state.mjs';
+import { MESSAGE_LINE, withoutSelf, clearInstruction, notePendingMessages, readPendingMessages, settlePendingMessages, takeOwedMessages, INSTALL_CMD_RE, noteInstaller } from './lib/release-watch-state.mjs';
 
 export const CLEAR_CMD_RE = /release-watch\.mjs["']?\s+clear(?:\s|$)/;
 const ID_RE = /^local_[A-Za-z0-9-]+$/;
@@ -55,9 +55,11 @@ try {
   const p = readStdin();
   const event = process.argv[process.argv.indexOf('--event') + 1];
   if (event === 'post') {
-    if (p.agent_id || !p.session_id || p.tool_name !== 'Bash') passthrough();
+    if (!p.session_id || p.tool_name !== 'Bash') passthrough();
     const cmd = String((p.tool_input && p.tool_input.command) || '');
-    if (!CLEAR_CMD_RE.test(cmd)) passthrough();
+    // The release owner sees the watch notice first. Only a lead's own install is noted (a worker's transcript path is not the lead's).
+    if (INSTALL_CMD_RE.test(cmd) && !p.agent_id) noteInstaller(p.session_id, p.transcript_path);
+    if (p.agent_id || !CLEAR_CMD_RE.test(cmd)) passthrough();
     const ids = withoutSelf(idsFromOutput(p.tool_response), p.session_id);
     takeOwedMessages(p.session_id); // this lead was told by the clear's output: no other lead is told again
     if (!ids.length) passthrough();

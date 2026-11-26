@@ -83,7 +83,7 @@ try {
           if (wantsClear || (p.origin && p.origin.kind === 'human') || !AUTOMATED_MARKER_RE.test(prompt)) {
             noteCandidate({ sessionId: p.session_id, transcriptPath: p.transcript_path, prompt, payloadOrigin: p.origin, at });
           }
-          watch = releaseWatchLine({ at });
+          watch = releaseWatchLine({ at, sessionId: p.session_id });
           if (watch && wantsClear) watch += ' The "clear hold" words could not be confirmed as typed by the operator yet: ask the operator to repeat "clear hold", or run the clear command after the operator says so.';
           if (watch && isHoldActive()) noteHeld(p, at);
           if (!watch) watch = clearedNotice(p.session_id, at);

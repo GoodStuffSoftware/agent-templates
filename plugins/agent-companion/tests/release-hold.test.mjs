@@ -241,14 +241,14 @@ test('confirm: the human record is found even when more than 256 KB follows it; 
   // Past the hard cap the record is out of reach: no ack, and the candidate is kept until the TTL.
   S.openFlag({ version: '10', flags: [{ name: 'queue-denied', value: 20, detail: 'y' }], at: t0 + 10e3 });
   S.noteShown('s1', t0 + 11e3);
-  const big = [urec(t0 + 12e3, 'second reply'), ...Array.from({ length: 17 }, (_, i) => filler(t0 + 13e3 + i, 1024 * 1024))];
+  const big = [urec(t0 + 12e3, 'acknowledged'), ...Array.from({ length: 17 }, (_, i) => filler(t0 + 13e3 + i, 1024 * 1024))];
   const tp2 = mkTranscript(fx, 'huge', big);
-  assert.ok(S.noteCandidate({ sessionId: 's1', transcriptPath: tp2, prompt: 'second reply', at: t0 + 14e3 }));
+  assert.ok(S.noteCandidate({ sessionId: 's1', transcriptPath: tp2, prompt: 'acknowledged', at: t0 + 14e3 }));
   assert.equal(S.confirmCandidates({ at: t0 + 15e3 }), null, 'a record more than 16 MB back is not read');
 }));
 
 test('fresh session: the flag shown at SessionStart is recorded, so the first reply typed there acks (also one starting with "[" or "<")', () => withFx(() => {
-  for (const reply of ['sounds good', '[ok] ship it', '<3 thanks, go on']) {
+  for (const reply of ['ack', '[ack]', '<ack>']) {
     S.openFlag({ version: '9', flags: freshFlag(), at: Date.now() });
     const out = startHook('fresh-1');
     assert.match(out.stdout, /RELEASE WATCH 9/, 'SessionStart shows the flag');
@@ -267,7 +267,7 @@ test('prompt: only exact automated markers are skipped; a bracketed reply with n
   startHook('s-m');
   promptHook('s-m', '<task-notification>done</task-notification>', { origin: null });
   assert.deepEqual(readFlagNow().candidates, [], 'a task-notification text is no candidate');
-  promptHook('s-m', '[bracket reply]');
+  promptHook('s-m', '[ack]');
   assert.equal(readFlagNow().candidates.length, 1);
   assert.equal(readFlagNow().ackedAt, null);
 }));
@@ -278,8 +278,8 @@ test('transcript only: no origin in the payload, the typed record in the transcr
     const sid = `s-t-${name}`;
     promptHook(sid, 'first look');                       // shows the flag: the session is now recorded as shown
     assert.ok(readFlagNow().shownTo[sid]);
-    const tp = mkTranscript(fx, `tr-${name}`, [urec(Date.now() + 200, 'real reply here', origin)]);
-    promptHook(sid, 'real reply here', { transcript_path: tp });   // payload carries no origin: a candidate
+    const tp = mkTranscript(fx, `tr-${name}`, [urec(Date.now() + 200, 'ack', origin)]);
+    promptHook(sid, 'ack', { transcript_path: tp });   // payload carries no origin: a candidate
     assert.equal(readFlagNow().ackedAt, null, 'not acked on the turn itself');
     assert.equal(readFlagNow().candidates.length, 1);
     promptHook(sid, 'anything', { transcript_path: tp });          // the next hook run confirms against the transcript

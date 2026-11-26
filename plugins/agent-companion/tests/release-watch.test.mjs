@@ -29,7 +29,7 @@ const flag = [{ name: 'queue-clears', value: 3.6, detail: 'x' }];
 const iso = (t) => new Date(t).toISOString();
 // A reply the way the hook records it: the flag was shown to the session, then a typed prompt (origin human in the transcript) is confirmed.
 const humanRec = (at, prompt) => JSON.stringify({ type: 'user', origin: { kind: 'human' }, timestamp: iso(at), message: { content: prompt } });
-const humanAck = (at, { session = 's1', prompt = 'hi' } = {}) => {
+const humanAck = (at, { session = 's1', prompt = 'ack' } = {}) => {
   S.noteShown(session, at);
   S.noteCandidate({ sessionId: session, transcriptPath: 'fake', prompt, at: at + 1000 });
   return S.confirmCandidates({ at: at + 2000, readTail: () => [humanRec(at + 1000, prompt)] });
@@ -298,7 +298,7 @@ test('hooks: lead sees the line on every prompt, a subagent never does, a prompt
   assert.match(lead.stdout, /RELEASE WATCH 9/);
   const plain = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'again', cwd: tmp });
   assert.match(plain.stdout, /RELEASE WATCH/, 'a prompt with no human origin proof no longer acks');
-  const after = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'typed', origin: { kind: 'human' }, cwd: tmp });
+  const after = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'ack', origin: { kind: 'human' }, cwd: tmp });
   assert.doesNotMatch(after.stdout, /RELEASE WATCH/, 'answered by the typed prompt');
 });
 test('hooks: a task notification is not a reply', () => {
@@ -342,7 +342,7 @@ test('delivery timeline: the tick writes the flag, the lead is idle for 2 h, the
 test('delivery: a later prompt of the same session shows the shrinking countdown without moving the start; showing never acks; a worse flag restarts it', () => {
   S.openFlag({ version: '7.7.7', flags: [{ name: 'queue-clears', value: 3, level: 3, detail: 'x' }], at: T });
   hookAt(['--watch'], { session_id: 'lead-a', prompt: 'one' }, T + HOUR);
-  const later = ctxOf(hookAt(['--watch'], { session_id: 'lead-a', prompt: 'two' }, T + HOUR + 10 * 60e3));
+  const later = ctxOf(hookAt(['--watch'], { session_id: 'lead-a', prompt: 'ack' }, T + HOUR + 10 * 60e3));
   assert.match(later, /Hold countdown: 20 min left/);
   assert.equal(S.readFlag().notifiedAt, iso(T + HOUR)); assert.equal(S.readFlag().ackedAt, null);
   // a flag that is new, or has more than doubled, is a new notification: unseen again until a session shows it
@@ -719,7 +719,7 @@ test('same-turn-not-ack', () => {
   assert.match(first.stdout, /RELEASE WATCH/, 'the first typed prompt is the turn that shows the flag');
   assert.equal(S.readFlag().ackedAt, null, 'the prompt typed before the flag was shown does not answer it');
   assert.ok(S.readFlag().shownTo.s);
-  const next = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'second', origin: { kind: 'human' }, cwd: tmp });
+  const next = hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'ack', origin: { kind: 'human' }, cwd: tmp });
   assert.doesNotMatch(next.stdout, /RELEASE WATCH/);
   assert.ok(S.readFlag().ackedAt, 'the next typed prompt in that session answers it');
 });
@@ -737,7 +737,7 @@ test('payload-origin', () => {
   S.openFlag({ version: '1', flags: flag, at: Date.now() });
   hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'one', cwd: tmp });
   assert.equal(S.readFlag().ackedAt, null);
-  hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'two', origin: { kind: 'human' }, cwd: tmp });
+  hook('runaway-notice.mjs', { hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'ack', origin: { kind: 'human' }, cwd: tmp });
   const f = S.readFlag();
   assert.ok(f.ackedAt, 'acked at once, no transcript read'); assert.equal(f.ack.signal, 'payload-origin-human');
 });
@@ -1373,4 +1373,117 @@ test('status: an install newer than the armed releases is reported as not armed 
   assert.equal(JSON.parse(W.status(T2 + 60e3, { json: true, installed: inst2 })).pending.version, '9.9.9');
   assert.doesNotMatch(W.status(T2, { installed: installed() }), /not armed yet/);
   assert.equal(readFileSync(file('release-watch-run.json'), 'utf8'), before);
+});
+
+// ---- 0.31.71: ack intent, release owner first, clear removes the hold-session list (temp state dirs only) ----
+test('ack-intent: the ack wording acks; a question or a request for analysis does not', () => {
+  for (const yes of ['ack', 'Ack.', 'acknowledged', 'please acknowledge it', 'keep it', "it's fine", 'no rollback', 'ok, keep it, no rollback', 'looks fine', 'ack and no rollback', '[ack]']) assert.equal(S.isAckText(yes), true, yes);
+  for (const no of ['Well analysis please', 'why did it flag?', 'ack?', 'show me the numbers', 'ok', 'please', 'keep going with the other task', '', 'x'.repeat(200)]) assert.equal(S.isAckText(no), false, no);
+});
+
+test('ack-intent: a non-ack reply leaves the flag open and the countdown running', () => {
+  S.openFlag({ version: '1', flags: flag, at: T });
+  assert.ok(S.noteShown('s1', T));
+  assert.equal(S.noteCandidate({ sessionId: 's1', transcriptPath: 'fake', prompt: 'Well analysis please', at: T + 5 * MIN }), false);
+  assert.equal(S.noteCandidate({ sessionId: 's1', transcriptPath: 'fake', prompt: 'typed', payloadOrigin: { kind: 'human' }, at: T + 6 * MIN }), false, 'a human payload origin alone no longer acks');
+  assert.deepEqual(S.readFlag().candidates, []);
+  assert.equal(S.readFlag().ackedAt, null);
+  assert.ok(S.maybeHold({ holdMinutes: 30, at: T + 31 * MIN }), 'the countdown ran on: hold written');
+});
+
+test('ack-intent: an ack reply still needs the human origin', () => {
+  S.openFlag({ version: '1', flags: flag, at: T });
+  S.noteShown('s1', T);
+  assert.ok(S.noteCandidate({ sessionId: 's1', transcriptPath: 'fake', prompt: 'ack', at: T + 5 * MIN }));
+  assert.equal(S.confirmCandidates({ at: T + 6 * MIN, readTail: tailOf(urec(T + 5 * MIN, 'ack', { origin: { kind: 'peer' }, isMeta: true })) }), null);
+  assert.equal(S.readFlag().ackedAt, null);
+  assert.ok(S.noteCandidate({ sessionId: 's1', transcriptPath: 'fake', prompt: 'ack', payloadOrigin: { kind: 'human' }, at: T + 7 * MIN }), 'payload human origin plus ack wording acks');
+  assert.equal(S.readFlag().ack.signal, 'payload-origin-human');
+});
+
+test('ack-intent: the notice names the ack wording', () => {
+  S.openFlag({ version: '1', flags: flag, at: T });
+  assert.match(S.flagLine({ at: T }), /"ack", "keep it", "no rollback"/);
+});
+
+const putOwner = (session, at, transcriptPath) => S.writeJson(S.paths().owner, { session, at: iso(at), transcriptPath });
+function ownerFixture() {
+  const tp = join(tmp, 'owner.jsonl'); writeFileSync(tp, '{}\n');
+  S.writeJson(S.paths().run, { v: 2, releases: [{ version: '2', T }] });
+  S.openFlag({ version: '2', flags: flag, at: T + 10 * MIN });
+  return tp;
+}
+
+test('owner-first: a live owner sees the notice; other leads only after the delay', () => {
+  const tp = ownerFixture();
+  const at = T + 11 * MIN;
+  putOwner('owner-s', T + 2 * MIN, tp);
+  utimesSync(tp, new Date(at), new Date(at));
+  assert.match(S.flagLine({ at, sessionId: 'owner-s' }), /RELEASE WATCH/);
+  assert.equal(S.flagLine({ at, sessionId: 'other-s' }), null, 'others wait');
+  utimesSync(tp, new Date(T + 10 * MIN + S.OWNER_GRACE_MS), new Date(T + 10 * MIN + S.OWNER_GRACE_MS));
+  assert.equal(S.flagLine({ at: T + 10 * MIN + S.OWNER_GRACE_MS - 1000, sessionId: 'other-s' }), null);
+  assert.match(S.flagLine({ at: T + 10 * MIN + S.OWNER_GRACE_MS, sessionId: 'other-s' }), /RELEASE WATCH/, 'after the delay others see it too');
+  assert.match(S.flagLine({ at, sessionId: null }), /RELEASE WATCH/, 'an unknown caller keeps today\'s behaviour');
+});
+
+test('owner-first: no owner, an owner of an older install, an idle owner or a missing transcript keep today\'s behaviour', () => {
+  const tp = ownerFixture();
+  const at = T + 11 * MIN;
+  assert.match(S.flagLine({ at, sessionId: 'other-s' }), /RELEASE WATCH/, 'no owner record');
+  utimesSync(tp, new Date(at), new Date(at));
+  putOwner('owner-s', T - 3 * HOUR, tp);
+  assert.match(S.flagLine({ at, sessionId: 'other-s' }), /RELEASE WATCH/, 'owner noted an older install');
+  putOwner('owner-s', T + 2 * MIN, tp);
+  utimesSync(tp, new Date(at - 5 * HOUR), new Date(at - 5 * HOUR));
+  assert.match(S.flagLine({ at, sessionId: 'other-s' }), /RELEASE WATCH/, 'owner transcript idle for hours: not live');
+  putOwner('owner-s', T + 2 * MIN, join(tmp, 'missing.jsonl'));
+  assert.match(S.flagLine({ at, sessionId: 'other-s' }), /RELEASE WATCH/, 'owner transcript missing');
+});
+
+test('owner-first: the install hook records the installing lead as owner (a worker or another command does not)', () => {
+  const run = (payload) => spawnSync(process.execPath, [join(ROOT, 'hooks', 'hold-message.mjs'), '--event', 'post'], { input: JSON.stringify({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_response: '', ...payload }), env: env(), encoding: 'utf8', windowsHide: true, cwd: tmp });
+  run({ session_id: 'w', agent_id: 'a1', transcript_path: 't', tool_input: { command: 'claude plugin update agent-companion@agent-templates --scope user' } });
+  run({ session_id: 'l0', transcript_path: 't', tool_input: { command: 'ls' } });
+  assert.equal(S.readJson(S.paths().owner), null);
+  run({ session_id: 'lead-1', transcript_path: 'tp1', tool_input: { command: 'claude plugin marketplace update agent-templates && claude plugin update agent-companion@agent-templates --scope user' } });
+  assert.equal(S.readJson(S.paths().owner).session, 'lead-1');
+  assert.equal(S.readJson(S.paths().owner).transcriptPath, 'tp1');
+});
+
+test('owner-first: the prompt hook shows the owner first and holds the notice back from others', () => {
+  const tp = ownerFixture();
+  const at = T + 11 * MIN;
+  putOwner('owner-s', T + 2 * MIN, tp);
+  utimesSync(tp, new Date(at), new Date(at));
+  assert.equal(ctxOf(hookAt(['--watch'], { session_id: 'other-s', prompt: 'hello' }, at)), '');
+  assert.equal((S.readFlag().shownTo || {})['other-s'], undefined, 'not recorded as shown');
+  assert.match(ctxOf(hookAt(['--watch'], { session_id: 'owner-s', prompt: 'hello' }, at)), /RELEASE WATCH/);
+  assert.ok(S.readFlag().shownTo['owner-s']);
+});
+
+test('clear: removes a stale hold-session list; keeps one that still owes messages', () => {
+  const listF = S.paths().heldSessions;
+  S.writeJson(listF, { holdSince: iso(T - HOUR), sessions: [{ sessionId: 'old', agentId: null }], clearedAt: iso(T - 30 * MIN), noticed: {}, owed: { ids: [], unmapped: [], claimedBy: 'x' } });
+  S.openFlag({ version: '1', flags: flag, at: T });
+  S.clear({ by: 'operator', at: T + MIN });
+  assert.equal(existsSync(listF), false, 'the stale list of an earlier hold is gone');
+  S.writeJson(S.paths().hold, { since: iso(T), version: '1', reason: 'x', flags: [], clearedAt: null });
+  S.writeJson(listF, { holdSince: iso(T), sessions: [{ sessionId: 'lead-a', agentId: null, cwd: '/w' }], clearedAt: null, noticed: {} });
+  S.clear({ by: 'operator', at: T + 2 * MIN });
+  assert.ok(S.readJson(listF).owed, 'a lift keeps the list: its messages are owed to the next lead');
+  S.clear({ by: 'operator', at: T + 3 * MIN });
+  assert.ok(existsSync(listF), 'a second clear does not drop unclaimed owed messages');
+  S.takeOwedMessages('lead-b', T + 4 * MIN);
+  S.clear({ by: 'operator', at: T + 5 * MIN });
+  assert.equal(existsSync(listF), false, 'claimed: the next clear removes the list');
+});
+
+test('clear: a list from an earlier hold is dropped when a new hold is lifted', () => {
+  const listF = S.paths().heldSessions;
+  S.writeJson(listF, { holdSince: iso(T - 5 * HOUR), sessions: [{ sessionId: 'old', agentId: null }], clearedAt: null, noticed: {} });
+  S.writeJson(S.paths().hold, { since: iso(T), version: '1', reason: 'x', flags: [], clearedAt: null });
+  const r = S.clear({ by: 'operator', at: T + MIN });
+  assert.equal(r.holdCleared, true);
+  assert.equal(existsSync(listF), false);
 });
