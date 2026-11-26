@@ -34,7 +34,7 @@
 // config map because the API cannot read them back.
 
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, appendFileSync, statSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { opt, stateFile, telemetryDir, tailRecords } from '../../hooks/lib/context.mjs';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
@@ -226,18 +226,35 @@ export function parseTokenSource(src) {
 }
 const homePath = (p) => (p === '~' ? homedir() : /^~[\\/]/.test(p) ? join(homedir(), p.slice(2)) : p);
 const keyFailure = (msg) => Object.assign(new Error(msg), { keyFailure: true });
+// Decodes a token file's bytes: a UTF-16 BOM (what Windows PowerShell 5.1 `>` and Out-File write) or an unmarked UTF-16 pattern
+// (ASCII text with a NUL in every other byte) decodes as UTF-16; anything else is UTF-8 (a UTF-8 BOM is stripped by trim).
+function decodeTokenBytes(b) {
+  if (b.length >= 2 && b[0] === 0xff && b[1] === 0xfe) return b.subarray(2).toString('utf16le');
+  if (b.length >= 2 && b[0] === 0xfe && b[1] === 0xff) return Buffer.from(b.subarray(2)).swap16().toString('utf16le');
+  if (b.length >= 2 && b.length % 2 === 0 && b[0] !== 0 && b[1] === 0) return b.toString('utf16le');
+  if (b.length >= 2 && b.length % 2 === 0 && b[0] === 0 && b[1] !== 0) return Buffer.from(b).swap16().toString('utf16le');
+  return b.toString('utf8');
+}
+// A token holds no NUL or other control character (Node would quote part of it in a spawn error); messages name the source only.
+const PLAIN_TOKEN = /^[^\u0000-\u001f\u007f]+$/;
 export function bwsToken(env = process.env, tokenSource = undefined) {
   const src = tokenSource === undefined ? opt('api_bws_token_source', DEFAULT_BWS_TOKEN_SOURCE) : tokenSource;
   const p = parseTokenSource(src);
   if (!p) throw keyFailure('api_bws_token_source must be env:<NAME> or file:<path>');
   if (p.kind === 'env') {
     if (!env[p.name]) throw keyFailure(`${p.name} is not set`);
+    if (!PLAIN_TOKEN.test(String(env[p.name]))) throw keyFailure(`${p.name} is not a plain-text token`);
     return env[p.name];
   }
-  if (env[BWS_TOKEN_ENV]) return env[BWS_TOKEN_ENV];
+  if (env[BWS_TOKEN_ENV]) {
+    if (!PLAIN_TOKEN.test(String(env[BWS_TOKEN_ENV]))) throw keyFailure(`${BWS_TOKEN_ENV} is not a plain-text token`);
+    return env[BWS_TOKEN_ENV];
+  }
+  if (!/^~([\\/]|$)/.test(p.name) && !isAbsolute(p.name)) throw keyFailure(`Bitwarden token file path must be absolute or start with ~ (file:${p.name})`);
   let v;
-  try { v = String(readFileSync(homePath(p.name), 'utf8')).trim(); } catch { throw keyFailure(`Bitwarden token file is missing or unreadable (file:${p.name})`); }
+  try { v = decodeTokenBytes(readFileSync(homePath(p.name))).trim(); } catch { throw keyFailure(`Bitwarden token file is missing or unreadable (file:${p.name})`); }
   if (!v) throw keyFailure(`Bitwarden token file is empty (file:${p.name})`);
+  if (!PLAIN_TOKEN.test(v)) throw keyFailure(`Bitwarden token file is not plain text (file:${p.name})`);
   return v;
 }
 
@@ -267,7 +284,9 @@ export function resolveKey(src, env = process.env, tokenSource = undefined) {
   const token = bwsToken(env, tokenSource);
   const isId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(p.name);
   const args = isId ? ['secret', 'get', p.name, '-o', 'json'] : ['secret', 'list', '-o', 'json'];
-  const r = spawnSyncHidden(process.env.AGENT_COMPANION_BWS_BIN || 'bws', args, { env: { ...env, [BWS_TOKEN_ENV]: token }, encoding: 'utf8', timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+  let r;
+  // Any throw from the spawn (Node's TypeError can quote the env value) becomes a fixed text with no value.
+  try { r = spawnSyncHidden(process.env.AGENT_COMPANION_BWS_BIN || 'bws', args, { env: { ...env, [BWS_TOKEN_ENV]: token }, encoding: 'utf8', timeout: 30000, maxBuffer: 8 * 1024 * 1024 }); } catch { throw keyError('bws could not be started'); }
   if (r.error || r.status !== 0) throw keyError('bws failed to return the secret');
   let j;
   try { j = JSON.parse(r.stdout); } catch { throw keyError('bws returned unreadable output'); }

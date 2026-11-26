@@ -2,6 +2,11 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.74 — 2026-11-26
+
+- **Token hardening (scripts/lib/api-credits.mjs, api-spend.mjs, api-worker.mjs).** A UTF-16 token file (Windows PowerShell 5.1 `>` / Out-File, with or without BOM) is decoded correctly; before, its NUL bytes reached `spawnSync`, whose TypeError quoted the head of the token into stdout, the ledger and review-verdicts. A token (file or env) holding a NUL or control character is now rejected as a key failure with a fixed message naming only the source, and any throw from the bws spawn is rethrown as the fixed text `bws could not be started` (a key failure, so the job skips to the next target). A relative `file:` path is rejected (absolute or `~` only). `readAdminKey` now honours an injected `cfg.bwsTokenSource`.
+- **Skip note and scope.** The worker's skip note now carries the reason, as the review's does. Key-failure skip applies to every target in a category list, the primary included (the list is the user's failover order); documented in the README API targets section.
+
 ## 0.31.73 — 2026-11-26
 
 - **Bitwarden token from a file (scripts/lib/api-credits.mjs, api-run.mjs, api-sdk-run.mjs, api-review.mjs, api-worker.mjs).** New option `api_bws_token_source`: `env:<NAME>` (default `env:BWS_ACCESS_TOKEN`, behaviour unchanged) or `file:<path-to-token-file>` (a leading `~` is the home directory; the file is read in the plugin process and trimmed). With a file source, BWS_ACCESS_TOKEN wins when set. It applies to every `bws:` source: `api_credits_key_source`, `api_admin_key_source` and the key and admin key of each `api_targets` entry. The token goes only into the bws child's environment and is in no message: errors name the source (`file:<path>` missing, unreadable or empty), never the value.
