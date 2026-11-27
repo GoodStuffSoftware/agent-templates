@@ -191,8 +191,8 @@ export const CELLS = {
   "opus55-medium": { model: "claude-opus-5-5", effort: "medium" },
   "opus55-high": { model: "claude-opus-5-5", effort: "high" },
   "opus55-xhigh": { model: "claude-opus-5-5", effort: "xhigh" },
-  // Fable 5.1 (claude-fable-5-1) -- the current Fable tier (config's
-  // tiers.fable). Fable takes no "medium"/"none" no-op the way haiku does;
+  // Fable 5.1 (claude-fable-5-1) -- superseded by Fable 5.2 as the
+  // current Fable tier (config's tiers.fable); kept as a pinned older id. Fable takes no "medium"/"none" no-op the way haiku does;
   // it always thinks (thinking: "adaptive, always on, cannot disable"), so
   // every effort level here is a genuine distinct setting.
   "fable51-low": { model: "claude-fable-5-1", effort: "low" },

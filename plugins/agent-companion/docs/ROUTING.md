@@ -1,6 +1,6 @@
 # Model routing table
 
-_Generated from `config/model-tiers.json` v8 (updated 2026-10-13) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
+_Generated from `config/model-tiers.json` v9 (updated 2026-11-27) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
 
 For WHY the table is shaped this way — lowest-sufficient tier, effort as a separate lever, reviewer parity, self-review, the consequence floors, trials and per-user profiles, cost basis, and haiku-as-validator — see [`docs/ROUTING-RATIONALE.md`](./ROUTING-RATIONALE.md), a hand-written companion doc (this file is generated and cannot carry hand-written prose).
 
@@ -59,7 +59,8 @@ Non-routable entries for OLDER full/dated model ids, kept only so an agent defin
 | Key | Display name | Accepts effort | Note |
 |---|---|---|---|
 | `opus-5` | Opus 5 | low, medium, high, xhigh, max | Superseded by Opus 5.5. The `opus` alias resolved here on Claude Code < v2.1.280 — kept as a reference entry so an agent definition pinned to the dated id (not the alias) still classifies correctly and its effort is validated against what THIS model actually supports, not the current `opus` tier's list. |
-| `fable-5` | Fable 5 | low, medium, high, xhigh, max | Superseded by Fable 5.1. Cache-hit pricing is the 0.1x rate, NOT Fable 5.1's 0.025x rate — do not reuse 5.1's cache economics for a definition pinned to this id. |
+| `fable-5` | Fable 5 | low, medium, high, xhigh, max | Superseded by Fable 5.1, then 5.2. Cache-hit pricing is the 0.1x rate, NOT the 0.025x rate of Fable 5.1 and 5.2 — do not reuse their cache economics for a definition pinned to this id. |
+| `fable-5-1` | Fable 5.1 | low, medium, high, xhigh, max | Superseded by Fable 5.2 ($8/$40, cache hit $0.20; Fable 5.1 pricing row read live 2026-11-27). Kept so a definition pinned to the dated id still classifies as 5.1 with its own price. |
 | `opus-4-8` | Opus 4.8 | low, medium, high, xhigh, max | Not validated by this table's effort checks for the thinking-omission hazard (agent definition frontmatter here carries no `thinking` field to check) - flagged as a known gap in the operator's global-doctrine patch, which is kept outside this repo, not silently assumed safe. |
 | `opus-4-7` | Opus 4.7 | low, medium, high, xhigh, max | Same thinking-omission caveat as opus-4-8. |
 | `opus-4-6` | Opus 4.6 | low, medium, high, max | NO xhigh — this generation stops at max/high/medium/low. An agent definition pinned to this id with effort: xhigh is invalid on this model, not just 'more than needed'; validated via referenceModels, not the current opus tier's effort list. |
@@ -237,7 +238,7 @@ Across this machine's real sessions, CACHE READS are the largest cost bucket -- 
 | `haiku` | $0.01 |
 | `sonnet` | $0.1 |
 | `opus` | $0.2 |
-| `fable` | $0.25 |
+| `fable` | $0.2 |
 
 Cache-hit ($/MTok) rate per tier, read from tiers.*.resolvesTo.pricing.cacheHitPerMTok above -- kept here too as a flat lookup for a reader who wants the number without walking the tier objects. Sonnet 5.5's read price was cut from $0.20 to $0.10 at its launch (checked 2026-10-12), so Opus 5.5 now reads at twice Sonnet's price; against Sonnet 5 it was equal at $0.20. Haiku 5.5 reads at $0.01 up to 100K prompt tokens ($0.05 above). An equal read price never made Opus cost the same as Sonnet: measured 2026-10-06, per call at equal context Opus 5.5 is about 1.9x Sonnet (it writes more output), and its plan weight is about 1.5x per token.
 
@@ -246,7 +247,7 @@ Cache-hit ($/MTok) rate per tier, read from tiers.*.resolvesTo.pricing.cacheHitP
 ## What is actually known about `fable`
 
 - OFFICIAL (whats-new-fable-5-1): prefers whole-file rewrites, fewer progress updates, less parallel tool batching. Whole-file rewrites make it a poor fit for scoped or mechanical edits even when a warrant exists.
-- OFFICIAL (whats-new-fable-5-1): same $10/$50 as Fable 5; cache reads at a quarter of the cost ($0.25/MTok, re-verified live 2026-09-23). A long session with a stable prefix is cheaper than sticker price implies - verify the number before relying on it. 2026-10-06: Fable's plan weight is UNVERIFIED (the measured data fits about 3x Sonnet, not the 5x its API price ratio suggests); planUsageMultipliers deliberately has no fable entry.
+- OFFICIAL (whats-new-fable-5-1): Fable 5.1 was $10/$50, same as Fable 5, with cache reads at a quarter of the cost; Fable 5.2 is $8/$40 with cache reads $0.20/MTok = 0.025x base input (checked live 2026-11-27, https://platform.claude.com/docs/en/about-claude/pricing). A long session with a stable prefix is cheaper than sticker price implies - verify the number before relying on it. 2026-10-06: Fable's plan weight is UNVERIFIED (the measured data fits about 3x Sonnet, not the 5x its API price ratio suggests); planUsageMultipliers deliberately has no fable entry.
 - COMMUNITY, first-hand (Every.to, TheNeuronDaily): "sticks to what you tell it" is CONTESTED. Reports of overshooting explicit limits (1,000 words -> 1,288; 8-12 quotes -> 43, 5 fabricated) and unprompted style decisions. The friction is over-inference, not literalism. Do not route on an adherence claim.
 - COMMUNITY, first-hand (dev.to): the gap over Opus/Sonnet is procedural discipline, not intelligence - stating a hypothesis before editing, labelling claims VERIFIED/REASONED/ASSUMED. A brief that carries that checklist closes most of the gap on a cheaper tier, which is exactly what the warrant is meant to make you ask.
 
@@ -264,9 +265,9 @@ Real findings not settled enough to encode as rules. Each names the measurement 
 
 ### `fable-cache-economics` — open
 
-**Question:** Does Fable 5.1 cache-read pricing make long stable-prefix sessions competitive with Opus?
+**Question:** Does Fable 5.2 cache-read pricing make long stable-prefix sessions competitive with Opus?
 
-**Tension:** Official: cache reads at a quarter of the cost ($0.25/MTok). Our measured cache hit ratio is ~96%. Fable is now 2.5x Opus on sticker price (was 2x, before Opus 5.5 dropped to $4/$20) - the cache discount has a wider gap to close than it did. At max effort output tokens run ~1.7x Fable 5 - the discount may be eaten by verbosity. 2026-10-06: Fable's plan weight is unverified (the data fits about 3x Sonnet, not 5x), so no plan-unit saving or cost from this discount is established.
+**Tension:** Official: Fable 5.2 cache reads $0.20/MTok (0.025x; checked live 2026-11-27). Our measured cache hit ratio is ~96%. Fable 5.2 is 2x Opus 5.5 on sticker price ($8/$40 vs $4/$20; Fable 5.1 was 2.5x) - the cache discount has a wider gap to close than it did. At max effort output tokens run ~1.7x Fable 5 - the discount may be eaten by verbosity. 2026-10-06: Fable's plan weight is unverified (the data fits about 3x Sonnet, not 5x), so no plan-unit saving or cost from this discount is established.
 
 **Measure:** From telemetry: per-session cost by model with cache-read share. Compare fable vs opus on sessions of similar turn count.
 

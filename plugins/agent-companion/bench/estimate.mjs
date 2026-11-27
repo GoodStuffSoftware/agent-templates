@@ -351,8 +351,14 @@ export function loadLocalJudgeVoteHistory({ resultsRoot } = {}) {
 // alias tier. Returns 1 (no scaling) whenever either model's pricing is
 // unreadable -- fail toward the seed's own already-measured number rather
 // than guessing a ratio.
-function fablePricing() {
-  return modelTiers().tiers?.fable?.resolvesTo?.pricing || null;
+// The anchor is the model the seed was MEASURED on (claude-fable-5-1), not the
+// current `fable` tier: the tier moved to Fable 5.2 ($8/$40) while the $0.81
+// anchor was measured at 5.1 prices ($10/$50), so scaling against the tier
+// would make the anchor model itself read 1.25x. Falls back to the tier.
+function fablePricing(seed = loadSeed()) {
+  const anchor = seed?.judgeVoteAnchor?.anchorModel || "claude-fable-5-1";
+  return classifyReferenceModel(anchor)?.pricing
+    || modelTiers().tiers?.fable?.resolvesTo?.pricing || null;
 }
 
 function judgeModelPricing(fullModelId) {
@@ -363,8 +369,8 @@ function judgeModelPricing(fullModelId) {
 }
 
 // Exported for tests.
-export function judgePriceRatioToFable(fullModelId) {
-  const fable = fablePricing();
+export function judgePriceRatioToFable(fullModelId, seed = loadSeed()) {
+  const fable = fablePricing(seed);
   const model = judgeModelPricing(fullModelId);
   if (!fable || !model) return 1;
   if (typeof model.inputPerMTok !== "number" || typeof model.outputPerMTok !== "number"
@@ -393,7 +399,7 @@ export function judgeVoteCostFor({ model, effort, seed = loadSeed(), history = n
   if (!anchor || typeof anchor.costUsdPerVote !== "number") {
     return { costUsdPerVote: null, source: "none", n: 0, label: "no judge-vote data anywhere -- judge cost omitted" };
   }
-  const ratio = judgePriceRatioToFable(model);
+  const ratio = judgePriceRatioToFable(model, seed);
   const costUsdPerVote = anchor.costUsdPerVote * ratio;
   const label = Math.abs(ratio - 1) < 1e-9
     ? anchor.note

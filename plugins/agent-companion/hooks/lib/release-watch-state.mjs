@@ -10,7 +10,7 @@
 // AGENT_COMPANION_FAKE_NOW moves the clock for tests. Nothing here throws.
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, unlinkSync, renameSync, mkdirSync, openSync, fstatSync, readSync, closeSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 import { createHash } from 'node:crypto';
 import { stateDir, opt } from './context.mjs';
 import { createRequire } from 'node:module';
@@ -142,7 +142,9 @@ export function openFlag({ version, T, chain, check, flags, at = now() } = {}) {
     const oldByName = new Map(open ? old.flags.map((o) => [o.name, o]) : []);
     // Renotify (restart the countdown) only for a name not already in the open flag, or one that doubled since it was raised.
     // A watch-health flag (NO_HOLD_FLAGS) joining an answered flag never restarts the countdown: it could not hold, and it must not re-open the hold path of the flag already answered.
-    const renotify = !open || holdable(fresh).some((f) => { const o = oldByName.get(f.name); const lo = o && levelOf(o); const l = levelOf(f); return !o || (lo > 0 && l > lo * WORSEN_FACTOR); });
+    // 0.31.77: also when a flag first notified below the hold floor now meets it (the old copy is not holdable): the grace runs from when the flag first
+    // meets the floor, not from the earlier showing. An answered flag (ackedAt) stays answered.
+    const renotify = !open || holdable(fresh).some((f) => { const o = oldByName.get(f.name); const lo = o && levelOf(o); const l = levelOf(f); return !o || (lo > 0 && l > lo * WORSEN_FACTOR) || (!old.ackedAt && !holdable([o]).length); });
     const merged = open ? [...old.flags.filter((o) => !fresh.some((f) => f.name === o.name)), ...fresh] : fresh;
     const next = {
       v: 2,
@@ -781,21 +783,273 @@ function scopedHoldNotice(h, sessionId, at) {
   } catch { return null; }
 }
 // A Bash/PowerShell command that releases or installs agent-companion: a plugin install/update, a marketplace update, a push to a release/*
-// branch, or a PR merge/create naming one. Only these are refused in scope 'releases'.
-export const MARKETPLACE_UPDATE_RE = /\bplugin\s+marketplace\s+update\b/;
-export const RELEASE_PUSH_RE = /\bgit\b[^\n;&|]*\bpush\b[^\n;&|]*\brelease\//;
-export const RELEASE_PR_RE = /\bgh\s+pr\s+(?:merge|create)\b[^\n;&|]*\brelease\/|\bgh\s+pr\s+merge\b[^\n;&|]*\b(?:agent-templates|agent-companion)\b/;
-export function isReleaseAction(cmd) {
-  const c = String(cmd || '');
-  return INSTALL_CMD_RE.test(c) || MARKETPLACE_UPDATE_RE.test(c) || RELEASE_PUSH_RE.test(c) || RELEASE_PR_RE.test(c);
+// branch, a merge of one (git merge, or gh pr merge of a PR whose head is one), or a PR create naming one. Only these are refused in scope 'releases'.
+// One more refusal is kept on purpose: ANY `gh pr merge` that names agent-templates or agent-companion is refused with no lookup, because a
+// merge to that repo's main reaches every user through marketplace auto-update, which this hold cannot otherwise stop.
+//
+// 0.31.77 RULE (read before editing). The command is matched on its real words, never on its text, and anything that cannot be parsed
+// with confidence is REFUSED: a false deny costs one retry, a bypass ships a release past the hold.
+//  1. commandSegments() splits into segments (; | & && newline, parentheses) and words. Quoted text is ONE word (so an echoed line, a
+//     commit message or a PR body never matches). `#` at a word start is a comment to end of line (an apostrophe in it opens nothing).
+//     Heredoc and PowerShell here-string bodies are dropped, UNLESS a shell reads them (`bash <<EOF`, `cat <<EOF | bash`): then the body
+//     is parsed as commands. `$(...)` and backticks are real commands even inside double quotes: their bodies are parsed too.
+//  2. Backslash and backtick mean different things in Bash and PowerShell, so every text is parsed in BOTH modes and refused if either
+//     says release (a PowerShell path ending in \" closes its string in PowerShell and not in Bash).
+//  3. Wrappers (timeout, xargs, sudo, env, watch, stdbuf, nice ...) take flags and values we cannot tell apart from the command, so the
+//     words after a wrapper are tried as a command from every position, up to the first echo/printf-like word.
+//  4. A shell -c / -Command / /c / eval / iex argument is a real command and is parsed again (3 levels; deeper, or -EncodedCommand, is
+//     refused as unparseable). cmd /c and pwsh -Command take the REST of the line. `bash <<< "text"` and `text | bash|sh|pwsh|iex`
+//     parse the text (and, for xargs, the piped words are appended to its command).
+//  5. `gh pr merge` looks the PR head up with `gh pr view` in the directory the command will run in (a `cd X &&`, `Set-Location X;` or
+//     `pushd` before it, `-R`/`--repo`, GH_REPO, a PR URL). A cd that cannot be resolved with no repo named means the repo is unknown: refused.
+//     All lookups in one hook call share one time budget (PR_LOOKUP_MS); once spent, the remaining merges are refused without a spawn.
+export const PR_LOOKUP_MS = 2500; // total for every `gh pr view` in one hook call, inside the pre hook's 5 s timeout with margin
+const SHELL_NAMES = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'pwsh', 'powershell', 'cmd', 'iex', 'invoke-expression']);
+const SHELL_CMDS = /^(?:bash|sh|zsh|dash|ksh|pwsh|powershell|cmd|eval|iex|invoke-expression)$/;
+const PREFIX_WORDS = new Set(['!', '{', '}', 'then', 'do', 'else', 'elif', 'if', 'while', 'until']);
+const WRAPPERS = new Set(['sudo', 'doas', 'timeout', 'xargs', 'parallel', 'watch', 'stdbuf', 'nice', 'ionice', 'setsid', 'nohup', 'time', 'env', 'command', 'builtin', 'exec', 'call', 'start', 'start-process', 'start-job', 'invoke-command', 'runas', 'chroot', 'unbuffer']);
+const PRINT_CMDS = new Set(['echo', 'printf', 'write-host', 'write-output', 'write-error', 'write-warning', 'cat', 'type', 'print']);
+const binName = (x) => String(x).replace(/^.*[\\/]/, '').replace(/\.(?:exe|cmd|bat|ps1)$/i, '').toLowerCase();
+const skipPrefix = (words) => { let i = 0; while (i < words.length && (PREFIX_WORDS.has(words[i]) || /^[A-Za-z_]\w*=/.test(words[i]))) i++; return words.slice(i); };
+// Does this segment feed its stdin (or its heredoc) to a shell?
+const isSink = (words) => {
+  const w = skipPrefix(words); if (!w.length) return false;
+  const c = binName(w[0]);
+  return SHELL_NAMES.has(c) || (WRAPPERS.has(c) && w.slice(1).some((x) => SHELL_NAMES.has(binName(x))));
+};
+const findBacktick = (s, from) => { for (let k = from; k < s.length; k++) { if (s[k] === '\\') { k++; continue; } if (s[k] === '`') return k; } return s.length; };
+
+// ps: PowerShell reading (backslash is a plain character, backtick escapes) instead of Bash (backslash escapes, backtick substitutes).
+// The returned segments carry: .pipe (followed by a single |), .sub (found inside a substitution or a shell-read heredoc), .pd (parenthesis depth).
+export function commandSegments(cmd, ps = false) {
+  const out = [];
+  scan(String(cmd ?? ''), 0, false, ps, out, false);
+  return out;
 }
-// The deny text for a release/install command while a hold in scope 'releases' is on; null otherwise (fails open).
-export function releaseActionDeny(cmd) {
+function scan(s, start, nested, ps, out, sub) {
+  const n = s.length; let i = start; let words = []; let w = null; let depth = 0; let lineShell = false; const pend = [];
+  const endWord = () => { if (w !== null) { words.push(w); w = null; } };
+  const endSeg = (pipe) => {
+    endWord();
+    if (words.length) { if (isSink(words)) lineShell = true; words.pipe = !!pipe; words.sub = sub; words.pd = depth; out.push(words); }
+    words = [];
+  };
+  while (i < n) {
+    const c = s[i];
+    if (nested && c === ')' && depth === 0) { endSeg(); return i + 1; }
+    if (c === "'") { const j = s.indexOf("'", i + 1); const e = j < 0 ? n : j; w = (w ?? '') + s.slice(i + 1, e); i = e + 1; continue; }
+    if (c === '"') {
+      let j = i + 1; let buf = '';
+      while (j < n && s[j] !== '"') {
+        const d = s[j];
+        if (!ps && d === '\\' && j + 1 < n && '"\\`$'.includes(s[j + 1])) { buf += s[j + 1]; j += 2; }
+        else if (ps && d === '`' && j + 1 < n) { buf += s[j + 1]; j += 2; }
+        else if (d === '$' && s[j + 1] === '(') { j = scan(s, j + 2, true, ps, out, true); buf += '$()'; }
+        else if (!ps && d === '`') { const e = findBacktick(s, j + 1); scan(s.slice(j + 1, e).replace(/\\([`\\$])/g, '$1'), 0, false, ps, out, true); buf += '``'; j = e + 1; }
+        else { buf += d; j++; }
+      }
+      w = (w ?? '') + buf; i = j + 1; continue;
+    }
+    if (c === '@' && (s[i + 1] === "'" || s[i + 1] === '"') && /^[ \t]*\r?\n/.test(s.slice(i + 2))) { // PowerShell here-string: the body is text
+      const k = s.indexOf(`\n${s[i + 1]}@`, i + 2); i = k < 0 ? n : k + 3; w = (w ?? '') + 'x'; continue;
+    }
+    if (c === '<' && s[i + 1] === '<' && s[i + 2] !== '<') {
+      const m = /^<<-?[ \t]*(["']?)([A-Za-z_][\w.-]*)\1/.exec(s.slice(i));
+      if (m) { pend.push(m[2]); i += m[0].length; continue; }
+    }
+    if (c === '\n') {
+      endSeg(); i++;
+      for (const d of pend.splice(0)) {
+        const from = i; let found = false;
+        while (i < n) { let e = s.indexOf('\n', i); if (e < 0) e = n; const line = s.slice(i, e).trim(); const at = i; i = e + 1; if (line === d) { found = true; if (lineShell) scan(s.slice(from, at), 0, false, ps, out, true); break; } }
+        if (!found && lineShell) scan(s.slice(from), 0, false, ps, out, true); // unterminated: the shell reads to the end
+      }
+      lineShell = false;
+      continue;
+    }
+    if (c === '#' && w === null) { while (i < n && s[i] !== '\n') i++; continue; } // a comment, outside quotes, to end of line
+    if (c === '|') { if (s[i + 1] === '|') { endSeg(); i += 2; } else { endSeg(true); i += s[i + 1] === '&' ? 2 : 1; } continue; }
+    if (c === '(') { endSeg(); depth++; i++; continue; }
+    if (c === ')') { endSeg(); if (depth > 0) depth--; i++; continue; }
+    if (c === ';' || c === '&') { endSeg(); i++; continue; }
+    if (c === ' ' || c === '\t' || c === '\r') { endWord(); i++; continue; }
+    if (c === '{' && w === null && words.length === 0 && i + 1 < n && !/[\s,}]/.test(s[i + 1])) { i++; continue; } // `{git push}`: a group opener glued to the command
+    if (c === '\\' && !ps && i + 1 < n) { // Bash: a backslash escapes the next character; backslash-newline is a continuation
+      if (s[i + 1] === '\n') { i += 2; continue; }
+      if (s[i + 1] === '\r' && s[i + 2] === '\n') { i += 3; continue; }
+      w = (w ?? '') + s[i + 1]; i += 2; continue;
+    }
+    if (c === '`') {
+      if (!ps) { endSeg(); i++; continue; } // Bash: a command substitution delimiter
+      if (i + 1 < n && (s[i + 1] === '\n' || s[i + 1] === '\r')) { endWord(); i += s[i + 1] === '\r' && s[i + 2] === '\n' ? 3 : 2; continue; }
+      if (i + 1 < n) { w = (w ?? '') + s[i + 1]; i += 2; continue; }
+      i++; continue;
+    }
+    w = (w ?? '') + c; i++;
+  }
+  endSeg();
+  return n;
+}
+// Words that are the value of a text flag (commit message, PR title or body): never a branch name.
+const TEXT_FLAGS = new Set(['-m', '--message', '-F', '--file', '-b', '--body', '-t', '--title', '--subject', '--body-file']);
+const dropTextValues = (args) => { const o = []; for (let k = 0; k < args.length; k++) { if (TEXT_FLAGS.has(args[k])) { k++; continue; } if (/^--(?:message|body|title|subject)=/.test(args[k])) continue; o.push(args[k]); } return o; };
+// The head branch of a PR: only ever called for `gh pr merge` during a hold; null when it cannot be read (timeout, no gh, no network, unknown PR).
+// AGENT_COMPANION_GH_BIN replaces `gh` (a .mjs file is run with node): the tests' stand-in, so no test touches the network.
+// o.cwd: the directory the command will run in; o.timeoutMs: what is left of the shared budget.
+export function prHeadLookup(pr, repo, o = {}) {
   try {
-    if (!isHoldActive() || holdScope() !== 'releases' || !isReleaseAction(cmd)) return null;
+    const { spawnSync } = createRequire(import.meta.url)('node:child_process');
+    const bin = process.env.AGENT_COMPANION_GH_BIN || 'gh';
+    const a = ['pr', 'view', ...(pr ? [pr] : []), ...(repo ? ['--repo', repo] : []), '--json', 'headRefName', '-q', '.headRefName'];
+    const js = /\.m?js$/.test(bin);
+    const timeout = Math.max(50, Math.min(Number(o.timeoutMs) || PR_LOOKUP_MS, PR_LOOKUP_MS));
+    const r = spawnSync(js ? process.execPath : bin, js ? [bin, ...a] : a, { encoding: 'utf8', timeout, windowsHide: true, ...(o.cwd ? { cwd: o.cwd } : {}) });
+    const h = r.status === 0 ? String(r.stdout || '').trim() : '';
+    return h || null;
+  } catch { return null; }
+}
+// One budget for every lookup in one hook call; the same PR in the same place is looked up once.
+function budgeted(lookup) {
+  const t0 = Date.now(); const seen = new Map();
+  return (pr, repo, ctx) => {
+    const url = !!pr && /^https?:\/\//i.test(pr);
+    if (!repo && !url && ctx && ctx.cwd === false) return null; // the directory is unknown, so the repo is
+    const key = `${pr}|${repo}|${url || repo ? '' : ctx && ctx.cwd || ''}`;
+    if (seen.has(key)) return seen.get(key);
+    const left = PR_LOOKUP_MS - (Date.now() - t0);
+    if (left < 100) return null; // budget spent: not looked up, so refused
+    const h = lookup(pr, repo, { cwd: ctx && ctx.cwd || undefined, timeoutMs: left });
+    seen.set(key, h); return h;
+  };
+}
+const toPath = (d) => (process.platform === 'win32' ? String(d).replace(/^\/([A-Za-z])(?:\/|$)/, '$1:/') : String(d));
+// cd / pushd / Set-Location: the new directory, false when it cannot be worked out, undefined when the segment is not one.
+function cdTarget(seg, cwd) {
+  const w = skipPrefix(seg); if (!w.length) return undefined;
+  const c = binName(w[0]);
+  if (!/^(?:cd|pushd|chdir|set-location|sl|popd)$/.test(c)) return undefined;
+  if (c === 'popd' || cwd === false) return false;
+  let t = null;
+  for (let k = 1; k < w.length; k++) { if (/^\/d$/i.test(w[k])) continue; if (/^-(?:path|literalpath|p)$/i.test(w[k])) { t = w[k + 1]; break; } if (w[k].startsWith('-') && w[k] !== '-') continue; t = w[k]; break; }
+  if (!t || /[$%`*?]|^~|^-$/.test(t)) return false;
+  return resolvePath(cwd || process.cwd(), toPath(t));
+}
+// 'release' | 'unverified' (a gh pr merge whose head could not be looked up) | 'opaque' (cannot be parsed) | null.
+function wordsKind(words, lookup, depth, ctx, extra = []) {
+  let env = null;
+  let i = 0;
+  while (i < words.length && (PREFIX_WORDS.has(words[i]) || /^[A-Za-z_]\w*=/.test(words[i]))) { const m = /^GH_REPO=(.+)$/.exec(words[i]); if (m) env = m[1]; i++; }
+  const w = words.slice(i);
+  if (w.length && w[0].length > 1) w[0] = w[0].replace(/^\{+/, '') || w[0]; // `{git`
+  if (!w.length) return null;
+  const c = binName(w[0]);
+  if (WRAPPERS.has(c)) {
+    let kind = null;
+    const more = /^(?:xargs|parallel)$/.test(c) ? extra : [];
+    for (let j = 1; j < w.length && j < 14; j++) {
+      const r = wordsKind(w.slice(j).concat(more), lookup, depth, ctx, []);
+      if (r === 'release') return r;
+      kind = kind || r;
+      if (PRINT_CMDS.has(binName(w[j]))) break;
+    }
+    return kind;
+  }
+  if (SHELL_CMDS.test(c)) {
+    if (depth >= 3) return 'opaque';
+    let inner = null;
+    if (c === 'eval' || c === 'iex' || c === 'invoke-expression') inner = w.slice(1).join(' ');
+    else if (c === 'cmd') { const k = w.findIndex((x, j) => j > 0 && /^\/[ck]$/i.test(x)); if (k > 0) inner = w.slice(k + 1).join(' '); }
+    else if (c === 'pwsh' || c === 'powershell') {
+      if (w.some((x, j) => j > 0 && /^-e(?:c|nc\w*)?$/i.test(x))) return 'opaque'; // -EncodedCommand: base64, unreadable
+      const k = w.findIndex((x, j) => j > 0 && /^-c(?:o(?:m(?:m(?:a(?:n(?:d)?)?)?)?)?)?$/i.test(x)); if (k > 0) inner = w.slice(k + 1).join(' ');
+    } else { const k = w.findIndex((x, j) => j > 0 && /^-[A-Za-z]*c$/.test(x)); if (k > 0) inner = w[k + 1]; }
+    if (inner == null) { const h = w.indexOf('<<<'); if (h > 0) inner = w[h + 1]; }
+    return inner ? textKind(inner, lookup, depth + 1, ctx) : null;
+  }
+  if (PRINT_CMDS.has(c)) return null;
+  for (let j = 0; j < w.length; j++) {
+    if (w[j] !== 'plugin') continue;
+    if (/^(?:install|update)$/.test(w[j + 1] || '') && /^agent-companion\b/.test(w[j + 2] || '')) return 'release';
+    if (w[j + 1] === 'marketplace' && w[j + 2] === 'update') return 'release';
+  }
+  if (c === 'git') {
+    let k = 1;
+    while (k < w.length && w[k].startsWith('-')) k += /^(?:-C|-c|--git-dir|--work-tree|--namespace)$/.test(w[k]) ? 2 : 1;
+    const sub = w[k]; const args = dropTextValues(w.slice(k + 1));
+    if (sub === 'push' && args.some((a) => /\brelease\//.test(a))) return 'release';
+    if (sub === 'merge' && args.some((a) => /^(?:[\w.-]+\/)*release\/\S+$/.test(a))) return 'release';
+    return null;
+  }
+  if (c === 'gh' && w[1] === 'pr' && (w[2] === 'merge' || w[2] === 'create')) {
+    const raw = w.slice(3); const args = dropTextValues(raw);
+    if (args.some((a) => /\brelease\//.test(a))) return 'release';
+    if (w[2] !== 'merge') return null;
+    // Kept on purpose (see the rule above): a merge naming this repo is refused with no lookup.
+    if (args.some((a) => /\b(?:agent-templates|agent-companion)\b/.test(a)) || (env && /\b(?:agent-templates|agent-companion)\b/.test(env))) return 'release';
+    let pr = null; let repo = env;
+    for (let k = 0; k < raw.length; k++) {
+      if (/^(?:-R|--repo)$/.test(raw[k])) { repo = raw[++k] || null; continue; }
+      if (TEXT_FLAGS.has(raw[k]) || /^(?:--match-head-commit|-A|--author-email)$/.test(raw[k])) { k++; continue; }
+      if (raw[k].startsWith('--repo=')) { repo = raw[k].slice(7); continue; }
+      if (!raw[k].startsWith('-') && pr == null) pr = raw[k];
+    }
+    // Fail closed: a merge whose head cannot be read is refused. gh pr merge needs the same network, so an offline refusal costs nothing real,
+    // while letting it through would let a release merge past the hold whenever the lookup fails. Only during a hold, only this command.
+    const head = lookup(pr, repo, ctx);
+    return head == null ? 'unverified' : /^release\//.test(head) ? 'release' : null;
+  }
+  return null;
+}
+const feedTexts = (feed) => { const o = []; for (const seg of feed) { o.push(...seg); const s = skipPrefix(seg); if (s.length > 1 && PRINT_CMDS.has(binName(s[0]))) o.push(s.slice(1).join(' ')); } return o; };
+function segsKind(segs, lookup, depth, ctx) {
+  let kind = null; let feed = []; let prevPipe = false; const stack = [];
+  for (const seg of segs) {
+    if (!seg.sub) {
+      while (stack.length > (seg.pd || 0)) ctx.cwd = stack.pop();
+      while (stack.length < (seg.pd || 0)) stack.push(ctx.cwd);
+      if (!prevPipe) feed = [];
+    }
+    let r = null;
+    const cd = cdTarget(seg, ctx.cwd);
+    if (cd !== undefined) ctx.cwd = cd;
+    else {
+      if (feed.length && isSink(seg)) {
+        if (depth >= 3) r = 'opaque';
+        else for (const t of feedTexts(feed)) { const k = textKind(t, lookup, depth + 1, ctx); if (k === 'release') { r = k; break; } r = r || k; }
+      }
+      if (r !== 'release') { const k = wordsKind(seg, lookup, depth, ctx, feedTexts(feed)); r = k === 'release' ? k : (k || r); }
+    }
+    if (r === 'release') return r;
+    kind = kind || r;
+    if (!seg.sub) { prevPipe = !!seg.pipe; if (seg.pipe) feed.push(seg); }
+  }
+  return kind;
+}
+function textKind(text, lookup, depth, ctx, only = null) {
+  let kind = null;
+  for (const ps of only ? [only === 'ps'] : /[\\`]/.test(text) ? [false, true] : [false]) {
+    const r = segsKind(commandSegments(text, ps), lookup, depth, { cwd: ctx.cwd });
+    if (r === 'release') return r;
+    kind = kind || r;
+  }
+  return kind;
+}
+export function releaseActionKind(cmd, lookup = prHeadLookup, opts = {}) {
+  // opts.shell 'bash' | 'ps': the tool that runs the command (its own reading only); absent: both readings.
+  return textKind(String(cmd ?? ''), budgeted(lookup), 0, { cwd: opts.cwd || null }, opts.shell || null);
+}
+export function isReleaseAction(cmd, lookup = prHeadLookup) { return releaseActionKind(cmd, lookup) != null; }
+// The deny text for a release/install command while a hold in scope 'releases' is on; null otherwise (fails open, except the one
+// documented fail-closed case above).
+export function releaseActionDeny(cmd, lookup = prHeadLookup, opts = {}) {
+  try {
+    if (!isHoldActive() || holdScope() !== 'releases') return null;
+    const kind = releaseActionKind(cmd, lookup, opts);
+    if (!kind) return null;
     const h = readHold() || {};
     const names = Array.isArray(h.flags) && h.flags.length ? h.flags.map((x) => x && x.name).filter(Boolean).join(', ') : 'unspecified';
-    return `[agent-companion] A post-release hold is on since ${h.since || '?'} (release ${h.version || '?'}; flags: ${names}), so this agent-companion release or install command is refused. All other work continues. Tell the operator at once. Only the operator lifts it, by saying "clear hold"; do not try to lift it yourself.`;
+    const why = kind === 'opaque' ? ' (part of it could not be parsed with confidence, so it is treated as a release command)' : kind === 'unverified' ? ' (the head branch of that PR could not be looked up in time, so it is treated as a release merge)' : '';
+    return `[agent-companion] A post-release hold is on since ${h.since || '?'} (release ${h.version || '?'}; flags: ${names}), so this agent-companion release or install command is refused${why}. All other work continues. Tell the operator at once. Only the operator lifts it, by saying "clear hold"; do not try to lift it yourself.`;
   } catch { return null; }
 }
 

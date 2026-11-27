@@ -7,12 +7,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync, appendFileSync, mkdirSync, readFileSync, existsSync, statSync, utimesSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { makeFixture, runHook, runScript } from './helpers.mjs';
 import { _resetPlanWeightsForTests, unitsPerPercent, weeklyLimitUnits } from '../hooks/lib/plan-allowance.mjs';
 import {
   unitsOf, dayStartMs, weekStartMs, dayKeyOf, runCheckup, readHistory, checkupPaths, buildDayRecord,
   scanTranscripts, readRollout, countCeilingNudges, launchCheckup, checkupDue, pendingSurface, markSurfaced,
-  formatLine, resetUnitCache, DAY_MS, checkupOptions,
+  formatLine, resetUnitCache, DAY_MS, checkupOptions, rebuildHistoryDays,
 } from '../scripts/lib/daily-checkup.mjs';
 
 const T = (s) => Date.parse(s);
@@ -841,4 +842,163 @@ test('accounts: each account has its own week, limit and pace; an hour goes to t
   assert.equal('weeks' in plain, false);
   assert.deepEqual(buildDayRecord(state, start, { limit: 2860, computedAt: NOW, accounts: [], history }), plain);
   assert.match(formatLine(plain, 'h.jsonl'), /; week so far \d/);
+});
+
+// ---- 0.31.77: per-account gaps (a switch inside an hour, uncovered hours, unlisted accounts, rebuilding a day) ----
+const ACCTS_JSON = JSON.stringify([
+  { id: 'acct-fake-aaa', label: 'first', weekResetUtc: 'Fri 16:00' },
+  { id: 'acct-fake-bbb', label: 'second', weekResetUtc: 'Wed 22:00', weeklyLimitUnits: 1300, limitChanges: [{ from: '2026-10-10T12:00:00Z', weeklyLimitUnits: 2860 }] },
+]);
+const withAccounts = (fn) => async () => {
+  const saved = process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS;
+  process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS = ACCTS_JSON;
+  try { await fn(); } finally { if (saved === undefined) delete process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS; else process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS = saved; }
+};
+
+test('accounts: a switch inside an hour splits it by minute; hours no history covers and unlisted accounts are unattributed; plan change moves the limit', async () => {
+  const { configuredAccounts } = await import('../hooks/lib/account.mjs');
+  const accounts = configuredAccounts(ACCTS_JSON);
+  const history = [
+    { at: '2026-10-09T00:00:00Z', acct: 'acct-fake-aaa' }, { at: '2026-10-10T14:30:00Z', acct: 'acct-fake-bbb' }, { at: '2026-10-10T22:30:00Z', acct: 'acct-fake-zzz' },
+  ];
+  const hours = {};
+  const add = (iso, m) => { hours[T(iso) / 3600000] = [m, 0, 0, 0, 0]; };
+  add('2026-10-08T12:00:00Z', 30); // before the first history entry: no account
+  add('2026-10-10T10:00:00Z', 100); // first account
+  add('2026-10-10T14:00:00Z', 60); // the switch is at 14:30
+  add('2026-10-10T20:00:00Z', 200); // second account
+  add('2026-10-10T22:00:00Z', 10); // the next switch is at 22:30 but nothing says when in the hour: the account at the hour start
+  add('2026-10-10T23:00:00Z', 25); // an account the option does not list
+  const fine = { [T('2026-10-10T14:00:00Z') / 3600000]: { 10: 20, 40: 40 } };
+  const state = { hours, fine, days: {}, scanFromMs: T('2026-10-01T00:00:00Z'), dataThroughMs: T('2026-10-11T07:00:00Z') };
+  const start = T('2026-10-10T08:00:00Z');
+  const rec = buildDayRecord(state, start, { limit: 2860, accounts, history });
+  const [a, b] = rec.weeks;
+  assert.deepEqual([a.units, a.dayUnits, a.limitUnits], [120, 120, 2860], 'first: 100 plus the 20 sent before the switch');
+  assert.deepEqual([b.units, b.dayUnits, b.limitUnits], [250, 250, 2860], 'second: 40 after the switch, 200, 10; its limit after the plan change');
+  assert.deepEqual(rec.unattributed, { units: 55, pct: 1.92, from: '2026-10-07T22:00:00.000Z' });
+  assert.match(formatLine(rec, 'h.jsonl'), /55 units \(1\.9%\) in hours no switch history covers/);
+  // without the per-minute split (a state written before the option was set) the hour goes whole to the account at its start
+  const coarse = buildDayRecord({ ...state, fine: undefined }, start, { limit: 2860, accounts, history });
+  assert.deepEqual([coarse.weeks[0].units, coarse.weeks[1].units], [160, 210]);
+  // the day before the plan change: the second account's own limit
+  const before = buildDayRecord(state, T('2026-10-09T08:00:00Z'), { limit: 2860, accounts, history });
+  assert.equal(before.weeks[1].limitUnits, 1300);
+  assert.equal(before.weeks[1].units, 0);
+  // everything attributed: no `unattributed` key
+  const clean = buildDayRecord({ ...state, hours: { [T('2026-10-10T10:00:00Z') / 3600000]: [100, 0, 0, 0, 0] }, fine: {} }, start, { limit: 2860, accounts, history });
+  assert.equal('unattributed' in clean, false);
+});
+
+test('accounts: a scan keeps units by minute, a session across the switch splits at it, and rebuildHistoryDays re-derives a closed day from the saved state', withAccounts(async () => {
+  const { fx, root } = mk();
+  try {
+    const switchFile = join(fx.dir, '.claude', 'session-sync', 'accounts', 'switch-history.json');
+    const writeSwitch = (at) => { mkdirSync(dirname(switchFile), { recursive: true }); writeFileSync(switchFile, JSON.stringify([{ at: '2026-10-08T00:00:00.000Z', acct: 'acct-fake-aaa' }, { at, acct: 'acct-fake-bbb' }])); };
+    writeSwitch('2026-10-09T17:30:00.000Z');
+    put(join(root, 'projA', 'sess-fake.jsonl'), [asst('r1', '2026-10-09T17:10:00Z', SONNET, TEN_M), asst('r2', '2026-10-09T17:50:00Z', SONNET, TEN_M)]);
+    run(root);
+    const st = JSON.parse(readFileSync(checkupPaths().state, 'utf8'));
+    const h = T('2026-10-09T17:00:00Z') / 3600000;
+    assert.deepEqual(st.fine[h], { 10: 2, 50: 2 }, 'units by minute of the hour');
+    let r = record();
+    assert.deepEqual(r.weeks.map((w) => [w.id, w.units, w.dayUnits]), [['acct-fake-aaa', 2, 2], ['acct-fake-bbb', 2, 2]]);
+    assert.equal('unattributed' in r, false);
+
+    // move the switch to 17:55: both requests were the first account's. Only a forced rebuild re-derives the closed day.
+    const other = '{"v":1,"day":"2026-10-08","units":{"total":1}}';
+    writeFileSync(checkupPaths().history, `${other}\n${readFileSync(checkupPaths().history, 'utf8').split('\n').filter((l) => l.includes('"day":"2026-10-09"')).join('\n')}\n`);
+    writeSwitch('2026-10-09T17:55:00.000Z');
+    assert.deepEqual(rebuildHistoryDays([DAY, '2026-09-01'], { nowT: NOW }), [DAY], 'a day before the scan start is left alone');
+    r = record();
+    assert.deepEqual(r.weeks.map((w) => [w.units, w.dayUnits]), [[4, 4], [0, 0]]);
+    const lines = readFileSync(checkupPaths().history, 'utf8').split('\n').filter(Boolean);
+    assert.equal(lines[0], other, 'another day line is not touched');
+    assert.equal(lines.length, 2);
+    // no state, no history: fail-open
+    rmSync(checkupPaths().state);
+    assert.deepEqual(rebuildHistoryDays([DAY], { nowT: NOW }), []);
+  } finally { fx.cleanup(); }
+}));
+
+test('accounts: unsetting the option drops a per-minute map left in the scan state', async () => {
+  const { fx, root } = mk();
+  try {
+    put(join(root, 'projA', 'sess-fake.jsonl'), [asst('r1', '2026-10-09T17:10:00Z', SONNET, TEN_M)]);
+    await withAccounts(async () => { run(root); })();
+    assert.ok(JSON.parse(readFileSync(checkupPaths().state, 'utf8')).fine, 'the option set writes the map');
+    run(root);
+    assert.ok(!('fine' in JSON.parse(readFileSync(checkupPaths().state, 'utf8'))), 'the option unset removes it');
+  } finally { fx.cleanup(); }
+});
+
+test('accounts unset: the checkup record, scan state, session-budget scan and notice are byte-identical to what origin/main produced', async () => {
+  const { scenario } = await import('./fixtures/accounts-unset-scenario.mjs');
+  const expected = JSON.parse(readFileSync(new URL('./fixtures/accounts-unset-main.json', import.meta.url), 'utf8'));
+  const got = JSON.parse(JSON.stringify(await scenario(join(dirname(fileURLToPath(import.meta.url)), '..'))));
+  assert.equal(got.history, expected.history);
+  assert.equal(got.state, expected.state);
+  assert.equal(got.budget, expected.budget);
+  assert.equal(got.notice, expected.notice);
+  assert.deepEqual(got.written, expected.written);
+  assert.ok(!('fine' in JSON.parse(got.state)), 'no per-minute map without the option');
+});
+
+test('accounts: rebuildHistoryDays leaves a day the saved scan state cannot fully cover (older than its retention, and the edge)', withAccounts(async () => {
+  const { fx } = mk();
+  try {
+    const { configuredAccounts, weekStartAt } = await import('../hooks/lib/account.mjs');
+    const { SCHEMA, KEEP_DAYS } = await import('../scripts/lib/daily-checkup.mjs');
+    const p = checkupPaths();
+    mkdirSync(dirname(p.state), { recursive: true });
+    const saveState = (lastScanMs) => writeFileSync(p.state, JSON.stringify({ v: SCHEMA, scanFromMs: T('2026-08-01T00:00:00Z'), lastScanMs, dataThroughMs: NOW, days: {}, facts: {}, hours: { [T('2026-10-09T10:00:00Z') / 3600000]: [10, 0, 0, 0, 0], [T('2026-09-01T10:00:00Z') / 3600000]: [10, 0, 0, 0, 0] } }));
+    const OLD = '2026-09-01';
+    const oldLine = JSON.stringify({ v: 1, day: OLD, units: { total: 99 } });
+    const dayLine = JSON.stringify({ v: 1, day: DAY, units: { total: 99 } });
+    writeFileSync(p.history, `${oldLine}\n${dayLine}\n`);
+    const before = readFileSync(p.history, 'utf8');
+
+    // a day older than the retention: its week's hours are gone, so the line stays and the reason is given
+    saveState(NOW);
+    const refused = [];
+    assert.deepEqual(rebuildHistoryDays([OLD], { nowT: NOW, refused }), []);
+    assert.equal(readFileSync(p.history, 'utf8'), before, 'the history file is not touched');
+    assert.equal(refused.length, 1);
+    assert.equal(refused[0].day, OLD);
+    assert.match(refused[0].why, /before the oldest hour the scan state keeps/);
+
+    // the edge: the day's earliest week start is exactly the oldest kept hour (rebuilt), one ms older (left alone)
+    const endMs = T(`${DAY}T08:00:00Z`) + DAY_MS;
+    const earliest = Math.min(weekStartMs(endMs - 1), ...configuredAccounts().map((a) => weekStartAt(a.weekResetUtc, endMs - 1)));
+    saveState(earliest + KEEP_DAYS * DAY_MS + 1);
+    const r2 = [];
+    assert.deepEqual(rebuildHistoryDays([DAY], { nowT: NOW, refused: r2 }), []);
+    assert.equal(r2.length, 1);
+    assert.equal(readFileSync(p.history, 'utf8'), before);
+    saveState(earliest + KEEP_DAYS * DAY_MS);
+    assert.deepEqual(rebuildHistoryDays([DAY], { nowT: NOW }), [DAY]);
+    const lines = readFileSync(p.history, 'utf8').split('\n').filter(Boolean);
+    assert.equal(lines[0], oldLine, 'the old line is untouched');
+    assert.ok(JSON.parse(lines[1]).weeks, 'the day at the edge was rebuilt with its per-account weeks');
+  } finally { fx.cleanup(); }
+}));
+
+test('accounts unset: rebuildHistoryDays never touches the history file (--force --day is a no-op for the checkup)', async () => {
+  const saved = process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS;
+  delete process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS;
+  const { fx, root } = mk();
+  try {
+    put(join(root, 'projA', 'sess-fake.jsonl'), [asst('r1', '2026-10-09T17:10:00Z', SONNET, TEN_M)]);
+    run(root);
+    const before = readFileSync(checkupPaths().history, 'utf8');
+    assert.ok(before.includes(`"day":"${DAY}"`));
+    const refused = [];
+    assert.deepEqual(rebuildHistoryDays([DAY], { nowT: NOW + 3600000, refused }), []);
+    assert.equal(readFileSync(checkupPaths().history, 'utf8'), before, 'byte-identical, computedAt included');
+    assert.deepEqual(refused, []);
+    // and through the command, as in 0.31.76
+    const { main } = await import('../scripts/usage-analysis.mjs');
+    await main(['run', '--root', fx.stateDir, '--no-scan', '--no-register', '--now', new Date(NOW + 3600000).toISOString(), '--day', DAY, '--force'], { out: () => {} });
+    assert.equal(readFileSync(checkupPaths().history, 'utf8'), before);
+  } finally { if (saved !== undefined) process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS = saved; fx.cleanup(); }
 });

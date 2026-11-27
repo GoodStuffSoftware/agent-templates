@@ -139,6 +139,50 @@ test('delivered after a foreground Agent returns (PostToolUse ^Agent$), lead onl
   } finally { fx.cleanup(); }
 });
 
+// 0.31.77: option claude_accounts set: a session across an account switch is split at the switch, each part against that account's own limit.
+test('accounts: a session across a switch is split by account; each part is read against its own limit; an unlisted account is its own clause; unset keeps the plain scan', () => {
+  const fx = makeFixture();
+  const saved = process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS;
+  try {
+    const { lead } = layout(fx);
+    const sw = join(fx.dir, '.claude', 'session-sync', 'accounts', 'switch-history.json');
+    mkdirSync(join(sw, '..'), { recursive: true });
+    writeFileSync(sw, JSON.stringify([
+      { at: '2026-10-09T00:00:00.000Z', acct: 'acct-fake-aaa' }, { at: '2026-10-10T12:00:00.000Z', acct: 'acct-fake-bbb' }, { at: '2026-10-11T12:00:00.000Z', acct: 'acct-fake-zzz' },
+    ]));
+    const at = (id, iso, out) => req(id, SONNET, out).split('\n').filter(Boolean).map((l) => JSON.stringify({ ...JSON.parse(l), timestamp: iso })).join('\n') + '\n';
+    writeFileSync(lead, at('a1', '2026-10-10T09:00:00Z', 5000000) + at('b1', '2026-10-10T15:00:00Z', 6000000) + at('z1', '2026-10-11T13:00:00Z', 1000000));
+    const NOWT = Date.parse('2026-10-12T00:00:00Z');
+    let last;
+    const scan = () => { last = { files: {} }; return scanSession({ sessionId: SID, transcriptPath: lead, deadline: Date.now() + 60000, state: last }); };
+
+    delete process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS;
+    const plain = scan();
+    assert.equal('byAcct' in plain, false, 'option unset: no per-account figure');
+    assert.equal(/"acct"|"ts"/.test(JSON.stringify(last)), false, 'option unset: nothing extra saved');
+
+    process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS = JSON.stringify([
+      { id: 'acct-fake-aaa', label: 'first', weekResetUtc: 'Fri 16:00', weeklyLimitUnits: 1000 },
+      { id: 'acct-fake-bbb', label: 'second', weekResetUtc: 'Wed 22:00', weeklyLimitUnits: 2000 },
+    ]);
+    const r = scan();
+    assert.equal(r.total, plain.total, 'the total does not change');
+    assert.deepEqual(Object.fromEntries(Object.entries(r.byAcct).map(([k, v]) => [k, Math.round(v)])), { 'acct-fake-aaa': 50, 'acct-fake-bbb': 60, '': 10 });
+    const text = budgetNoticeText(r.total, undefined, r.byAcct, NOWT);
+    assert.match(text, /about 120 plan units across accounts \(account first 50 units, ~5% of its ~1,000-unit week; account second 60 units, ~3% of its ~2,000-unit week; 10 units not attributed to a listed account\)/);
+
+    // one listed account only (the unlisted part is not there): the usual sentence, with that account's week and label
+    writeFileSync(lead, at('a1', '2026-10-10T09:00:00Z', 5000000));
+    const one = scan();
+    assert.match(budgetNoticeText(one.total, undefined, one.byAcct, NOWT), /about 50 plan units \(~5% of a ~1,000-unit week, account first\)/);
+    // a byAcct holding no listed account: the usual sentence for the account signed in now
+    assert.equal(budgetNoticeText(50, undefined, { '': 50 }, NOWT), budgetNoticeText(50));
+  } finally {
+    if (saved === undefined) delete process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS; else process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS = saved;
+    fx.cleanup();
+  }
+});
+
 test('session_budget_units 0 is off: nothing scanned, logged or delivered', () => {
   const fx = makeFixture();
   try {

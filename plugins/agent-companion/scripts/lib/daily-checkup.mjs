@@ -538,6 +538,8 @@ function scanFile(f, fileState, ctx) {
       if (a.key) addSpawnRequest(a, { ts: r.ts, model: r.model, usage: r.usage, ctx: contextTokensOf(r.usage), cats: r.cats });
     }
     const b = (state.hours[h] ||= [0, 0, 0]);
+    // Option claude_accounts: the same units by minute of the hour, so a session across an account switch splits at the switch time.
+    if (ctx.fine) { const fm = ((state.fine ||= {})[h] ||= {}); const mi = Math.floor((r.ts - h * HOUR_MS) / 60000); fm[mi] = Math.round(((fm[mi] || 0) + units) * 1e4) / 1e4; }
     if (r.ts > state.dataThroughMs) state.dataThroughMs = r.ts;
     if (!isSub) { b[0] += units; continue; }
     // b = [main, subagent, over 150K, over the ceiling, the ceiling]. An hour that
@@ -630,7 +632,7 @@ export function scanTranscripts({ root = transcriptsRoot(), nowT = nowMs(), hold
   st.facts.landed ||= {};
   st.facts.agentIds ||= {}; // Agent/Task tool_use ids seen -> time
   st.facts.done ||= {}; // ... whose tool_result came back -> time
-  const ctx = { state: st, seen: sn, cutoffMs: st.scanFromMs, holdMs, facts: st.facts, ceiling };
+  const ctx = { state: st, seen: sn, cutoffMs: st.scanFromMs, holdMs, facts: st.facts, ceiling, fine: configuredAccounts().length > 0 };
   const found = discoverTranscripts(root, { sinceMs: Math.max(st.scanFromMs, nowT - KEEP_DAYS * DAY_MS), main: true, subagents: true, workflows: true, meta: false });
   let read = 0;
   let bytes = 0;
@@ -648,6 +650,8 @@ export function scanTranscripts({ root = transcriptsRoot(), nowT = nowMs(), hold
   // Forget what can no longer matter.
   const keepFrom = nowT - KEEP_DAYS * DAY_MS;
   for (const h of Object.keys(st.hours)) if (Number(h) * HOUR_MS < keepFrom) delete st.hours[h];
+  if (!ctx.fine) delete st.fine; // option unset: a map left from when it was set is dropped, so the file matches 0.31.76
+  else if (st.fine) for (const h of Object.keys(st.fine)) if (Number(h) * HOUR_MS < keepFrom) delete st.fine[h];
   pruneFacts(st.facts, keepFrom);
   for (const [k, a] of Object.entries(st.facts.spawns)) if ((a.start || a.t0 || 0) < keepFrom) delete st.facts.spawns[k];
   for (const m of [st.facts.agentIds, st.facts.done]) for (const [k, t] of Object.entries(m)) if (t < keepFrom) delete m[k];
@@ -723,25 +727,66 @@ function classTable(spawns, units) {
   return out;
 }
 
-// Per-account week figures (option claude_accounts): each hour's units go to the account active at the start of that hour (accountAt),
-// counted from that account's own weekly reset, against that account's limit at the end of the day. [] entries never occur: an
-// account with no hours still gets its line (0%).
-export function accountWeeks(state, endMs, accounts, history, limit) {
-  return accounts.map((a) => {
-    const wStart = weekStartAt(a.weekResetUtc, endMs - 1);
-    let units = 0;
-    for (let h = Math.floor(wStart / HOUR_MS); h * HOUR_MS < endMs; h += 1) {
-      const b = state.hours[h];
-      if (b && accountAt(history, h * HOUR_MS) === a.id) units += b[0] + b[1];
+// One hour's units as [account|null, units] slices. An hour no history entry (or uncertain interval) touches goes whole to the account
+// at its start. An hour a switch falls in is split by the minute each message was sent (state.fine, kept while claude_accounts is set;
+// a state without it, or the part of the hour it does not hold, falls back to the account at the hour start). null = no history covers it.
+function hourSlices(state, h, history) {
+  const b = state.hours[h];
+  if (!b) return [];
+  const tot = b[0] + b[1];
+  if (!(tot > 0)) return [];
+  const t0 = h * HOUR_MS;
+  const t1 = t0 + HOUR_MS;
+  const fine = state.fine && state.fine[h];
+  const touched = history.some((e) => {
+    const at = Date.parse(e.at);
+    const after = e.after ? Date.parse(e.after) : NaN;
+    return (at > t0 && at < t1) || (Number.isFinite(after) && after < t1 && at > t0);
+  });
+  if (!fine || !touched) return [[accountAt(history, t0), tot]];
+  const out = [];
+  let got = 0;
+  for (const [mi, u] of Object.entries(fine)) { out.push([accountAt(history, t0 + Number(mi) * 60000), u]); got += u; }
+  if (tot - got > 1e-6) out.push([accountAt(history, t0), tot - got]);
+  return out;
+}
+
+// Per-account week figures (option claude_accounts): each message's units go to the account active when it was sent (accountAt, split
+// at the switch time inside an hour), counted from that account's own weekly reset, against that account's limit at the end of the day.
+// Units of hours no switch history covers, or of an account the option does not list, are not any account's: they come back as
+// `unattributed` (units since the earliest account week start), so no account reads 0% because of them. An account with no hours still
+// gets its line (0%). `dayFromMs` adds dayUnits (the day's own units per account) for the scored pace metric.
+export function accountSplit(state, endMs, accounts, history, limit, dayFromMs = null) {
+  const ids = new Set(accounts.map((a) => a.id));
+  const starts = accounts.map((a) => weekStartAt(a.weekResetUtc, endMs - 1));
+  const earliest = Math.min(...starts);
+  const units = accounts.map(() => 0);
+  const dayUnits = accounts.map(() => 0);
+  let unatt = 0;
+  for (let h = Math.floor(earliest / HOUR_MS); h * HOUR_MS < endMs; h += 1) {
+    for (const [acct, u] of hourSlices(state, h, history)) {
+      const i = acct ? accounts.findIndex((a) => a.id === acct) : -1;
+      if (i < 0 || !ids.has(acct)) { unatt += u; continue; }
+      if (h * HOUR_MS >= starts[i]) units[i] += u;
+      if (dayFromMs !== null && h * HOUR_MS >= dayFromMs) dayUnits[i] += u;
     }
+  }
+  const weeks = accounts.map((a, i) => {
+    const wStart = starts[i];
     const lim = accountLimitAt(a, endMs - 1, limit);
     const elapsed = (endMs - wStart) / WEEK_MS;
-    const pctSoFar = r2((units / lim) * 100);
+    const pctSoFar = r2((units[i] / lim) * 100);
     return {
-      id: a.id, label: a.label, start: iso(wStart), units: r1(units), limitUnits: lim, pctSoFar,
+      id: a.id, label: a.label, start: iso(wStart), units: r1(units[i]), limitUnits: lim, pctSoFar,
       elapsedPct: r1(elapsed * 100), paceAtResetPct: r1(elapsed > 0 ? pctSoFar / elapsed : 0), partial: wStart < state.scanFromMs,
+      ...(dayFromMs !== null ? { dayUnits: r1(dayUnits[i]) } : {}),
     };
   });
+  return { weeks, unattributed: unatt > 0.05 ? { units: r1(unatt), pct: r2((unatt / limit) * 100), from: iso(earliest) } : null };
+}
+
+export function accountWeeks(state, endMs, accounts, history, limit) {
+  return accountSplit(state, endMs, accounts, history, limit).weeks;
 }
 
 export function buildDayRecord(state, startMs, { limit = weeklyLimitUnits(), target = DEFAULT_PACE_PCT, computedAt = nowMs(), accounts = null, history = null } = {}) {
@@ -755,6 +800,7 @@ export function buildDayRecord(state, startMs, { limit = weeklyLimitUnits(), tar
   const elapsed = (endMs - wStart) / WEEK_MS;
   const acc = state.days[dayKeyOf(startMs)] || { spawns: 0, compactions: 0, limitHits: 0, firstLimitMs: 0, type: {}, role: {}, rung: {}, uType: {}, uRole: {}, uRung: {} };
   const rollout = readRollout();
+  const accts = accounts && accounts.length ? accountSplit(state, endMs, accounts, history || [], limit, startMs) : null;
   return {
     v: SCHEMA,
     day: dayKeyOf(startMs),
@@ -775,7 +821,7 @@ export function buildDayRecord(state, startMs, { limit = weeklyLimitUnits(), tar
       paceAtResetPct: r1(elapsed > 0 ? pct(weekUnits) / elapsed : 0),
       partial: wStart < state.scanFromMs,
     },
-    ...(accounts && accounts.length ? { weeks: accountWeeks(state, endMs, accounts, history || [], limit) } : {}),
+    ...(accts ? { weeks: accts.weeks, ...(accts.unattributed ? { unattributed: accts.unattributed } : {}) } : {}),
     spawns: {
       total: acc.spawns,
       byType: classTable(acc.type, acc.uType),
@@ -936,6 +982,41 @@ export function runCheckup({ root = transcriptsRoot(), nowT = nowMs(), holdMs = 
   return { written, factsWritten, filesRead: scan.filesRead, bytesRead: scan.bytesRead, filesSeen: scan.filesSeen, dataThrough: state.dataThroughMs ? iso(state.dataThroughMs) : null };
 }
 
+// Rebuild the history record of the named closed days from the saved scan state and replace each one's line in place (a forced re-run:
+// `usage-analysis.mjs run --day D --force`). Only with `claude_accounts` set (unset: nothing to re-derive, the file is never touched).
+// A day the state does not fully cover is left alone and named in `out.refused` ({ day, why }): before the scan start, not closed yet, or
+// with a week (the main one, or any account's) that starts before the oldest hour the state keeps (the scan prunes hours older than
+// KEEP_DAYS from its last run), since rebuilding it would write zeros or a week missing its early hours.
+// Returns the days rebuilt. Fail-open: [] when there is no state or no history line.
+export function rebuildHistoryDays(days, { nowT = nowMs(), refused = null } = {}) {
+  try {
+    const { limit, target, accounts, history } = checkupOptions();
+    if (!accounts || !accounts.length) return [];
+    const p = checkupPaths();
+    const state = readJsonSafe(p.state);
+    if (!state || state.v !== SCHEMA || !state.hours || !Number.isFinite(state.scanFromMs) || !existsSync(p.history)) return [];
+    const keepFrom = (Number.isFinite(state.lastScanMs) ? state.lastScanMs : nowT) - KEEP_DAYS * DAY_MS;
+    const refuse = (day, why) => { if (Array.isArray(refused)) refused.push({ day, why }); };
+    const want = new Set(days);
+    const done = [];
+    const lines = readFileSync(p.history, 'utf8').split('\n').map((line) => {
+      if (!line.trim()) return line;
+      let j;
+      try { j = JSON.parse(line); } catch { return line; }
+      if (!j || !want.has(j.day)) return line;
+      const s = Date.parse(`${j.day}T08:00:00Z`);
+      if (!Number.isFinite(s) || s < state.scanFromMs || s + DAY_MS > nowT) { refuse(j.day, 'the saved scan state does not cover it (before the scan start, or the day is not closed yet)'); return line; }
+      const endMs = s + DAY_MS;
+      const earliest = Math.min(weekStartMs(endMs - 1), ...accounts.map((a) => weekStartAt(a.weekResetUtc, endMs - 1)));
+      if (earliest < keepFrom) { refuse(j.day, `its week starts ${iso(earliest)}, before the oldest hour the scan state keeps (${KEEP_DAYS} days, from ${iso(keepFrom)}); rebuilding would drop units`); return line; }
+      done.push(j.day);
+      return JSON.stringify(buildDayRecord(state, s, { limit, target, computedAt: nowT, accounts, history }));
+    });
+    if (done.length) atomicWrite(p.history, lines.join('\n'));
+    return done;
+  } catch { return []; }
+}
+
 // --- Lock, launch ----------------------------------------------------------------------
 
 export function takeLock(nowT = Date.now()) {
@@ -1006,6 +1087,7 @@ export function formatLine(rec, historyPath) {
   // Accounts configured: one week-so-far and pace figure per account, each against its own week; otherwise the single week.
   const wk = Array.isArray(rec.weeks) && rec.weeks.length
     ? rec.weeks.map((w) => `${w.label} week so far ${fmtPct(w.pctSoFar)}, pace at reset ${fmtPct(w.paceAtResetPct)}`).join('; ')
+      + (rec.unattributed ? `; ${r1(rec.unattributed.units)} units (${fmtPct(rec.unattributed.pct)}) in hours no switch history covers, in no account's week` : '')
     : `week so far ${fmtPct(rec.week.pctSoFar)}, pace at reset ${fmtPct(rec.week.paceAtResetPct)}`;
   return `[agent-companion] Daily checkup ${rec.day} (08:00Z to 08:00Z): ${fmtPct(rec.pct.total)} of the weekly limit `
     + `against the ${fmtPct(rec.targetPct)} target (${delta}); ${wk}${sw}${lim}. `

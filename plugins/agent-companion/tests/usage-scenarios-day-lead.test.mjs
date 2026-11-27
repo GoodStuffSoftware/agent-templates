@@ -422,3 +422,68 @@ test('the new library files make no model call, start no process and never wait'
     assert.ok(!/node:fs|node:os|node:path/.test(readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')), `${rel} is pure`);
   }
 });
+
+// ---- 0.31.77: per-account weeks and the unattributed figure through the runner, week.pace, the report and a forced re-run of one day ----
+test('accounts: a forced re-run of one day rebuilds its checkup record; the result, week.pace and the report carry the per-account weeks and unattributed units', async () => {
+  const saved = process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS;
+  process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS = JSON.stringify([
+    { id: 'acct-fake-aaa', label: 'first', weekResetUtc: 'Fri 16:00' },
+    { id: 'acct-fake-bbb', label: 'second', weekResetUtc: 'Wed 22:00', weeklyLimitUnits: 1300, limitChanges: [{ from: '2026-10-10T12:00:00Z', weeklyLimitUnits: 2860 }] },
+  ]);
+  const fx = makeFixture();
+  try {
+    const root = fx.stateDir;
+    seed(root);
+    const sw = join(fx.dir, '.claude', 'session-sync', 'accounts', 'switch-history.json');
+    mkdirSync(dirname(sw), { recursive: true });
+    writeFileSync(sw, JSON.stringify([{ at: '2026-10-09T00:00:00.000Z', acct: 'acct-fake-aaa' }, { at: '2026-10-10T14:30:00.000Z', acct: 'acct-fake-bbb' }]));
+    const hr = (iso) => Date.parse(iso) / 3600000;
+    const state = {
+      v: 1, scanFromMs: Date.parse('2026-10-01T00:00:00Z'), dataThroughMs: Date.parse('2026-10-11T07:00:00Z'), days: {}, facts: {},
+      hours: { [hr('2026-10-08T12:00:00Z')]: [30, 0, 0, 0, 0], [hr('2026-10-10T10:00:00Z')]: [100, 0, 0, 0, 0], [hr('2026-10-10T14:00:00Z')]: [60, 0, 0, 0, 0], [hr('2026-10-10T20:00:00Z')]: [200, 0, 0, 0, 0] },
+      fine: { [hr('2026-10-10T14:00:00Z')]: { 10: 20, 40: 40 } },
+    };
+    const { checkupPaths } = await import('../scripts/lib/daily-checkup.mjs');
+    mkdirSync(dirname(checkupPaths().state), { recursive: true });
+    writeFileSync(checkupPaths().state, JSON.stringify(state));
+    // a stale record for the day: the single week only
+    writeHistory(root, [historyLine(LAST)]);
+    const { main } = await import('../scripts/usage-analysis.mjs');
+    const lines = [];
+    const code = await main(['run', '--root', root, '--no-scan', '--no-register', '--now', new Date(NOW).toISOString(), '--day', LAST, '--force'], { out: (s) => lines.push(s) });
+    assert.equal(code, 0);
+
+    const rec = JSON.parse(readFileSync(checkupPaths().history, 'utf8').split('\n').filter(Boolean).find((l) => l.includes(`"day":"${LAST}"`)));
+    assert.deepEqual(rec.weeks.map((w) => [w.id, w.units, w.dayUnits]), [['acct-fake-aaa', 120, 120], ['acct-fake-bbb', 240, 240]], 'rebuilt from the saved state, split at the switch');
+    assert.deepEqual(rec.unattributed, { units: 30, pct: 1.05, from: '2026-10-07T22:00:00.000Z' });
+
+    const res = readResult(root, LAST);
+    assert.deepEqual(res.weeks.map((w) => w.label), ['first', 'second']);
+    assert.deepEqual(res.unattributed, { units: 30, pct: 1.05 });
+    // week.pace: the account that used most that day (second), over its own week; the first is under the minimum elapsed share
+    const pace = currentOf(res, 'week.pace');
+    assert.equal(pace.detail.account, 'second');
+    near(pace.value, res.weeks[1].paceAtResetPct, 'the second account pace, not the mixed week');
+    const mw = getMetric('week.pace');
+    const hist = { kind: 'day', hist: { weeks: rec.weeks, week: rec.week } };
+    assert.match(mw.stat([hist], { params: { account: 'first' } }).why, /plan week has elapsed/);
+    assert.equal(mw.stat([hist], { params: { account: 'nobody' } }).gap, true);
+    // a 0.31.76-shaped line (weeks without dayUnits): not comparable, never "no account used anything"; a named account still reads its own week
+    const old76 = { kind: 'day', hist: { weeks: rec.weeks.map(({ dayUnits, ...w }) => w), week: rec.week } };
+    const g76 = mw.stat([old76], {});
+    assert.equal(g76.gap, true);
+    assert.match(g76.why, /no per-account day units/);
+    assert.doesNotMatch(g76.why, /used anything/);
+    assert.equal(mw.stat([old76], { params: { account: 'acct-fake-bbb' } }).detail.account, 'second');
+    assert.equal(mw.stat([hist], { params: { account: 'acct-fake-bbb' } }).detail.account, 'second');
+    // the report and the summary
+    const { renderReport, summaryLines } = await import('../scripts/lib/usage/report.mjs');
+    assert.match(renderReport(res), /Not in any account's week: 30 units \(1\.1% of the single-account limit\)/);
+    assert.match(summaryLines(res).join('\n'), /30 u unattributed \(1\.1%\)/);
+    // a record without weeks keeps the single-week path
+    assert.equal(mw.stat([{ kind: 'day', hist: { week: rec.week } }], { params: { account: 'first', minElapsedPct: 0 } }).detail.account, undefined);
+  } finally {
+    if (saved === undefined) delete process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS; else process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS = saved;
+    fx.cleanup();
+  }
+});

@@ -57,6 +57,11 @@ export const ALLOWED = {
   "bench/tasks/real-opt-fallback.mjs": [
     "// AGENT_COMPANION_HOME_OVERRIDE sandboxing, never touches the real machine's",
   ],
+  "hooks/hold-message.mjs": [
+    // The no-hold fast path: this line only locates release-hold.json (the *_OVERRIDE env var is the sandbox home, not a task type's trial).
+    // It must not go through lib/context.mjs: importing that would defeat the exit-before-loading-anything path when no hold is active.
+    "const holdFilePath = () => join(process.env.AGENT_COMPANION_STATE_DIR || join(process.env.CLAUDE_CONFIG_DIR || join(process.env.AGENT_COMPANION_HOME_OVERRIDE || homedir(), '.claude'), 'agent-companion'), 'state', 'release-hold.json');",
+  ],
   "hooks/lib/brevity.mjs": [
     "// directions, before the global override, before the plugin option default.",
     "// hand-edited config with a mistake in it degrades to \"no override\" for that",

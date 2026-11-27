@@ -325,7 +325,7 @@ export function makeHooks({
     }
     const h = histOf(day);
     const hist = h ? {
-      week: h.week || null, limit: h.limit || null, limitUnits: Number.isFinite(h.limitUnits) ? h.limitUnits : null,
+      week: h.week || null, ...(Array.isArray(h.weeks) && h.weeks.length ? { weeks: h.weeks } : {}), limit: h.limit || null, limitUnits: Number.isFinite(h.limitUnits) ? h.limitUnits : null,
       ceilingNudges: Number.isFinite(h.ceilingNudges) ? h.ceilingNudges : null,
     } : null;
     let meter = null;
@@ -560,6 +560,7 @@ function computeDay(ctx, day, parts, prior, force) {
   // per-account weeks (option claude_accounts): present only when the checkup record has them
   const weeks = hist && Array.isArray(hist.weeks) && hist.weeks.length
     ? hist.weeks.map((w) => ({ id: w.id, label: w.label, pctSoFar: w.pctSoFar, elapsedPct: w.elapsedPct, paceAtResetPct: w.paceAtResetPct, limitUnits: w.limitUnits, partial: !!w.partial })) : null;
+  const unattributed = weeks && hist.unattributed && Number.isFinite(hist.unattributed.units) ? { units: hist.unattributed.units, pct: hist.unattributed.pct } : null;
 
   // the day against the mean of the previous 7 settled days (totals only; scenarios do the rest)
   const prev = [];
@@ -664,6 +665,7 @@ function computeDay(ctx, day, parts, prior, force) {
     weights,
     week,
     ...(weeks ? { weeks } : {}),
+    ...(unattributed ? { unattributed } : {}),
     vsTrailing7,
     scenarios,
     exclusions,
@@ -867,7 +869,7 @@ function runAnalysisUnsafe(opts, t0, clock) {
     const hist = historyRecord(root, day);
     const parts = {
       runner: RUNNER_VERSION, limitUnits: limit, config: cparts, windows: wparts, facts, attrs,
-      history: hist ? h12({ w: hist.week, p: hist.pct && hist.pct.total, l: hist.limit, ...(hist.weeks ? { a: hist.weeks } : {}) }) : null,
+      history: hist ? h12({ w: hist.week, p: hist.pct && hist.pct.total, l: hist.limit, ...(hist.weeks ? { a: hist.weeks } : {}), ...(hist.unattributed ? { u: hist.unattributed } : {}) }) : null,
     };
     // the plan-meter sample the day's meter figure reads (only when there is one, so a day without samples keeps its digest)
     const ms = meterSamplesOf(day);

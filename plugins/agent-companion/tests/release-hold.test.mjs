@@ -538,3 +538,168 @@ test('scope all: the hold hook leaves release commands to the all-calls denial, 
   assert.notEqual(decisionOf(holdMessagePre('claude plugin update agent-companion')), 'deny');
   assert.equal(decisionOf(runHook('hooks/spawn-guard.mjs', spawnPayload).json), 'deny');
 }));
+
+// ---- 0.31.77: hold scope gaps (PR head, quoted text, floor crossing, pre hook cost) ----
+// The gh lookup is a stand-in script (AGENT_COMPANION_GH_BIN): no test touches the network. Fake ids only.
+function fakeGh(fx, { head = null, fail = false } = {}) {
+  const id = ++flagSeq;
+  const log = join(fx.dir, `gh-calls-${id}.log`);
+  const bin = join(fx.dir, `fake-gh-${id}.mjs`);
+  writeFileSync(bin, `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(log)}, process.argv.slice(2).join(' ') + '\\n');\n${fail ? 'process.exit(1);' : `process.stdout.write(${JSON.stringify((head ?? '') + '\n')});`}\n`);
+  return { env: { AGENT_COMPANION_GH_BIN: bin }, calls: () => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : []) };
+}
+function holdPre(command, env = {}) {
+  const r = spawnSync(process.execPath, [join(PLUGIN_ROOT, 'hooks', 'hold-message.mjs'), '--event', 'pre'], { input: JSON.stringify(bashPayload(command)), encoding: 'utf8', env: { ...process.env, ...env }, windowsHide: true });
+  return r.stdout ? JSON.parse(r.stdout) : null;
+}
+
+test('scope releases: gh pr merge of a PR whose head is release/ is refused (head looked up, mocked); other heads pass; a failed lookup is refused with its reason', () => withFx((fx) => {
+  putHold(HOLD);
+  const rel = fakeGh(fx, { head: 'release/0.31.77' });
+  assert.equal(decisionOf(holdPre('gh pr merge 4242 --squash --repo owner/demo-repo', rel.env)), 'deny');
+  assert.deepEqual(rel.calls(), ['pr view 4242 --repo owner/demo-repo --json headRefName -q .headRefName']);
+  const other = fakeGh(fx, { head: 'fix/demo' });
+  assert.notEqual(decisionOf(holdPre('gh pr merge 4242 --repo owner/demo-repo', other.env)), 'deny');
+  const bad = fakeGh(fx, { fail: true });
+  const r = holdPre('gh pr merge 4242 --repo owner/demo-repo', bad.env);
+  assert.equal(decisionOf(r), 'deny', 'lookup failure fails closed');
+  assert.match(reason({ json: r }), /could not be looked up/);
+  // no lookup for anything but gh pr merge, and a quoted gh line never looks anything up
+  const none = fakeGh(fx, { head: 'release/x' });
+  for (const c of ['git push origin fix/demo', 'gh pr view 4242', 'echo "gh pr merge 4242"', 'git commit -m "gh pr merge 4242"']) assert.notEqual(decisionOf(holdPre(c, none.env)), 'deny', c);
+  assert.deepEqual(none.calls(), []);
+}, null));
+
+test('scope releases: git merge of release/x or origin/release/x is refused; a merge message that names release/ is not', () => withFx(() => {
+  putHold(HOLD);
+  for (const c of ['git merge release/0.31.77', 'git merge --no-ff origin/release/0.31.77', 'git -C /tmp/demo-clone merge origin/release/0.31.77 -m "land"']) assert.equal(decisionOf(holdPre(c)), 'deny', c);
+  for (const c of ['git merge feature/demo', 'git merge -m "release/0.31.77 notes" feature/demo', 'git merge --no-ff -m release/0.31.77 feature/demo']) assert.notEqual(decisionOf(holdPre(c)), 'deny', c);
+}, null));
+
+test('scope releases: quoted text is not a command (echo, printf, commit message, PR body, heredoc, PowerShell here-string); real commands around it still match', () => withFx(() => {
+  putHold(HOLD);
+  const pass = [
+    'echo "git push origin HEAD:release/0.31.77"',
+    "printf '%s\\n' 'git push origin release/0.31.77'",
+    'echo git push origin release/0.31.77',
+    'Write-Host "claude plugin update agent-companion"',
+    'git commit -m "git push origin release/0.31.77"',
+    'git commit -m "run claude plugin install agent-companion afterwards"',
+    'git commit -m "x" -m "git merge release/0.31.77"',
+    'gh pr create --title "release/0.31.77 follow-up" --body "gh pr merge 1 --repo o/agent-templates" --base main',
+    ["git commit -F - <<'EOF'", 'fix demo', 'git push origin release/0.31.77', 'claude plugin update agent-companion', 'EOF'].join('\n'),
+    ['cat <<EOF', 'claude plugin install agent-companion', 'EOF'].join('\n'),
+    "git commit -m @'\ngit push origin release/0.31.77\n'@",
+    'echo "a" ; echo "b release/x"',
+  ];
+  for (const c of pass) assert.notEqual(decisionOf(holdPre(c)), 'deny', c);
+  const deny = [
+    'echo hi && git push origin release/0.31.77',
+    'git commit -m "msg"; git push origin HEAD:release/0.31.77',
+    ["git commit -F - <<'EOF'", 'msg', 'EOF', 'git push origin release/0.31.77'].join('\n'),
+    'bash -c "git push origin release/0.31.77"',
+    'pwsh -Command "claude plugin update agent-companion"',
+    'git push origin "release/0.31.77"',
+    '& "C:\\Program Files\\claude\\claude.exe" plugin install agent-companion@demo-marketplace',
+    'gh pr create --head release/0.31.77 --title "demo"',
+    'echo x | git push origin release/0.31.77',
+  ];
+  for (const c of deny) assert.equal(decisionOf(holdPre(c)), 'deny', c);
+}, null));
+
+test('floor crossing: a flag first shown below the hold floor that later meets it restarts the countdown; no hold with zero grace', () => withFx(() => {
+  const T = Date.parse('2026-03-01T12:00:00Z'); const MIN = 60e3;
+  const below = [{ name: 'demo-rate', value: 3, level: 3, events: 3, n: 10 }];
+  const above = [{ name: 'demo-rate', value: 3, level: 3, events: 12, n: 40 }];
+  assert.ok(S.openFlag({ version: '1', flags: below, at: T, check: '+1h' }));
+  S.noteShown('s1', T);
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: T + 90 * MIN }), null, 'below the floor never holds');
+  const t2 = T + 120 * MIN;
+  assert.ok(S.openFlag({ version: '1', flags: above, at: t2, check: '+2h' }));
+  assert.equal(S.readFlag().notifiedAt, null, 'crossing the floor restarts the countdown');
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: t2 + 5 * MIN }), null, 'never shown since the crossing: no hold');
+  S.noteShown('s1', t2 + 5 * MIN);
+  assert.equal(S.maybeHold({ holdMinutes: 30, at: t2 + 20 * MIN }), null, 'inside the grace from the first showing at the floor');
+  assert.ok(S.maybeHold({ holdMinutes: 30, at: t2 + 36 * MIN }), 'holds once the grace has run');
+}));
+
+test('floor crossing: a flag already above the floor is not restarted by a re-check, nor by a watch-health flag joining', () => withFx(() => {
+  const T = Date.parse('2026-03-01T12:00:00Z'); const MIN = 60e3;
+  const above = [{ name: 'demo-rate', value: 3, level: 3, events: 12, n: 40 }];
+  S.openFlag({ version: '1', flags: above, at: T }); S.noteShown('s1', T);
+  S.openFlag({ version: '1', flags: above, at: T + 10 * MIN });
+  assert.equal(S.readFlag().notifiedAt, new Date(T).toISOString(), 'same flag, still above: countdown untouched');
+  S.openFlag({ version: '1', flags: [{ name: 'usage-source-empty', value: 1, events: 1, n: 5 }], at: T + 20 * MIN });
+  assert.equal(S.readFlag().notifiedAt, new Date(T).toISOString(), 'a watch-health flag joining does not restart it');
+}));
+
+test('pre hook: no hold file -> exits before loading lib/context.mjs or lib/release-watch-state.mjs (resolve log); a hold loads them', () => withFx((fx) => {
+  const logFile = join(fx.dir, 'resolved.log');
+  const pre = join(fx.dir, 'trace-resolve.mjs');
+  writeFileSync(pre, `import { registerHooks } from 'node:module';\nimport { appendFileSync } from 'node:fs';\nregisterHooks({ resolve(s, c, next) { const r = next(s, c); appendFileSync(${JSON.stringify(logFile)}, r.url + '\\n'); return r; } });\n`);
+  const run = (command) => spawnSync(process.execPath, ['--import', pathToFileURL(pre).href, join(PLUGIN_ROOT, 'hooks', 'hold-message.mjs'), '--event', 'pre'], { input: JSON.stringify(bashPayload(command)), encoding: 'utf8', env: process.env, windowsHide: true });
+  const loaded = () => (existsSync(logFile) ? readFileSync(logFile, 'utf8') : '');
+  const r = run('claude plugin update agent-companion');
+  assert.equal(r.status, 0); assert.equal(r.stdout, '', 'no hold: no decision');
+  assert.match(loaded(), /hold-message\.mjs/, 'the trace works');
+  assert.doesNotMatch(loaded(), /context\.mjs|release-watch-state\.mjs/, 'nothing heavy loaded without a hold');
+  rmSync(logFile, { force: true });
+  putHold(HOLD);
+  const r2 = run('claude plugin update agent-companion');
+  assert.equal(decisionOf(JSON.parse(r2.stdout)), 'deny');
+  assert.match(loaded(), /release-watch-state\.mjs/, 'with a hold the state module loads');
+  assert.equal(S.paths().hold, holdFile(), 'the cheap path and the library agree on where the hold file is');
+}, null));
+
+// ---- 0.31.77 fix round: parser bypasses, shared lookup budget, cd-aware lookup ----
+test('scope releases: every bypass the review found is refused (prefixes, unquoted shells, heredoc and pipe into a shell, substitution, iex, glued brace, comment apostrophe, PowerShell trailing backslash)', () => {
+  const stub = () => 'fix/demo'; // PR head lookups never match: only the parser is under test
+  const deny = [
+    'timeout 60 git push origin HEAD:release/0.31.77', 'xargs git push origin release/0.31.77', 'watch -n 5 git push origin release/0.31.77',
+    'stdbuf -oL git push origin release/0.31.77', 'sudo -u demo git push origin release/0.31.77',
+    'cmd /c git push origin release/0.31.77', 'pwsh -NoProfile -Command git push origin release/0.31.77',
+    "bash <<'EOF'\ngit push origin release/0.31.77\nEOF", 'cat <<EOF | bash\ngit push origin release/0.31.77\nEOF', 'bash <<< "git push origin release/0.31.77"',
+    'echo "git push origin release/0.31.77" | bash', 'echo git push origin release/0.31.77 | sh', 'echo release/0.31.77 | xargs git push origin',
+    'echo "$(git push origin release/0.31.77)"', 'echo `git push origin release/0.31.77`', 'x="$(git push origin release/0.31.77)"',
+    'iex "git push origin release/0.31.77"', 'Invoke-Expression "git push origin release/0.31.77"',
+    'if ($true) {git push origin release/0.31.77}', 'git push origin {release/0.31.77,main}',
+    "# what's next\ngit push origin release/0.31.77",
+    'cd "C:\\dir\\"; git push origin release/0.31.77',
+    'g\\it push origin release/0.31.77', 'git \\\npush origin release/0.31.77',
+    'pwsh -EncodedCommand AAAA', 'git merge refs/remotes/origin/release/0.31.77',
+  ];
+  for (const c of deny) assert.ok(S.releaseActionKind(c, stub), c);
+  const pass = [
+    'git push origin main # release/0.31.77', "echo foo; # it's\nnpm test", 'timeout 5 echo git push origin release/0.31.77', 'echo "a" | grep release/0.31.77',
+    "git commit -F - <<'EOF'\nfix it's\ngit push origin release/0.31.77\nEOF", "git commit -m \"$(cat <<'EOF'\nit's git push origin release/0.31.77\nEOF\n)\"",
+    'echo "git push origin release/0.31.77"', 'git log release/0.31.77 | head',
+  ];
+  for (const c of pass) assert.equal(S.releaseActionKind(c, stub), null, c);
+});
+
+test('scope releases: lookups share one budget; a hanging gh refuses two merges inside the hook timeout', () => withFx((fx) => {
+  putHold(HOLD);
+  const bin = join(fx.dir, 'hang-gh.mjs');
+  writeFileSync(bin, 'setTimeout(() => {}, 60000);\n');
+  const t0 = Date.now();
+  const r = holdPre('gh pr merge 5 --repo o/a && gh pr merge 6 --repo o/b', { AGENT_COMPANION_GH_BIN: bin });
+  const ms = Date.now() - t0;
+  assert.equal(decisionOf(r), 'deny');
+  assert.ok(ms < 4500, `one budget for both merges: ${ms} ms`);
+  assert.equal(decisionOf(holdPre('gh pr merge 5 --repo o/a; gh pr merge 6 --repo o/b; gh pr merge 7 --repo o/c', { AGENT_COMPANION_GH_BIN: bin })), 'deny');
+}, null));
+
+test('scope releases: the head lookup runs where the command runs (cd, Set-Location, --repo, unknown directory)', () => withFx((fx) => {
+  putHold(HOLD);
+  const rel = join(fx.dir, 'relrepo').replace(/\\/g, '/'); const oth = join(fx.dir, 'otherrepo').replace(/\\/g, '/');
+  mkdirSync(rel, { recursive: true }); mkdirSync(oth, { recursive: true });
+  const bin = join(fx.dir, 'cwd-gh.mjs');
+  writeFileSync(bin, "process.stdout.write(process.cwd().endsWith('relrepo') ? 'release/9.9.9\\n' : 'fix/demo\\n');\n");
+  const env = { AGENT_COMPANION_GH_BIN: bin };
+  assert.equal(decisionOf(holdPre(`cd ${rel} && gh pr merge 5`, env)), 'deny', 'cd into the release repo');
+  assert.notEqual(decisionOf(holdPre(`cd ${oth} && gh pr merge 5`, env)), 'deny', 'cd into another repo: that PR head, not release');
+  assert.equal(decisionOf(holdPre(`Set-Location ${rel}; gh pr merge 5`, env)), 'deny', 'Set-Location');
+  assert.equal(decisionOf(holdPre(`(cd ${rel} && gh pr merge 5); gh pr merge 6 --repo o/other`, env)), 'deny', 'the subshell cd applies inside it');
+  assert.equal(decisionOf(holdPre('cd "$SOMEWHERE" && gh pr merge 5', env)), 'deny', 'an unresolvable directory: the repo is unknown, refused');
+  assert.notEqual(decisionOf(holdPre('gh pr merge 5 --repo o/other', env)), 'deny', '--repo needs no directory');
+}, null));

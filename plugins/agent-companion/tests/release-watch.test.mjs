@@ -1724,7 +1724,7 @@ test('scope: releases (default) refuses only release actions; all keeps the all-
     for (const c of ['claude plugin install agent-companion@x', 'claude plugin update agent-companion', 'claude plugin marketplace update', 'git push origin HEAD:release/0.31.75', 'gh pr merge 5 --repo o/agent-templates', 'gh pr create --base main --head release/0.31.75']) {
       assert.match(S.releaseActionDeny(c) || '', /post-release hold/, c);
     }
-    for (const c of ['git push origin fix/x', 'npm test', 'gh pr merge 5 --repo o/other', 'claude plugin install other-plugin']) assert.equal(S.releaseActionDeny(c), null, c);
+    for (const c of ['git push origin fix/x', 'npm test', 'gh pr merge 5 --repo o/other', 'claude plugin install other-plugin']) assert.equal(S.releaseActionDeny(c, () => 'fix/demo'), null, c); // the PR-head lookup is mocked: no network
     process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_SCOPE = 'all';
     assert.equal(S.holdScope(), 'all');
     assert.equal(S.releaseActionDeny('claude plugin update agent-companion'), null, 'all scope: the all-calls path owns the refusal');

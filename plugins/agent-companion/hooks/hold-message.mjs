@@ -9,9 +9,21 @@
 //                 mcp__ccd_session_mgmt__send_message with `session_id`), blocks ONCE with the missing ids. Never a second block.
 // Fails open on every path.
 
-import { openSync, readSync, closeSync, fstatSync } from 'node:fs';
-import { readStdin, passthrough, deny, recordDenial } from './lib/context.mjs';
-import { MESSAGE_LINE, releaseActionDeny, withoutSelf, clearInstruction, notePendingMessages, readPendingMessages, settlePendingMessages, takeOwedMessages, INSTALL_CMD_RE, noteInstaller } from './lib/release-watch-state.mjs';
+import { openSync, readSync, closeSync, fstatSync, existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+
+// 0.31.77: the pre event runs on every Bash and PowerShell call. With no hold file it exits here, having loaded only node built-ins:
+// lib/context.mjs and lib/release-watch-state.mjs (and what they import) are loaded by dynamic import, after this check. The path is
+// the one lib/context.mjs stateRootPath() + stateDir() resolve (tests/release-hold.test.mjs pins that they agree).
+const holdFilePath = () => join(process.env.AGENT_COMPANION_STATE_DIR || join(process.env.CLAUDE_CONFIG_DIR || join(process.env.AGENT_COMPANION_HOME_OVERRIDE || homedir(), '.claude'), 'agent-companion'), 'state', 'release-hold.json');
+if (process.argv[process.argv.indexOf('--event') + 1] === 'pre') {
+  let none = false;
+  try { none = !existsSync(holdFilePath()); } catch { none = false; }
+  if (none) { try { readFileSync(0); } catch { /* no stdin */ } process.exit(0); }
+}
+const { readStdin, passthrough, deny, recordDenial } = await import('./lib/context.mjs');
+const { MESSAGE_LINE, releaseActionDeny, withoutSelf, clearInstruction, notePendingMessages, readPendingMessages, settlePendingMessages, takeOwedMessages, INSTALL_CMD_RE, noteInstaller } = await import('./lib/release-watch-state.mjs');
 
 export const CLEAR_CMD_RE = /release-watch\.mjs["']?\s+clear(?:\s|$)/;
 const ID_RE = /^local_[A-Za-z0-9-]+$/;
@@ -59,7 +71,7 @@ try {
     // PreToolUse (Bash, PowerShell): while a hold in scope "releases" is on, refuse agent-companion release and install commands (0.31.75).
     if (p.tool_name !== 'Bash' && p.tool_name !== 'PowerShell') passthrough();
     const cmd = String((p.tool_input && p.tool_input.command) || '');
-    const text = releaseActionDeny(cmd);
+    const text = releaseActionDeny(cmd, undefined, { cwd: typeof p.cwd === "string" ? p.cwd : undefined, shell: p.tool_name === 'PowerShell' ? 'ps' : 'bash' });
     if (!text) passthrough();
     try { recordDenial('release-hold', p, 'release or install command refused by the hold'); } catch { /* telemetry */ }
     deny(text);

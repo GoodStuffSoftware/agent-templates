@@ -32,7 +32,7 @@ ${AGENT_COMPANION_STATE_DIR}                      # override, mostly for tests
     scout-latest.json            # most recent calibration-scout result (overwritten each run)
     scout-history.jsonl          # append-only: one line per scout run
     daily-checkup-history.jsonl  # append-only: one line per closed 08:00Z day (plan usage, spawns, nudges, active changes)
-    daily-checkup.json           # the checkup's scan state: byte offsets per transcript, hourly unit buckets (rebuilt on loss)
+    daily-checkup.json           # the checkup's scan state: byte offsets per transcript, hourly unit buckets, and with option `claude_accounts` set `fine` (units by minute of each hour, so a switch inside an hour splits it; pruned with the hours) (rebuilt on loss)
     daily-checkup-seen.bin       # request, compaction and spawn ids already counted (8-byte hash + minute stamp each)
     decision-register-state.json  # decision register: streaks, frozen baselines, changelog hits, flags, seen and shown keys (derived; schema in README "Decision register")
     decision-register-details.md  # decision register: one section per open flag, written when a flag appears
@@ -401,6 +401,7 @@ total that skips several multiples at once still writes one.
 | `scan_complete` | boolean | false when the scan stopped at its deadline and `units` is a lower bound |
 | `estimated_turns` | number | requests counted at their own API list price because their weight in `config/plan-weights.json` is not measured (status `assumed` or `estimated`: haiku, fable) |
 | `unpriced_turns` | number | requests on a model with no price at all, counted as zero |
+| `by_account` | array | only with option `claude_accounts` set: `[{ id, units }]`, the session's units by the account active when each message was sent (`id` null = no listed account); the state file then also keeps `acct` (units by account) and `ts` (timestamp of the open request) |
 
 ### `subagent-context.jsonl` — one record per subagent context notice
 
@@ -814,7 +815,8 @@ Written by `scripts/daily-checkup.mjs` (the scout starts it in the background; s
 | `limitUnits`, `targetPct` | the `weekly_limit_units` and `daily_pace_target_pct` used |
 | `units`, `pct` | main, subagent and total: plan units and percent of the weekly limit |
 | `vsTargetPct` | total percent minus the target |
-| `weeks` | Only with option `claude_accounts` set: one entry per account (`id`, `label`, `start`, `units`, `limitUnits`, `pctSoFar`, `elapsedPct`, `paceAtResetPct`, `partial`), each hour counted for the account active then. |
+| `weeks` | Only with option `claude_accounts` set: one entry per account (`id`, `label`, `start`, `units`, `limitUnits`, `pctSoFar`, `elapsedPct`, `paceAtResetPct`, `partial`, and `dayUnits`, the day's own units for that account), each message counted for the account active when it was sent (an hour a switch falls in is split by minute; `fine`, below). |
+| `unattributed` | Only with `weeks`, and only when above 0: `{ units, pct, from }`, the units (since the earliest account week start `from`) in hours no switch history covers or on an account the option does not list, and `pct` of the single-account weekly limit. They are in no account's week. |
 | `week` | `start` (the Friday 16:00Z reset), `units`, `pctSoFar` at the end of the day, `elapsedPct` of the week, `paceAtResetPct` (so far over the elapsed share), `partial` (the scan began after the week did) |
 | `spawns` | `total`, and `byType`, `byRole`, `byRung`: per class `n` (subagent files whose first prompt is in the day), `units` (consumed in the day) and `unitsPerSpawn`. Type and role come from the prompt's `TYPE:`/`ROLE:` lines (`none` when absent), the rung from the agent type (`sonnet/high`, `opus/medium`, `haiku`, else the type name) |
 | `subagent` | `compactions`, `compactionsPer100Spawns`, `unitsOver150k` and `shareOver150kPct` (of subagent units, requests with more than 150K context: a fixed line, kept so the series stays comparable), and since 0.31.24 `ceilingTokens`, `unitsOverCeiling` and `shareOverCeilingPct` (the same share over the active context ceiling, option `subagent_ceiling_tokens`, default 0 = off since 0.31.39; an option that is not positive measures against 175000). `ceilingTokens` is the line the day was counted against; it and the share are `null` when the day's hours were counted against more than one ceiling (the option changed) or come from a state written before 0.31.24 |
