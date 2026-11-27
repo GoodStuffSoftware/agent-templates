@@ -18,6 +18,20 @@ test('tier ids: sonnet resolves to Sonnet 5.5, haiku to Haiku 5.5', () => {
   assert.equal(tiers.tiers.haiku.resolvesTo.modelId, 'claude-haiku-5-5');
 });
 
+test('windowSpecFor: each Fable id lands on its own compaction row, 1M window', () => {
+  for (const [id, alias] of [
+    ['claude-fable-5-2', 'fable-5-2'], ['claude-fable-5-2-20261101', 'fable-5-2'],
+    ['claude-fable-5-1', 'fable-5-1'], ['claude-fable-5-1-20260801', 'fable-5-1'],
+    ['claude-fable-5-20260101', 'fable-5'],
+  ]) {
+    const s = windowSpecFor(id);
+    assert.equal(s.alias, alias, id);
+    assert.equal(s.known, true, id);
+    assert.equal(s.contextWindow, 1000000, id);
+    assert.equal(s.defaultCompactAt, 967000, id);
+  }
+});
+
 test('haiku tier: Haiku 5.5 facts, efforts with a medium default, 1M context, no retirement before 2027-10-07', () => {
   const h = tiers.tiers.haiku;
   assert.equal(h.resolvesTo.released, '2026-10-07');

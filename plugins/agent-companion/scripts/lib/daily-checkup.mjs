@@ -650,7 +650,8 @@ export function scanTranscripts({ root = transcriptsRoot(), nowT = nowMs(), hold
   // Forget what can no longer matter.
   const keepFrom = nowT - KEEP_DAYS * DAY_MS;
   for (const h of Object.keys(st.hours)) if (Number(h) * HOUR_MS < keepFrom) delete st.hours[h];
-  if (st.fine) for (const h of Object.keys(st.fine)) if (Number(h) * HOUR_MS < keepFrom) delete st.fine[h];
+  if (!ctx.fine) delete st.fine; // option unset: a map left from when it was set is dropped, so the file matches 0.31.76
+  else if (st.fine) for (const h of Object.keys(st.fine)) if (Number(h) * HOUR_MS < keepFrom) delete st.fine[h];
   pruneFacts(st.facts, keepFrom);
   for (const [k, a] of Object.entries(st.facts.spawns)) if ((a.start || a.t0 || 0) < keepFrom) delete st.facts.spawns[k];
   for (const m of [st.facts.agentIds, st.facts.done]) for (const [k, t] of Object.entries(m)) if (t < keepFrom) delete m[k];
@@ -982,14 +983,20 @@ export function runCheckup({ root = transcriptsRoot(), nowT = nowMs(), holdMs = 
 }
 
 // Rebuild the history record of the named closed days from the saved scan state and replace each one's line in place (a forced re-run:
-// `usage-analysis.mjs run --day D --force`). A day the state does not cover (before its scan start, not closed yet) is left alone.
+// `usage-analysis.mjs run --day D --force`). Only with `claude_accounts` set (unset: nothing to re-derive, the file is never touched).
+// A day the state does not fully cover is left alone and named in `out.refused` ({ day, why }): before the scan start, not closed yet, or
+// with a week (the main one, or any account's) that starts before the oldest hour the state keeps (the scan prunes hours older than
+// KEEP_DAYS from its last run), since rebuilding it would write zeros or a week missing its early hours.
 // Returns the days rebuilt. Fail-open: [] when there is no state or no history line.
-export function rebuildHistoryDays(days, { nowT = nowMs() } = {}) {
+export function rebuildHistoryDays(days, { nowT = nowMs(), refused = null } = {}) {
   try {
+    const { limit, target, accounts, history } = checkupOptions();
+    if (!accounts || !accounts.length) return [];
     const p = checkupPaths();
     const state = readJsonSafe(p.state);
     if (!state || state.v !== SCHEMA || !state.hours || !Number.isFinite(state.scanFromMs) || !existsSync(p.history)) return [];
-    const { limit, target, accounts, history } = checkupOptions();
+    const keepFrom = (Number.isFinite(state.lastScanMs) ? state.lastScanMs : nowT) - KEEP_DAYS * DAY_MS;
+    const refuse = (day, why) => { if (Array.isArray(refused)) refused.push({ day, why }); };
     const want = new Set(days);
     const done = [];
     const lines = readFileSync(p.history, 'utf8').split('\n').map((line) => {
@@ -998,7 +1005,10 @@ export function rebuildHistoryDays(days, { nowT = nowMs() } = {}) {
       try { j = JSON.parse(line); } catch { return line; }
       if (!j || !want.has(j.day)) return line;
       const s = Date.parse(`${j.day}T08:00:00Z`);
-      if (!Number.isFinite(s) || s < state.scanFromMs || s + DAY_MS > nowT) return line;
+      if (!Number.isFinite(s) || s < state.scanFromMs || s + DAY_MS > nowT) { refuse(j.day, 'the saved scan state does not cover it (before the scan start, or the day is not closed yet)'); return line; }
+      const endMs = s + DAY_MS;
+      const earliest = Math.min(weekStartMs(endMs - 1), ...accounts.map((a) => weekStartAt(a.weekResetUtc, endMs - 1)));
+      if (earliest < keepFrom) { refuse(j.day, `its week starts ${iso(earliest)}, before the oldest hour the scan state keeps (${KEEP_DAYS} days, from ${iso(keepFrom)}); rebuilding would drop units`); return line; }
       done.push(j.day);
       return JSON.stringify(buildDayRecord(state, s, { limit, target, computedAt: nowT, accounts, history }));
     });

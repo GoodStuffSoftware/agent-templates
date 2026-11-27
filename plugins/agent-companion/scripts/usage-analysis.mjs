@@ -173,7 +173,13 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`) }
       const days = f.day ? [f.day] : null;
       const explicitDays = !!(f.day || f.from || f.to);
       // A forced re-run of named days rebuilds their checkup record first (per-account lines, the unattributed figure), so the analysis reads it.
-      if (f.force && !f['dry-run'] && f.day) { try { dc.rebuildHistoryDays([f.day], { nowT }); } catch { /* the analysis still runs */ } }
+      if (f.force && !f['dry-run'] && f.day) {
+        try {
+          const refused = [];
+          dc.rebuildHistoryDays([f.day], { nowT, refused });
+          for (const r of refused) (f.json ? (m) => process.stderr.write(`${m}\n`) : out)(`note: the checkup history line of ${r.day} is left as it is: ${r.why}`);
+        } catch { /* the analysis still runs */ }
+      }
       const analysis = runAnalysis({
         root: stateRoot,
         nowT,
