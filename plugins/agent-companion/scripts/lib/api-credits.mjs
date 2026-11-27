@@ -1027,7 +1027,7 @@ export function creditsView({ snap = null, reason = '', cfg, ledgerCycle = {}, l
     const rem = creditRemaining({ anchor, snap, entries });
     const { billedSinceAnchor, bookedSinceAnchor, basis, spentSince } = rem;
     if (snap && rem.fromDay < snap.from) warnings.push(`the anchor (${iso(anchor.asOf).slice(0, 10)}) is before the billing window fetched (from ${iso(snap.from).slice(0, 10)}): billed since the anchor is understated, remaining is too high; re-anchor`);
-    view.remaining = { usd: rem.usd, afterBooked: rem.afterBooked, basis, billedSinceAnchor, bookedNotYetBilledSinceAnchor: snap ? bookedSinceAnchor : null, bookedSinceAnchor: snap ? null : bookedSinceAnchor };
+    view.remaining = { usd: rem.usd, afterBooked: rem.afterBooked, basis, billedSinceAnchor, bookedNotYetBilledSinceAnchor: rem.bookedNotYetBilledSinceAnchor, bookedSinceAnchor };
     if (now - anchor.asOf > cy.end - cy.start) warnings.push(`the anchor is ${Math.floor(ageDays)} days old (older than one cycle): read the Console balance again and run \`credits anchor <usd>\``);
     if (spentSince > anchor.usd) warnings.push(`spend since the anchor (${usd2(spentSince)}) exceeds the anchored balance (${usd2(anchor.usd)}): a top-up probably happened; read the Console balance again and re-anchor`);
   }
