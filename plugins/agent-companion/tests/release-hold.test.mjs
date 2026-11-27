@@ -650,3 +650,56 @@ test('pre hook: no hold file -> exits before loading lib/context.mjs or lib/rele
   assert.match(loaded(), /release-watch-state\.mjs/, 'with a hold the state module loads');
   assert.equal(S.paths().hold, holdFile(), 'the cheap path and the library agree on where the hold file is');
 }, null));
+
+// ---- 0.31.77 fix round: parser bypasses, shared lookup budget, cd-aware lookup ----
+test('scope releases: every bypass the review found is refused (prefixes, unquoted shells, heredoc and pipe into a shell, substitution, iex, glued brace, comment apostrophe, PowerShell trailing backslash)', () => {
+  const stub = () => 'fix/demo'; // PR head lookups never match: only the parser is under test
+  const deny = [
+    'timeout 60 git push origin HEAD:release/0.31.77', 'xargs git push origin release/0.31.77', 'watch -n 5 git push origin release/0.31.77',
+    'stdbuf -oL git push origin release/0.31.77', 'sudo -u demo git push origin release/0.31.77',
+    'cmd /c git push origin release/0.31.77', 'pwsh -NoProfile -Command git push origin release/0.31.77',
+    "bash <<'EOF'\ngit push origin release/0.31.77\nEOF", 'cat <<EOF | bash\ngit push origin release/0.31.77\nEOF', 'bash <<< "git push origin release/0.31.77"',
+    'echo "git push origin release/0.31.77" | bash', 'echo git push origin release/0.31.77 | sh', 'echo release/0.31.77 | xargs git push origin',
+    'echo "$(git push origin release/0.31.77)"', 'echo `git push origin release/0.31.77`', 'x="$(git push origin release/0.31.77)"',
+    'iex "git push origin release/0.31.77"', 'Invoke-Expression "git push origin release/0.31.77"',
+    'if ($true) {git push origin release/0.31.77}', 'git push origin {release/0.31.77,main}',
+    "# what's next\ngit push origin release/0.31.77",
+    'cd "C:\\dir\\"; git push origin release/0.31.77',
+    'g\\it push origin release/0.31.77', 'git \\\npush origin release/0.31.77',
+    'pwsh -EncodedCommand AAAA', 'git merge refs/remotes/origin/release/0.31.77',
+  ];
+  for (const c of deny) assert.ok(S.releaseActionKind(c, stub), c);
+  const pass = [
+    'git push origin main # release/0.31.77', "echo foo; # it's\nnpm test", 'timeout 5 echo git push origin release/0.31.77', 'echo "a" | grep release/0.31.77',
+    "git commit -F - <<'EOF'\nfix it's\ngit push origin release/0.31.77\nEOF", "git commit -m \"$(cat <<'EOF'\nit's git push origin release/0.31.77\nEOF\n)\"",
+    'echo "git push origin release/0.31.77"', 'git log release/0.31.77 | head',
+  ];
+  for (const c of pass) assert.equal(S.releaseActionKind(c, stub), null, c);
+});
+
+test('scope releases: lookups share one budget; a hanging gh refuses two merges inside the hook timeout', () => withFx((fx) => {
+  putHold(HOLD);
+  const bin = join(fx.dir, 'hang-gh.mjs');
+  writeFileSync(bin, 'setTimeout(() => {}, 60000);\n');
+  const t0 = Date.now();
+  const r = holdPre('gh pr merge 5 --repo o/a && gh pr merge 6 --repo o/b', { AGENT_COMPANION_GH_BIN: bin });
+  const ms = Date.now() - t0;
+  assert.equal(decisionOf(r), 'deny');
+  assert.ok(ms < 4500, `one budget for both merges: ${ms} ms`);
+  assert.equal(decisionOf(holdPre('gh pr merge 5 --repo o/a; gh pr merge 6 --repo o/b; gh pr merge 7 --repo o/c', { AGENT_COMPANION_GH_BIN: bin })), 'deny');
+}, null));
+
+test('scope releases: the head lookup runs where the command runs (cd, Set-Location, --repo, unknown directory)', () => withFx((fx) => {
+  putHold(HOLD);
+  const rel = join(fx.dir, 'relrepo').replace(/\\/g, '/'); const oth = join(fx.dir, 'otherrepo').replace(/\\/g, '/');
+  mkdirSync(rel, { recursive: true }); mkdirSync(oth, { recursive: true });
+  const bin = join(fx.dir, 'cwd-gh.mjs');
+  writeFileSync(bin, "process.stdout.write(process.cwd().endsWith('relrepo') ? 'release/9.9.9\\n' : 'fix/demo\\n');\n");
+  const env = { AGENT_COMPANION_GH_BIN: bin };
+  assert.equal(decisionOf(holdPre(`cd ${rel} && gh pr merge 5`, env)), 'deny', 'cd into the release repo');
+  assert.notEqual(decisionOf(holdPre(`cd ${oth} && gh pr merge 5`, env)), 'deny', 'cd into another repo: that PR head, not release');
+  assert.equal(decisionOf(holdPre(`Set-Location ${rel}; gh pr merge 5`, env)), 'deny', 'Set-Location');
+  assert.equal(decisionOf(holdPre(`(cd ${rel} && gh pr merge 5); gh pr merge 6 --repo o/other`, env)), 'deny', 'the subshell cd applies inside it');
+  assert.equal(decisionOf(holdPre('cd "$SOMEWHERE" && gh pr merge 5', env)), 'deny', 'an unresolvable directory: the repo is unknown, refused');
+  assert.notEqual(decisionOf(holdPre('gh pr merge 5 --repo o/other', env)), 'deny', '--repo needs no directory');
+}, null));
