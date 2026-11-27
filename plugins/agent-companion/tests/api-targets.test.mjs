@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture } from './helpers.mjs';
-import { loadConfig, resolveTargets, TargetError, decide, record, recordFailure, targetLines, PRIMARY } from '../scripts/lib/api-credits.mjs';
+import { loadConfig, resolveTargets, TargetError, decide, record, recordFailure, targetLines, writeAnchor, PRIMARY } from '../scripts/lib/api-credits.mjs';
 import { getTargetOrgs, loadSpendConfig } from '../scripts/lib/api-spend.mjs';
 import { main as reviewMain } from '../scripts/api-review.mjs';
 import { runWorker } from '../scripts/api-worker.mjs';
@@ -245,4 +245,21 @@ test('hook: API: target=<name> is read and passed to the governor and to api-rev
     assert.deepEqual([bad.route, bad.route_reason], ['subagent', 'unknown-target']);
     assert.match(bad.notice, /nope.*known: primary, a\)/);
   } finally { w.cleanup(); }
+});
+
+test('credit mode with an anchored balance: a real spend-limit 400 is the unavailable result and the governor then answers plan', async () => {
+  const cfg = mk({ api_credits_budget_mode: 'credit' });
+  assert.equal(cfg.budgetMode, 'credit');
+  const t = rig();
+  try {
+    writeAnchor(500, { asOf: Date.now() - 3600000 }); // plenty of credit; written into the isolated state dir
+    assert.equal(decide('review', { cfg, env: ENV }).decision, 'api');
+    const f = keyed({ [K0]: SPEND400 });
+    const r = await t.run(f, { cfg });
+    assert.equal(r.code, 3, r.out);
+    assert.match(r.out, /^API review unavailable/);
+    const d = decide('review', { cfg, env: ENV });
+    assert.equal(d.decision, 'plan');
+    assert.match(d.reason, /API runs failed/);
+  } finally { t.fx.cleanup(); }
 });

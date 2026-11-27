@@ -23,7 +23,7 @@ import { createHash } from 'node:crypto';
 import { opt, stateFile, stateRootPath } from '../../hooks/lib/context.mjs';
 import { withFileLock } from '../../hooks/lib/file-lock.mjs';
 import { spawnSyncHidden } from './proc.mjs';
-import { loadConfig, cycleOf, resolveKey, status, parseCategoryWorkspaces } from './api-credits.mjs';
+import { loadConfig, cycleOf, resolveKey, status, parseCategoryWorkspaces, billedSince as billedSinceOf } from './api-credits.mjs';
 
 export const ENDPOINT = 'https://api.anthropic.com';
 export const API_VERSION = '2023-06-01';
@@ -258,14 +258,28 @@ export async function check({
 
     const day = Math.floor((now - cy.start) / DAY_MS) + 1;
     const reviewersBudget = (cfg.shares.review || 0) * cfg.budget;
-    let line = `API credits: reviewers ${money(reviewers)} of ${money(reviewersBudget)} · total ${money(total)} of ${money(cfg.budget)} · cycle day ${day}`;
+    // 0.31.79: the budget is the plugin's own number (a pacing figure), not an Anthropic cap and not credit; every account is shown.
+    let others = '';
+    if (Object.values(cfg.targets || {}).some((t) => !t.builtin)) {
+      try {
+        const orgs = await getTargetOrgs({ now, cfg, env, fetchImpl, readKey: (src) => readKey(src), primary: null });
+        const parts = [];
+        for (const g of orgs) {
+          const named = g.targets.filter((n) => !((cfg.targets || {})[n] || {}).builtin);
+          if (!named.length || g.targets.some((n) => ((cfg.targets || {})[n] || {}).builtin)) continue;
+          parts.push(`${named.join('+')} ${g.ok && g.snapshot ? `billed ${money(billedSinceOf(g.snapshot, cy.start))}` : 'no cost data'}`);
+        }
+        if (parts.length) others = ` · other accounts: ${parts.join(', ')}`;
+      } catch { /* the other accounts never hide the primary line */ }
+    }
+    let line = `API credits: reviewers ${money(reviewers)} of ${money(reviewersBudget)} · primary account total ${money(total)} of the plugin's own ${money(cfg.budget)} budget (a pacing figure, not an Anthropic cap)${others} · cycle day ${day}`;
     if (unex > 0) line += ` · unexplained ${money(unex)}`;
 
     const done = new Set(ackedIds(cy.key, alertPath));
     const notify = [];
     for (const t of cfg.alerts) {
       const id = `reviewers-${t}`;
-      if (reviewers >= t && !done.has(id)) notify.push({ id, message: `API credits: reviewer spend reached ${usd(reviewers)} (alert at ${money(t)}), cycle day ${day}, ${money(total)} of ${money(cfg.budget)} total` });
+      if (reviewers >= t && !done.has(id)) notify.push({ id, message: `API credits: reviewer spend reached ${usd(reviewers)} (alert at ${money(t)}), cycle day ${day}, primary account ${money(total)} of the plugin's own ${money(cfg.budget)} budget (not an Anthropic cap)${others}` });
     }
     if (unex > 0 && !done.has('unexplained')) {
       notify.push({ id: 'unexplained', message: `API credits: ${usd(unex)} of reviewer spend is not in the governor ledger (billed ${usd(reviewers)}, ledger ${usd(ledger)}), cycle day ${day}` });
