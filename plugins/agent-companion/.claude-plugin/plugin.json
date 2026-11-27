@@ -896,7 +896,7 @@
     "release_watch_hold_scope": {
       "type": "string",
       "title": "Release watch: what a hold refuses",
-      "description": "'releases' (default): a hold refuses only agent-companion plugin install, plugin update, plugin marketplace update, and git push or merge of a release/ branch; all other agent work continues. 'all': the 0.31.63 behaviour, a hold also refuses new agents, resumes, queue admissions and heavy commands, and tells running workers to hand off.",
+      "description": "'releases' (default): a hold refuses only agent-companion plugin install, plugin update, plugin marketplace update, and git push or merge of a release/ branch (git merge release/x or origin/release/x, and gh pr merge of a PR whose head is a release/ branch, looked up with a 3 s gh call; a lookup that fails is refused); quoted text (echo, commit messages, heredocs) is never a command; all other agent work continues. 'all': the 0.31.63 behaviour, a hold also refuses new agents, resumes, queue admissions and heavy commands, and tells running workers to hand off.",
       "default": "releases"
     },
     "release_watch_hold_min_events": {
