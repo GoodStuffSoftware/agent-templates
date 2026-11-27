@@ -509,6 +509,7 @@ const creditMode = (cfg, anchor) => !!anchor && cfg.budgetMode === 'credit';
 function creditGate({ cfg, anchor, snap, entries, avg, label }) {
   const rem = creditRemaining({ anchor, snap: snap && Number.isFinite(snap.through) ? snap : null, entries });
   const reserve = Number.isFinite(cfg.reserveUsd) ? cfg.reserveUsd : DEFAULT_RESERVE_USD;
+  if (rem.gap) return { api: false, reason: `${label}credit: the balance anchor (${iso(anchor.asOf).slice(0, 10)}) is before the billing window fetched (from ${iso(snap.from).slice(0, 10)}), so spend in between is not counted; plan until \`credits anchor <usd>\` is re-run with the current Console balance` };
   const left = rem.afterBooked - reserve;
   const tag = rem.verified ? '' : ` (${BOOKED_ONLY})`;
   const text = `$${rem.afterBooked.toFixed(2)} credit left of the $${anchor.usd.toFixed(2)} Console balance on ${iso(anchor.asOf).slice(0, 10)} (${rem.basis}), minus the $${reserve.toFixed(2)} reserve`;
@@ -523,9 +524,9 @@ function evalPrimary(category, { cfg, c, cy, billing, now, anchor = null, led = 
   const view = spendView(billing, category, { cfg, cy, entries: entriesOf(c.entries, PRIMARY), now });
   const tag = view.verified ? '' : ` (${BOOKED_ONLY})`;
   const inCredit = creditMode(cfg, anchor);
-  // In credit mode the plugin's own numbers do not stop work: a limit set without "!" is advisory; only a "!" limit (a mirror of a real Console limit) is enforced.
+  // For an account in credit (credit mode AND a balance anchor) the plugin's own numbers do not stop work: a limit set without "!" is advisory; only a "!" limit (a mirror of a real Console limit) is enforced.
   const limitHit = view.limit !== null && view.wsMonth >= view.limit;
-  if (limitHit && (!(cfg.budgetMode === 'credit') || view.limitHard)) return plan(`workspace limit: ${view.wsName} at $${view.wsMonth.toFixed(2)} of its $${view.limit.toFixed(2)} monthly limit${view.limitHard ? ' (enforced, set with !)' : ''}${tag}`);
+  if (limitHit && (!inCredit || view.limitHard)) return plan(`workspace limit: ${view.wsName} at $${view.wsMonth.toFixed(2)} of its $${view.limit.toFixed(2)} monthly limit${view.limitHard ? ' (enforced, set with !)' : ''}${tag}`);
   if (inCredit) {
     const cnt = c.n[category] || 0;
     const avg = cnt > 0 ? (c.spent[category] || 0) / cnt : cfg.itemEstimate;
@@ -917,7 +918,7 @@ function accountCreditLine(name, { cfg, anchor = null, snap = null, entries = []
   const credit = cfg.budgetMode === 'credit';
   if (!anchor) return `${who} credit: no balance anchor; gated by the plugin's own fixed budget ${budget ? `$${budget} (${src})` : '(none set)'}; set one with \`credits anchor <usd>${name === PRIMARY ? '' : ` --target ${name}`}\``;
   const rem = creditRemaining({ anchor, snap: snap && Number.isFinite(snap.through) ? snap : null, entries });
-  return `${who} credit: ${usd2(rem.afterBooked)} left = Console balance ${usd2(anchor.usd)} on ${iso(anchor.asOf).slice(0, 10)} - ${rem.basis} ${usd2(rem.spentSince)}; minus the ${usd2(reserve)} reserve = ${usd2(rem.afterBooked - reserve)} usable; ${credit ? 'this gates API work (the fixed budget does not)' : `informs only (budget mode is fixed: the plugin's own $${budget} budget gates)`}`;
+  return `${who} credit: ${usd2(rem.afterBooked)} left = Console balance ${usd2(anchor.usd)} on ${iso(anchor.asOf).slice(0, 10)} - ${rem.basis} ${usd2(rem.spentSince)}; minus the ${usd2(reserve)} reserve = ${usd2(rem.afterBooked - reserve)} usable${rem.gap ? ' (anchor is before the billing window fetched: decide answers plan until re-anchored)' : ''}; ${credit ? 'this gates API work (the fixed budget does not)' : `informs only (budget mode is fixed: the plugin's own $${budget} budget gates)`}`;
 }
 
 export function billingStatusLines(snap, { cfg, entries, anchors = null, now, reason = '', cacheAgeMs = null }) {
@@ -931,15 +932,16 @@ export function billingStatusLines(snap, { cfg, entries, anchors = null, now, re
   const win = bookedBetween(entries, Math.max(snap.through, cy.start));
   // 0.31.79: the budget is the plugin's own number, not credit. Remaining credit comes from the account's balance anchor only.
   lines.push(`this cycle: billed ${usd2(billedCycle)} + ${usd2(win)} booked since the last complete day (cost is before credits; the Console Billing page shows the real balance)`);
-  lines.push(accountCreditLine(PRIMARY, { cfg, anchor: anchors ? anchors[PRIMARY] : readAnchors()[PRIMARY], snap, entries }));
+  const primaryAnchor = (anchors ? anchors[PRIMARY] : readAnchors()[PRIMARY]) || null;
+  lines.push(accountCreditLine(PRIMARY, { cfg, anchor: primaryAnchor, snap, entries }));
   for (const [cat, w] of Object.entries(cfg.categoryWorkspaces || {})) if (resolveWorkspace(snap, w) === null) lines.push(`category ${cat}: workspace ${w} not found, booked spend only`);
   const wsMonth = [];
   for (const [name, lim] of Object.entries(cfg.workspaceLimits || {})) {
     const id = /^wrkspc_/.test(name) ? name : resolveWorkspace(snap, name);
     const billed = id === null ? 0 : billedSince(snap, monthStart, id);
     const unk = id === null ? ' (no such workspace in the organization)' : '';
-    const enforced = cfg.budgetMode !== 'credit' || (cfg.workspaceLimitHard || {})[name];
-    wsMonth.push(`${name} ${usd2(billed)} of $${lim.toFixed(2)} (${pct(billed, lim)})${billed >= lim ? (enforced ? ' AT OR OVER LIMIT: decide answers plan for its categories' : ' over the plugin\'s own limit, advisory in credit mode (a "!" limit would be enforced)') : ''}${unk}`);
+    const enforced = !(cfg.budgetMode === 'credit' && primaryAnchor) || (cfg.workspaceLimitHard || {})[name];
+    wsMonth.push(`${name} ${usd2(billed)} of $${lim.toFixed(2)} (${pct(billed, lim)})${billed >= lim ? (enforced ? ' AT OR OVER LIMIT: decide answers plan for its categories' : ' over the plugin\'s own limit, advisory while the primary account is gated on its credit (a "!" limit would be enforced)') : ''}${unk}`);
   }
   lines.push(wsMonth.length ? `workspace limits (calendar month, billed): ${wsMonth.join('; ')}` : 'workspace limits: none configured (api_credits_workspace_limits; the API cannot read the Console limits)');
   const g = billingGaps(snap, { cfg, cy, entries, now });
@@ -1020,7 +1022,7 @@ export function creditRemaining({ anchor, snap = null, entries = [] }) {
   return {
     usd: anchor.usd - (billedSinceAnchor === null ? bookedSinceAnchor : billedSinceAnchor), afterBooked: anchor.usd - spentSince, spentSince, basis,
     billedSinceAnchor, bookedNotYetBilledSinceAnchor: billedSinceAnchor === null ? null : bookedSinceAnchor, bookedSinceAnchor: billedSinceAnchor === null ? bookedSinceAnchor : null,
-    verified: billedSinceAnchor !== null, fromDay,
+    verified: billedSinceAnchor !== null, fromDay, gap: billedSinceAnchor !== null && Number.isFinite(snap.from) && fromDay < snap.from,
   };
 }
 

@@ -223,7 +223,7 @@ export function unexplained(reviewers, ledger) {
 // Never throws. Returns { ok, line, notify, ... }.
 export async function check({
   now = Date.now(), cfg = loadSpendConfig(), env = process.env, fetchImpl = globalThis.fetch,
-  readKey = (src) => readAdminKey(src, { env, cfg }), ledgerPath, alertPath = alertStatePath(),
+  readKey = (src) => readAdminKey(src, { env, cfg }), ledgerPath, alertPath = alertStatePath(), primary = null, billingDeadlineMs = 8000,
 } = {}) {
   let key = '';
   try {
@@ -262,7 +262,8 @@ export async function check({
     let others = '';
     if (Object.values(cfg.targets || {}).some((t) => !t.builtin)) {
       try {
-        const orgs = await getTargetOrgs({ now, cfg, env, fetchImpl, readKey: (src) => readKey(src), primary: null });
+        let tm; const late = new Promise((r) => { tm = setTimeout(() => r([]), billingDeadlineMs); if (tm.unref) tm.unref(); });
+        let orgs; try { orgs = await Promise.race([getTargetOrgs({ now, cfg, env, fetchImpl, readKey: (src) => readKey(src), primary }), late]); } finally { clearTimeout(tm); }
         const parts = [];
         for (const g of orgs) {
           const named = g.targets.filter((n) => !((cfg.targets || {})[n] || {}).builtin);

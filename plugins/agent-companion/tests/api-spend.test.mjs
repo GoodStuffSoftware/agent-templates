@@ -615,3 +615,16 @@ test('config: a workspace id from the --workspace-id flag reaches the credits ch
   assert.equal(loadSpendConfig((k, d) => d, env).categoryWorkspaces.workers, 'wrkspc_flag');
   assert.equal(creditsEnv({ PATH: '/bin' }, '').AC_API_WORKERS_WORKSPACE_ID, undefined);
 });
+
+test('check: the other-accounts lookup is bounded by a deadline when a target admin call hangs', async () => {
+  const p = tmp();
+  const s = stub({ cents: { [REV]: 100 } });
+  const cfg = { ...CFG, targets: { primary: { name: 'primary', builtin: true }, a: { name: 'a', admin: 'env:AC_ADMIN_A' } } };
+  const fetchImpl = (url, init) => (new URL(url).pathname === '/v1/organizations/me' ? new Promise(() => {}) : s.fetchImpl(url, init));
+  const r = await Promise.race([
+    check({ now: NOW, cfg, fetchImpl, readKey: () => KEY, ledgerPath: p.ledger, alertPath: p.alerts, billingDeadlineMs: 100 }),
+    new Promise((res) => { const t = setTimeout(() => res('HUNG'), 5000); t.unref(); }),
+  ]);
+  assert.notEqual(r, 'HUNG');
+  assert.equal(r.ok, true);
+});
