@@ -2,6 +2,10 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.78 (unreleased)
+
+- **The struggle notice no longer advises a fresh session (hooks/lib/struggle.mjs).** At xhigh, max or unknown effort it said "or a fresh session with a handoff may help"; lead handoffs were measured as not cost effective (2026-11-14), so it now ends "it is likely a missing fact or rule. Name it and record it where knowledge-routing says." Counts and the effort mention are unchanged; worker handoff notices are untouched. To silence the whole detector today: `struggle_detector` false.
+
 ## 0.31.77 — 2026-11-27
 
 - **The `fable` tier resolves to Fable 5.2 (config/model-tiers.json).** `claude-fable-5-2` at $8/$40 with cache reads $0.20/MTok (read live 2026-11-27 from the pricing page; the tier said 5.1 at $10/$50), a superseded `fable-5-1` reference entry, and match patterns in model-tiers, model-pricing and compaction so Fable 5, 5.1 and 5.2 (dated or not) each resolve to their own entry. The `fable-5-2` pricing and compaction rows already existed; only the `fable-5` and `fable-5-1` patterns changed there. `docs/ROUTING.md` cache-read table is now derived from the tier pricing (it was a hand-copied row that stayed at $0.25). `bench/estimate.mjs` keeps Fable 5.1 as the judge-vote price anchor (read from the seed's `judgeVoteAnchor`), so `judgePriceRatioToFable` stays 1 for 5.1 and reads 0.8 for 5.2 instead of scaling against the moved tier. Judge eligibility changes: `claude-fable-5-1` is now a superseded id of the fable tier, so it can no longer grade `claude-fable-5-2` or the `fable` alias (before, 5.2 wrongly matched the old `fable-5` reference). A future `claude-fable-5-3` matches no pricing or compaction row and reads as unpriced until a row is added. `model-tiers.json` is v9, updated 2026-11-27.

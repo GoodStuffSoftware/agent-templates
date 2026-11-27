@@ -236,7 +236,7 @@ export function operatorMessage(k, m, effort) {
   if (known && e.rank < classifyEffort('xhigh').rank) {
     return `${head}; raising effort to xhigh may help. If it lacks a fact or a rule, tell it where that lives instead.`;
   }
-  return `${head}. More effort is unlikely to help: it may be a missing fact or rule, or a fresh session with a handoff may help.`;
+  return `${head}. More effort is unlikely to help: it is likely a missing fact or rule. Name it and record it where knowledge-routing says.`;
 }
 
 // Lead-facing (additionalContext), one line.

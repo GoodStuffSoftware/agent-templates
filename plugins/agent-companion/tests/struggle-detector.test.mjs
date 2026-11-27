@@ -147,7 +147,8 @@ test('operator message by effort', () => {
     const m = operatorMessage(2, 5, e);
     assert.ok(!/raising effort/.test(m), String(e));
     assert.match(m, /missing fact or rule/);
-    assert.match(m, /fresh session/);
+    assert.match(m, /Name it and record it where knowledge-routing says/);
+    assert.ok(!/fresh session|hand ?off|start fresh|new session/i.test(m), String(e));
   }
   assert.match(operatorMessage(2, 5, null), /lead effort: unknown/);
 });
