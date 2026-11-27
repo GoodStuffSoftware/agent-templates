@@ -932,3 +932,62 @@ test('accounts unset: the checkup record, scan state, session-budget scan and no
   assert.deepEqual(got.written, expected.written);
   assert.ok(!('fine' in JSON.parse(got.state)), 'no per-minute map without the option');
 });
+
+test('accounts: rebuildHistoryDays leaves a day the saved scan state cannot fully cover (older than its retention, and the edge)', withAccounts(async () => {
+  const { fx } = mk();
+  try {
+    const { configuredAccounts, weekStartAt } = await import('../hooks/lib/account.mjs');
+    const { SCHEMA, KEEP_DAYS } = await import('../scripts/lib/daily-checkup.mjs');
+    const p = checkupPaths();
+    mkdirSync(dirname(p.state), { recursive: true });
+    const saveState = (lastScanMs) => writeFileSync(p.state, JSON.stringify({ v: SCHEMA, scanFromMs: T('2026-08-01T00:00:00Z'), lastScanMs, dataThroughMs: NOW, days: {}, facts: {}, hours: { [T('2026-10-09T10:00:00Z') / 3600000]: [10, 0, 0, 0, 0], [T('2026-09-01T10:00:00Z') / 3600000]: [10, 0, 0, 0, 0] } }));
+    const OLD = '2026-09-01';
+    const oldLine = JSON.stringify({ v: 1, day: OLD, units: { total: 99 } });
+    const dayLine = JSON.stringify({ v: 1, day: DAY, units: { total: 99 } });
+    writeFileSync(p.history, `${oldLine}\n${dayLine}\n`);
+    const before = readFileSync(p.history, 'utf8');
+
+    // a day older than the retention: its week's hours are gone, so the line stays and the reason is given
+    saveState(NOW);
+    const refused = [];
+    assert.deepEqual(rebuildHistoryDays([OLD], { nowT: NOW, refused }), []);
+    assert.equal(readFileSync(p.history, 'utf8'), before, 'the history file is not touched');
+    assert.equal(refused.length, 1);
+    assert.equal(refused[0].day, OLD);
+    assert.match(refused[0].why, /before the oldest hour the scan state keeps/);
+
+    // the edge: the day's earliest week start is exactly the oldest kept hour (rebuilt), one ms older (left alone)
+    const endMs = T(`${DAY}T08:00:00Z`) + DAY_MS;
+    const earliest = Math.min(weekStartMs(endMs - 1), ...configuredAccounts().map((a) => weekStartAt(a.weekResetUtc, endMs - 1)));
+    saveState(earliest + KEEP_DAYS * DAY_MS + 1);
+    const r2 = [];
+    assert.deepEqual(rebuildHistoryDays([DAY], { nowT: NOW, refused: r2 }), []);
+    assert.equal(r2.length, 1);
+    assert.equal(readFileSync(p.history, 'utf8'), before);
+    saveState(earliest + KEEP_DAYS * DAY_MS);
+    assert.deepEqual(rebuildHistoryDays([DAY], { nowT: NOW }), [DAY]);
+    const lines = readFileSync(p.history, 'utf8').split('\n').filter(Boolean);
+    assert.equal(lines[0], oldLine, 'the old line is untouched');
+    assert.ok(JSON.parse(lines[1]).weeks, 'the day at the edge was rebuilt with its per-account weeks');
+  } finally { fx.cleanup(); }
+}));
+
+test('accounts unset: rebuildHistoryDays never touches the history file (--force --day is a no-op for the checkup)', async () => {
+  const saved = process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS;
+  delete process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS;
+  const { fx, root } = mk();
+  try {
+    put(join(root, 'projA', 'sess-fake.jsonl'), [asst('r1', '2026-10-09T17:10:00Z', SONNET, TEN_M)]);
+    run(root);
+    const before = readFileSync(checkupPaths().history, 'utf8');
+    assert.ok(before.includes(`"day":"${DAY}"`));
+    const refused = [];
+    assert.deepEqual(rebuildHistoryDays([DAY], { nowT: NOW + 3600000, refused }), []);
+    assert.equal(readFileSync(checkupPaths().history, 'utf8'), before, 'byte-identical, computedAt included');
+    assert.deepEqual(refused, []);
+    // and through the command, as in 0.31.76
+    const { main } = await import('../scripts/usage-analysis.mjs');
+    await main(['run', '--root', fx.stateDir, '--no-scan', '--no-register', '--now', new Date(NOW + 3600000).toISOString(), '--day', DAY, '--force'], { out: () => {} });
+    assert.equal(readFileSync(checkupPaths().history, 'utf8'), before);
+  } finally { if (saved !== undefined) process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS = saved; fx.cleanup(); }
+});

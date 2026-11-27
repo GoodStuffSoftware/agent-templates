@@ -64,6 +64,8 @@ function paceWeekOf(rec, params) {
   const want = params && typeof params.account === 'string' ? params.account : null;
   const w = want ? ws.find((x) => x.id === want || x.label === want) : ws.reduce((m, x) => ((finite(x.dayUnits) || 0) > (finite(m.dayUnits) || 0) ? x : m), ws[0]);
   if (!w) return { gap: true, why: `no configured account matches ${want}` };
+  // A line written by 0.31.76 has weeks without dayUnits: which account was in use is unknown, so the day is not comparable (not "nobody used it").
+  if (!want && !ws.some((x) => finite(x.dayUnits) !== null)) return { gap: true, why: 'the history line has no per-account day units (written before 0.31.77): rebuild it with usage-analysis run --day D --force' };
   if (!want && !((finite(w.dayUnits) || 0) > 0)) return { gap: true, why: 'no configured account used anything that day' };
   return { w };
 }

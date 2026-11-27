@@ -468,6 +468,13 @@ test('accounts: a forced re-run of one day rebuilds its checkup record; the resu
     const hist = { kind: 'day', hist: { weeks: rec.weeks, week: rec.week } };
     assert.match(mw.stat([hist], { params: { account: 'first' } }).why, /plan week has elapsed/);
     assert.equal(mw.stat([hist], { params: { account: 'nobody' } }).gap, true);
+    // a 0.31.76-shaped line (weeks without dayUnits): not comparable, never "no account used anything"; a named account still reads its own week
+    const old76 = { kind: 'day', hist: { weeks: rec.weeks.map(({ dayUnits, ...w }) => w), week: rec.week } };
+    const g76 = mw.stat([old76], {});
+    assert.equal(g76.gap, true);
+    assert.match(g76.why, /no per-account day units/);
+    assert.doesNotMatch(g76.why, /used anything/);
+    assert.equal(mw.stat([old76], { params: { account: 'acct-fake-bbb' } }).detail.account, 'second');
     assert.equal(mw.stat([hist], { params: { account: 'acct-fake-bbb' } }).detail.account, 'second');
     // the report and the summary
     const { renderReport, summaryLines } = await import('../scripts/lib/usage/report.mjs');
