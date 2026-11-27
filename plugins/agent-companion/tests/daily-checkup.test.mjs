@@ -800,3 +800,45 @@ test('a usage-limit lockout: the zero day says why (limit.hits, limit.firstAt), 
     assert.equal(state.days['2026-10-08'].limitHits, 2);
   } finally { fx.cleanup(); }
 });
+
+// ---- per-account weeks (option claude_accounts, 0.31.76): fake ids, two resets, a mid-week switch, a plan change ----
+test('accounts: each account has its own week, limit and pace; an hour goes to the account active then; unset = no weeks key', async () => {
+  const { configuredAccounts, weekStartAt, accountLimitAt } = await import('../hooks/lib/account.mjs');
+  const accounts = configuredAccounts(JSON.stringify([
+    { id: 'acct-fake-aaa', label: 'first', weekResetUtc: 'Fri 16:00' },
+    { id: 'acct-fake-bbb', label: 'second', weekResetUtc: 'Wed 22:00', weeklyLimitUnits: 1300, limitChanges: [{ from: '2026-11-26T01:37:00Z', weeklyLimitUnits: 2860 }] },
+    { id: 'bad', weekResetUtc: 'nonsense' },
+  ]));
+  assert.equal(accounts.length, 2, 'a malformed entry is dropped');
+  assert.deepEqual(configuredAccounts(''), []);
+  assert.equal(configuredAccounts(JSON.stringify([{ id: 'ACCT-Fake-CCC', weekResetUtc: 'Fri 16:00' }]))[0].id, 'acct-fake-ccc', 'an id typed in capitals is normalised like the history ids');
+  assert.equal(new Date(weekStartAt('Wed 22:00', T('2026-11-27T08:00:00Z'))).toISOString(), '2026-11-25T22:00:00.000Z');
+  assert.equal(new Date(weekStartAt('Fri 16:00', T('2026-11-27T07:59:00Z'))).toISOString(), '2026-11-20T16:00:00.000Z');
+  assert.equal(accountLimitAt(accounts[1], T('2026-11-25T23:00:00Z'), 2860), 1300, 'before the plan change');
+  assert.equal(accountLimitAt(accounts[1], T('2026-11-27T00:00:00Z'), 2860), 2860, 'after it');
+  assert.equal(accountLimitAt(accounts[0], T('2026-11-27T00:00:00Z'), 2860), 2860, 'no limit of its own: the single-account limit');
+
+  const history = [{ at: '2026-11-20T18:09:00Z', acct: 'acct-fake-aaa' }, { at: '2026-11-25T04:42:00Z', acct: 'acct-fake-bbb' }];
+  const hours = {};
+  const add = (iso, m) => { hours[Date.parse(iso) / 3600000] = [m, 0, 0, 0, 0]; };
+  add('2026-11-21T10:00:00Z', 100); // first account, inside its week
+  add('2026-11-25T03:00:00Z', 50); // first account, just before the switch
+  add('2026-11-25T10:00:00Z', 999); // second account, before ITS week starts (Wed 22:00): in neither week
+  add('2026-11-25T23:00:00Z', 200); // second account, its week
+  add('2026-11-26T10:00:00Z', 300);
+  const state = { hours, days: {}, scanFromMs: T('2026-11-01T00:00:00Z'), dataThroughMs: T('2026-11-27T08:00:00Z') };
+  const start = dayStartMs(T('2026-11-26T12:00:00Z'));
+  const rec = buildDayRecord(state, start, { limit: 2860, accounts, history });
+  const [a, b] = rec.weeks;
+  assert.deepEqual([a.id, a.label, a.start, a.units, a.limitUnits], ['acct-fake-aaa', 'first', '2026-11-20T16:00:00.000Z', 150, 2860]);
+  assert.equal(a.pctSoFar, 5.24);
+  assert.equal(a.elapsedPct, 95.2);
+  assert.deepEqual([b.id, b.start, b.units, b.limitUnits, b.pctSoFar, b.elapsedPct, b.paceAtResetPct], ['acct-fake-bbb', '2026-11-25T22:00:00.000Z', 500, 2860, 17.48, 20.2, 86.4]);
+  const line = formatLine(rec, 'h.jsonl');
+  assert.match(line, /first week so far 5\.2%, pace at reset 5\.5%; second week so far 17\.5%, pace at reset 86\.4%/);
+  // unset: the record and the line are what they were
+  const plain = buildDayRecord(state, start, { limit: 2860, computedAt: NOW });
+  assert.equal('weeks' in plain, false);
+  assert.deepEqual(buildDayRecord(state, start, { limit: 2860, computedAt: NOW, accounts: [], history }), plain);
+  assert.match(formatLine(plain, 'h.jsonl'), /; week so far \d/);
+});

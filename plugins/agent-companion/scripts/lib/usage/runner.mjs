@@ -557,6 +557,9 @@ function computeDay(ctx, day, parts, prior, force) {
   const hist = historyRecord(ctx.root, day);
   const week = hist && hist.week && Number.isFinite(hist.week.pctSoFar)
     ? { pctSoFar: hist.week.pctSoFar, elapsedPct: hist.week.elapsedPct, paceAtResetPct: hist.week.paceAtResetPct, partial: !!hist.week.partial } : null;
+  // per-account weeks (option claude_accounts): present only when the checkup record has them
+  const weeks = hist && Array.isArray(hist.weeks) && hist.weeks.length
+    ? hist.weeks.map((w) => ({ id: w.id, label: w.label, pctSoFar: w.pctSoFar, elapsedPct: w.elapsedPct, paceAtResetPct: w.paceAtResetPct, limitUnits: w.limitUnits, partial: !!w.partial })) : null;
 
   // the day against the mean of the previous 7 settled days (totals only; scenarios do the rest)
   const prev = [];
@@ -660,6 +663,7 @@ function computeDay(ctx, day, parts, prior, force) {
     totals,
     weights,
     week,
+    ...(weeks ? { weeks } : {}),
     vsTrailing7,
     scenarios,
     exclusions,
@@ -863,7 +867,7 @@ function runAnalysisUnsafe(opts, t0, clock) {
     const hist = historyRecord(root, day);
     const parts = {
       runner: RUNNER_VERSION, limitUnits: limit, config: cparts, windows: wparts, facts, attrs,
-      history: hist ? h12({ w: hist.week, p: hist.pct && hist.pct.total, l: hist.limit }) : null,
+      history: hist ? h12({ w: hist.week, p: hist.pct && hist.pct.total, l: hist.limit, ...(hist.weeks ? { a: hist.weeks } : {}) }) : null,
     };
     // the plan-meter sample the day's meter figure reads (only when there is one, so a day without samples keeps its digest)
     const ms = meterSamplesOf(day);

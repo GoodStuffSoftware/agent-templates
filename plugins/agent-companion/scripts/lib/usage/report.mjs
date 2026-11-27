@@ -65,7 +65,9 @@ export function summaryLines(res) {
   if (t && num(t.units)) {
     parts.push(`${fmt(t.units, 1)} u = ${fmt(t.pctOfWeeklyLimit, 1)}% of week (${t.shareEstimated > 0 ? 'M+E' : 'M'})`);
   } else parts.push('no total (n/a)');
-  if (w && num(w.pctSoFar)) parts.push(`week ${fmt(w.pctSoFar, 1)}% at ${fmt(w.elapsedPct, 0)}% elapsed (M)`);
+  if (Array.isArray(res.weeks) && res.weeks.length) {
+    for (const a of res.weeks) parts.push(`${a.label} week ${fmt(a.pctSoFar, 1)}% at ${fmt(a.elapsedPct, 0)}% elapsed, pace ${fmt(a.paceAtResetPct, 0)}% (M)`);
+  } else if (w && num(w.pctSoFar)) parts.push(`week ${fmt(w.pctSoFar, 1)}% at ${fmt(w.elapsedPct, 0)}% elapsed (M)`);
   const v = res.vsTrailing7;
   if (v && num(v.pct)) parts.push(`vs trailing-7 ${signed(v.pct, 0)}% (M)`);
   else if (v && v.why) parts.push('vs trailing-7 n/a (too few days)');
@@ -241,7 +243,9 @@ export function renderReport(res) {
   L.push(`| workers | ${fmt(t.subagent, 1)} | ${fmt(t.limitUnits > 0 ? (t.subagent / t.limitUnits) * 100 : null, 2)} | M |`);
   L.push('');
   L.push(`Weekly limit ${fmt(t.limitUnits, 0)} units. ${t.sessions} sessions, ${t.spawns} worker spawns. Share of the day's units priced at estimated (E) weights: ${fmt(t.shareEstimated, 1)}%.`);
-  if (res.week) L.push(`Week to date ${fmt(res.week.pctSoFar, 1)}% at ${fmt(res.week.elapsedPct, 1)}% of the week elapsed; pace at reset ${fmt(res.week.paceAtResetPct, 1)}%${res.week.partial ? ' (week started before the scan; partial)' : ''}.`);
+  if (Array.isArray(res.weeks) && res.weeks.length) {
+    for (const a of res.weeks) L.push(`Week to date, account ${a.label}: ${fmt(a.pctSoFar, 1)}% of ${fmt(a.limitUnits, 0)} units at ${fmt(a.elapsedPct, 1)}% of its week elapsed; pace at reset ${fmt(a.paceAtResetPct, 1)}%${a.partial ? ' (week started before the scan; partial)' : ''}.`);
+  } else if (res.week) L.push(`Week to date ${fmt(res.week.pctSoFar, 1)}% at ${fmt(res.week.elapsedPct, 1)}% of the week elapsed; pace at reset ${fmt(res.week.paceAtResetPct, 1)}%${res.week.partial ? ' (week started before the scan; partial)' : ''}.`);
   else L.push('Week to date: not available (no checkup history record for the day).');
   if (res.vsTrailing7 && num(res.vsTrailing7.pct)) L.push(`Day total against the mean of the previous ${res.vsTrailing7.days} settled days: ${signed(res.vsTrailing7.pct, 1)}%.`);
   else L.push(`Day total against trailing-7: n/a (${(res.vsTrailing7 && res.vsTrailing7.why) || 'no baseline'}).`);

@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.75",
+  "version": "0.31.76",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -365,6 +365,12 @@
       "title": "Daily checkup: weekly limit in plan units",
       "description": "What 100% of the weekly plan limit is, in the plan units the daily checkup uses (every request priced at the Sonnet price vector, times the model's plan weight). Default 0: derive it from config/plan-weights.json (100 x units per 1%, 2860 shipped, so 1% = 28.6 units), the same figure the session budget notice uses; set a number above 0 to override it. Weeks reset Friday 16:00Z.",
       "default": 0
+    },
+    "claude_accounts": {
+      "type": "string",
+      "title": "Usage: claude.ai accounts, each with its own weekly reset and limit",
+      "description": "JSON array naming the claude.ai accounts you switch between, for usage analysis and budget notices that assume one week and one limit: [{\"id\":\"<account id as in the session-sync switch history>\",\"label\":\"<short name>\",\"weekResetUtc\":\"Wed 22:00\",\"weeklyLimitUnits\":2860,\"limitChanges\":[{\"from\":\"<ISO time of a plan change>\",\"weeklyLimitUnits\":2860}]}]. weekResetUtc is that account's weekly reset (UTC, \"Fri 16:00\" form); weeklyLimitUnits is its limit before the first change (omitted: the weekly_limit_units figure) and each limitChanges entry sets the limit from its time on. Each usage fact counts for the account active at that time (the switch history), and the daily checkup line, the usage report and the session budget notice give % of week and pace per account against that account's own week. Empty (default) = one account, one weekly reset (Fri 16:00Z) and one limit: behaviour is unchanged.",
+      "default": ""
     },
     "daily_pace_target_pct": {
       "type": "number",
@@ -904,6 +910,12 @@
       "title": "Release watch: hold floor, sample size",
       "description": "A flag starts a hold only when its rate is over at least this many samples (spawns, workers or finished workers). Default 30. Severity flags (runaway) are exempt. 0 = no sample floor.",
       "default": 30
+    },
+    "release_watch_min_window_minutes": {
+      "type": "number",
+      "title": "Release watch: shortest check window (minutes)",
+      "description": "A post-release check measures the activity since the later of the last conclusive check and the newest install. When that window is shorter than this many minutes the check waits for a later tick (a due slot is never dropped), so releases installed minutes apart share one check of at least this length instead of one short check each. Default 60 (one hour). Values of 0 or less fall back to 60.",
+      "default": 60
     },
     "release_watch_min_spawns": {
       "type": "number",
