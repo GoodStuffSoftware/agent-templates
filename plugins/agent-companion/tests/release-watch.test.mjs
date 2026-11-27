@@ -68,9 +68,9 @@ test('tick: nothing due is a quiet no-op; catch-up covers all due checks once', 
 test('tick: an install while the chain is watched joins it and keeps the first install as the baseline anchor', () => {
   W.tick({ at: T + 1, installed: installed(), run: () => null });
   const T2 = T + 48 * HOUR;
-  W.tick({ at: T2 + 1, installed: installed(T2), run: () => null });
+  W.tick({ at: T2 + HOUR, installed: installed(T2), run: () => null });
   const s = JSON.parse(readFileSync(file('release-watch-run.json'), 'utf8'));
-  assert.equal(s.baseAnchor, T); assert.equal(s.releases.length, 2); assert.equal(s.releases[1].T, T2); assert.deepEqual(s.releases[1].done, []);
+  assert.equal(s.baseAnchor, T); assert.equal(s.releases.length, 2); assert.equal(s.releases[1].T, T2); assert.deepEqual(s.releases[1].done, [0], "the new release first +1h check ran, one hour after its install");
   assert.equal(s.releases[0].status, 'waiting-chain', 'the older release has all its checks done and waits for the chain');
 });
 
@@ -850,13 +850,14 @@ test('migrate-v1: a run file from before v2 becomes a one-release chain and keep
   assert.equal(s.v, 2); assert.deepEqual(s.releases[0].done, [0, 1]); assert.equal(s.baseAnchor, T);
 });
 
-test('chain-baseline-fixed: every check of a chain reads the same baseline, the 7 days before the FIRST install', () => {
+test('chain baseline (0.31.76): each check reads the 7 days before the NEWEST release was installed; the chain key stays the first install', () => {
   const seen = []; const run = (o) => { seen.push(o); return metrics(); };
   const T2 = T + 10 * HOUR;
   W.tick({ at: T + HOUR, installed: installed(), run, standingRun: none });
   W.tick({ at: T2 + HOUR, installed: installed(T2), run, standingRun: none });
   assert.equal(seen.length, 2);
-  for (const o of seen) { assert.equal(o.baseTo, T); assert.equal(o.baseFrom, T - 7 * 24 * HOUR); }
+  assert.equal(seen[0].baseTo, T); assert.equal(seen[0].baseFrom, T - 7 * 24 * HOUR);
+  assert.equal(seen[1].baseTo, T2, "the second release is compared with the week before its own install"); assert.equal(seen[1].baseFrom, T2 - 7 * 24 * HOUR);
   assert.equal(seen[1].T, T2, 'the analysis anchor is the newest release');
   assert.equal(seen[1].winFrom, T + HOUR, 'the window starts at the last conclusive check');
   assert.equal(runFile().baseAnchor, T);
@@ -1621,11 +1622,19 @@ test('0.31.71 flag stamps: T, version and check name the release and the check t
   assert.equal(f.version, '1.1.0'); assert.equal(Date.parse(f.T), T1); assert.equal(f.check, '+1h'); assert.equal(Date.parse(f.chain), T, 'the chain base is kept apart');
 });
 
-test('0.31.71 flag stamps: an older release due alone is named, not the newest installed one', () => {
+test('0.31.76 cadence: an older release due while the newest is under an hour old waits; one check then covers both', () => {
+  const calls = [];
   W.tick({ at: T + HOUR, installed: instV('1.0.0', T), run: () => metrics(), standingRun: none });
-  W.tick({ at: T + 4 * HOUR + 60e3, installed: instV('1.1.0', T + 3.5 * HOUR), run: flagged, standingRun: none });
+  const r1 = W.tick({ at: T + 4 * HOUR + 60e3, installed: instV('1.1.0', T + 3.5 * HOUR), run: (o) => { calls.push(o); return flagged(o); }, standingRun: none });
+  assert.equal(r1.ran, false, 'a window under an hour is not measured'); assert.equal(calls.length, 0);
+  const r2 = W.tick({ at: T + 4.5 * HOUR + 60e3, installed: instV('1.1.0', T + 3.5 * HOUR), run: (o) => { calls.push(o); return flagged(o); }, standingRun: none });
+  assert.equal(r2.ran, true); assert.equal(calls.length, 1, 'one analysis for the whole chain');
   const f = S.readFlag();
-  assert.equal(f.version, '1.0.0'); assert.equal(Date.parse(f.T), T); assert.equal(f.check, '+4h');
+  assert.equal(f.version, '1.1.0'); assert.equal(Date.parse(f.T), T + 3.5 * HOUR); assert.equal(f.check, '+1h');
+  assert.ok(runFile().releases[0].done.includes(2) && runFile().releases[1].done.includes(0), 'both releases had their due slot covered by that one check');
+  const rows = readFileSync(file('release-watch-checks.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((x) => x.event === 'check');
+  assert.equal(rows.length, 2);
+  assert.ok(Date.parse(rows[1].window.to) - Date.parse(rows[1].window.from) >= HOUR, 'window at least one hour');
 });
 
 test('0.31.71 designed denies: a guard deny that works as designed is not a hook error and not a signature; real errors still flag', () => {
@@ -1721,4 +1730,52 @@ test('scope: releases (default) refuses only release actions; all keeps the all-
     assert.equal(S.releaseActionDeny('claude plugin update agent-companion'), null, 'all scope: the all-calls path owns the refusal');
     assert.ok(S.holdDenyMessage('new agents'), 'all scope keeps the old denial');
   } finally { process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_SCOPE = was; }
+});
+
+// ---- 0.31.76: false-hold detectors (fixtures follow the root-cause analysis of the recorded episodes; every id is invented) ----
+const rowl = (o) => JSON.stringify(o) + '\n';
+function replayFixture({ spawns = 34, denials = [], planned = 0, unplanned = 0, done = 0, handoffRows = [] } = {}) {
+  const tdir = join(claude, 'agent-companion', 'telemetry'); mkdirSync(tdir, { recursive: true });
+  let sp = ''; for (let i = 0; i < spawns; i++) sp += rowl({ at: T + HOUR + i * 60e3, session_id: 'sess-fake-1' });
+  for (let i = 0; i < 140; i++) sp += rowl({ at: T - 24 * HOUR - i * 600e3, session_id: 'sess-fake-1' });
+  writeFileSync(join(tdir, 'spawns.jsonl'), sp);
+  writeFileSync(join(tdir, 'denials.jsonl'), denials.map(rowl).join(''));
+  writeFileSync(join(tdir, 'handoff-limit.jsonl'), handoffRows.map(rowl).join(''));
+  let n = 0;
+  const mk = (text) => putWorker(`rp${n++}`, [prompt71(n), say(n, text)]);
+  for (let i = 0; i < planned; i++) mk('Handed off.\nDONE: partial, handoff at C:/fake/tasks/x-handoff.md');
+  for (let i = 0; i < unplanned; i++) mk('STATUS: partial\nstopped early');
+  for (let i = 0; i < done; i++) mk('STATUS: done');
+  return W.analyze({ T, nowMs: T + 2 * HOUR });
+}
+const metricOf = (m, name) => W.evaluate(m).metrics.find((x) => x.name === name);
+const denial = (agent, guard = 'type-required', i = 0) => ({ at: T + HOUR + 28000 + i * 7000, session_id: 'sess-fake-1', agent_id: agent, guard, outcome: 'deny' });
+
+test('0.31.76 spawn-rewrites: one agent retrying the same refused spawn counts once; distinct agents still count', () => {
+  let m = replayFixture({ denials: [0, 1, 2, 3].map((i) => denial('agent-fake-a', 'type-required', i)), done: 5 });
+  assert.deepEqual(m.rewriteActors, { since: 1, base: 0 });
+  assert.equal(metricOf(m, 'spawn-rewrites').status, 'ok');
+  m = replayFixture({ denials: ['a', 'b', 'c', 'd'].map((a, i) => denial('agent-fake-' + a, 'type-required', i)), done: 5 });
+  assert.equal(metricOf(m, 'spawn-rewrites').status, 'flag', 'a type-required guard denying every spawn still shows');
+});
+
+test('0.31.76 partial-share: a planned hand-off ending is not a partial; unplanned partials still count', () => {
+  let m = replayFixture({ planned: 12, unplanned: 1, done: 11 });
+  assert.equal(m.workers.since.plannedHandoffs, 12); assert.equal(m.workers.since.partialPct, 4.2);
+  assert.equal(metricOf(m, 'partial-share').status, 'ok');
+  m = replayFixture({ planned: 0, unplanned: 13, done: 11 });
+  assert.equal(metricOf(m, 'partial-share').status, 'flag');
+});
+
+test('0.31.76 replay: the E7 window (4 retries of one agent, 54% partial that is hand-offs) gives no flag and no hold', () => {
+  const m = replayFixture({ denials: [0, 1, 2, 3].map((i) => denial('agent-fake-a', 'type-required', i)), planned: 12, unplanned: 1, done: 11 });
+  const e = W.evaluate(m);
+  assert.deepEqual(e.flags.map((f) => f.name).filter((x) => x !== 'usage-source-empty'), [], 'the fixture has no usage source, which never holds');
+  assert.ok(!e.metrics.some((x) => x.hold && x.status === 'flag'));
+});
+
+test('0.31.76 replay: the real defect of E3 (hand-off guard end-blocks on valid hand-offs) still flags', () => {
+  const rows = Array.from({ length: 6 }, (_, i) => ({ at: T + HOUR + i * 60e3, session_id: 'sess-fake-2', agent_id: 'agent-fake-' + i, limit: 'hard', action: 'end-block' }));
+  const m = replayFixture({ spawns: 37, handoffRows: rows, planned: 10, done: 20 });
+  assert.ok(W.evaluate(m).flags.map((f) => f.name).includes('handoff-end-block'));
 });

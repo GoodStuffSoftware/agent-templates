@@ -905,6 +905,12 @@
       "description": "A flag starts a hold only when its rate is over at least this many samples (spawns, workers or finished workers). Default 30. Severity flags (runaway) are exempt. 0 = no sample floor.",
       "default": 30
     },
+    "release_watch_min_window_minutes": {
+      "type": "number",
+      "title": "Release watch: shortest check window (minutes)",
+      "description": "A post-release check measures the activity since the later of the last conclusive check and the newest install. When that window is shorter than this many minutes the check waits for a later tick (a due slot is never dropped), so releases installed minutes apart share one check of at least this length instead of one short check each. Default 60 (one hour). Values of 0 or less fall back to 60.",
+      "default": 60
+    },
     "release_watch_min_spawns": {
       "type": "number",
       "title": "Release watch: minimum spawns for a verdict",

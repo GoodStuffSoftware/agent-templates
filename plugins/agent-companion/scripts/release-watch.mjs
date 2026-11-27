@@ -71,7 +71,9 @@ export const NON_CONTRACT_TYPES = new Set(['Explore', 'Plan', 'web-fetch', 'clau
 // A hook-verification spawn says so in its brief (first 400 chars of its first message): synthetic, not work.
 export const PROBE_RE = /^[\s\S]{0,400}?hook verification spawn, not real work/i;
 const STATUS_RE = /STATUS:\s*(done|partial|blocked)/i;
-const STATUS_LINE_RE = /^[\s>*_`#-]*STATUS:\s*(done|partial|blocked)/im;
+// The planned end of a worker at its hand-off line (handoff-limit.mjs): a line "DONE: partial, handoff at <path>".
+const PLANNED_HANDOFF_RE = /^[\s>*_`#-]*DONE:\s*partial,\s*handoff at\s+\S/im;
+const STATUS_LINE_RE =/^[\s>*_`#-]*STATUS:\s*(done|partial|blocked)/im;
 // Claude Code's own PreToolUse blocks arrive in the SAME transcript shape as a hook's ("PreToolUse:Edit hook error: <text>", the record's
 // permissionDecision says source hook, and no attachment names the command), so the record cannot tell ours from the harness's; the harness
 // messages are known by their wording and are never counted as a hook error or a new signature (the worktree-isolation block is the one seen).
@@ -194,10 +196,11 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
     const w = first >= W0 ? 'since' : first < BT ? 'base' : null;
     if (!w || inHold(first)) continue;
     const st = STATUS_RE.exec(txt);
-    const status0 = st ? st[1].toLowerCase() : stLine;
+    const status0 = st ? st[1].toLowerCase() : stLine || (PLANNED_HANDOFF_RE.test(txt) ? 'partial' : null);
     let fin = false; let atype = ''; let tu = null; try { const mt = JSON.parse(readFileSync(fp.replace(/\.jsonl$/, '.meta.json'), 'utf8')); fin = mt.finished === true; atype = String(mt.agentType || ''); tu = mt.toolUseId || null; } catch { /* none */ }
     const ex = probe ? 'probe' : NON_CONTRACT_TYPES.has(atype) ? atype : null;
-    WR.push({ w, first, tu, sigs, u, peak, hook, terr, api, apiOther, usageAt, endUsage, bash, refusal, bashFail, ex, status: status0 || (fin ? 'none' : 'running') });
+    const planned = PLANNED_HANDOFF_RE.test(txt);
+    WR.push({ w, first, tu, planned, sigs, u, peak, hook, terr, api, apiOther, usageAt, endUsage, bash, refusal, bashFail, ex, status: status0 || (fin ? 'none' : 'running') });
   }
   // The whole result for the since side restricted to release `vf` (null = the whole chain); the baseline side is always the shared one.
   const build = (vf) => {
@@ -220,6 +223,12 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
       const hw = { since: new Set(), base: new Set() };
       for (const r of rd('handoff-limit')) { const w = win(r, vf); if (!w || r.limit !== 'hard' || r.action !== 'deny') continue; hw[w].add(String(r.agent_id || r.session_id || 'row')); }
       out.handoffHardWorkers = { since: hw.since.size, base: hw.base.size };
+    }
+    {
+      // 0.31.76: spawn rewrites as distinct agents (agent id, else session id): one agent retrying the same refused spawn is one actor.
+      const ra = { since: new Set(), base: new Set() };
+      for (const r of rd('denials')) { const w = win(r, vf); if (!w || r.outcome !== 'deny' || !REWRITE_GUARDS.has(r.guard)) continue; ra[w].add(String(r.agent_id || r.session_id || 'row')); }
+      out.rewriteActors = { since: ra.since.size, base: ra.base.size };
     }
     add('ctx', count('subagent-context', (r) => `${r.kind}/${r.phase}`));
     add('gate', count('resource-gate', (r) => r.event));
@@ -280,7 +289,9 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
         over110kPct: per(a.filter((x) => x.peak > 110000).length, a.length), over150kPct: per(a.filter((x) => x.peak > 150000).length, a.length),
         noStatusFinished: finNs.length, usageLimitEnded: usageEnded,
         noStatusPct: per(finNs.filter((x) => x.status === 'none').length, finNs.length),
-        partialPct: per(fin.filter((x) => x.status === 'partial').length, fin.length),
+        // 0.31.76: a planned hand-off ending ("DONE: partial, handoff at <path>", the auto hand-off included) is the designed outcome of a long worker, not a partial.
+        partialPct: per(fin.filter((x) => x.status === 'partial' && !x.planned).length, fin.length),
+        plannedHandoffs: fin.filter((x) => x.status === 'partial' && x.planned).length,
         blockedPct: per(fin.filter((x) => x.status === 'blocked').length, fin.length),
         hookErrorWorkersPct: per(a.filter((x) => x.hook > 0).length, a.length),
         apiErrorWorkers: a.filter((x) => x.api).length,
@@ -388,8 +399,10 @@ export function evaluate(m, opts = {}) {
   };
   {
     const rw = tel.filter(([k]) => k.startsWith('denial:') && k.endsWith('/deny') && REWRITE_GUARDS.has(k.slice(7).split('/')[0]));
-    const c = rw.reduce((s, [, v]) => s + v.since, 0); const cb = rw.reduce((s, [, v]) => s + v.base, 0);
-    per100(c, TH.rewriteMinEv, 'spawn-rewrites', TH.rewritePer100, `${c} rewrites/denials per ${sp.since} spawns`, cb);
+    // Distinct agents when the analysis carries them (0.31.76), else raw rows (older analyses, hand-made metrics).
+    const ra = m.rewriteActors;
+    const c = ra ? ra.since : rw.reduce((s, [, v]) => s + v.since, 0); const cb = ra ? ra.base : rw.reduce((s, [, v]) => s + v.base, 0);
+    per100(c, TH.rewriteMinEv, 'spawn-rewrites', TH.rewritePer100, `${c} ${ra ? 'agents refused or rewritten' : 'rewrites/denials'} per ${sp.since} spawns`, cb);
   }
   {
     const gd = sumTel(/^gate:.*denied/); const gb = sumTelBase(/^gate:.*denied/);
@@ -485,7 +498,7 @@ function checkRow({ at, rs, newest, lead, last, due, late, verdict, flags, evald
   if (evald) row.metrics = evald.metrics.map(mrow);
   if (metrics && metrics.spawns) {
     row.sample = { spawns: metrics.spawns.since, workers: metrics.workers && metrics.workers.since && metrics.workers.since.n, bash: metrics.bash && metrics.bash.since && metrics.bash.since.n };
-    row.baseline = { from: iso(metrics.span ? rs.baseAnchor - metrics.span.base * HOUR : rs.baseAnchor - D7), to: iso(rs.baseAnchor), spawns: metrics.spawns.base };
+    row.baseline = { from: iso(metrics.span ? newest.T - metrics.span.base * HOUR : newest.T - D7), to: iso(newest.T), spawns: metrics.spawns.base };
     try {
       const u = metrics.usage || usageOf(metrics);
       row.usage = { pctPerHour: { since: u.since.pctPerHour, base: u.base.pctPerHour }, pctWindow: +(u.since.pctPerHour * metrics.span.since).toFixed(3) };
@@ -507,7 +520,7 @@ function finishStep({ rs, at, verdict, analyzeFn }) {
   const FL = finishFloors();
   let act = null;
   try {
-    const fm = analyzeFn({ T: N.T, nowMs: at, baseFrom: rs.baseAnchor - D7, baseTo: rs.baseAnchor, winFrom: N.T });
+    const fm = analyzeFn({ T: N.T, nowMs: at, baseFrom: N.T - D7, baseTo: N.T, winFrom: N.T });
     act = { spawns: fm.spawns.since, workers: fm.workers.since.n, bash: fm.bash.since.n, activeHours: fm.activeHours ? fm.activeHours.since : 0 };
   } catch { /* no activity read: not enough to finish */ }
   const met = !!act && act.spawns >= FL.spawns && act.workers >= FL.workers && act.bash >= FL.bash && act.activeHours >= FL.activeHours;
@@ -552,12 +565,16 @@ function chainChecks({ rs, P, at, analyzeFn, res }) {
   const last = Math.max(...due.find((d) => d.r === lead).idx);
   const newest = newestOf(rs);
   const winFrom = chainWinFrom(rs);
+  // 0.31.76 cadence: one check per slot. The window a check measures starts at the later of the last conclusive check and the newest install
+  // (the baseline now ends there); a check that would measure less than release_watch_min_window_minutes (default 60) waits for a later tick,
+  // and then covers every due slot of every release in the chain at once, so releases installed minutes apart share one check.
+  if (at - Math.max(winFrom, newest.T) < nOpt('release_watch_min_window_minutes', 60) * 60e3) return;
   const split = rs.releases.length >= 2;
   let metrics = null; let evald = { verdict: 'inconclusive', metrics: [], flags: [] };
   const verOf = {}; let byVersion = null;
   try {
-    // Window = since the last conclusive check (a rate per window); baseline = always the 7 days before the chain's FIRST install.
-    metrics = analyzeFn({ T: newest.T, nowMs: at, baseFrom: rs.baseAnchor - D7, baseTo: rs.baseAnchor, winFrom, ...(split ? { releases: rs.releases.map((r) => ({ version: r.version, T: r.T })) } : {}) });
+    // Window = since the last conclusive check (a rate per window); baseline = the 7 days before the NEWEST release was installed (0.31.76: not the first install of the chain).
+    metrics = analyzeFn({ T: newest.T, nowMs: at, baseFrom: newest.T - D7, baseTo: newest.T, winFrom, ...(split ? { releases: rs.releases.map((r) => ({ version: r.version, T: r.T })) } : {}) });
     evald = evaluate(metrics);
     if (split && metrics && metrics.byVersion) {
       byVersion = {};
