@@ -142,7 +142,9 @@ export function openFlag({ version, T, chain, check, flags, at = now() } = {}) {
     const oldByName = new Map(open ? old.flags.map((o) => [o.name, o]) : []);
     // Renotify (restart the countdown) only for a name not already in the open flag, or one that doubled since it was raised.
     // A watch-health flag (NO_HOLD_FLAGS) joining an answered flag never restarts the countdown: it could not hold, and it must not re-open the hold path of the flag already answered.
-    const renotify = !open || holdable(fresh).some((f) => { const o = oldByName.get(f.name); const lo = o && levelOf(o); const l = levelOf(f); return !o || (lo > 0 && l > lo * WORSEN_FACTOR); });
+    // 0.31.77: also when a flag first notified below the hold floor now meets it (the old copy is not holdable): the grace runs from when the flag first
+    // meets the floor, not from the earlier showing. An answered flag (ackedAt) stays answered.
+    const renotify = !open || holdable(fresh).some((f) => { const o = oldByName.get(f.name); const lo = o && levelOf(o); const l = levelOf(f); return !o || (lo > 0 && l > lo * WORSEN_FACTOR) || (!old.ackedAt && !holdable([o]).length); });
     const merged = open ? [...old.flags.filter((o) => !fresh.some((f) => f.name === o.name)), ...fresh] : fresh;
     const next = {
       v: 2,
@@ -781,21 +783,132 @@ function scopedHoldNotice(h, sessionId, at) {
   } catch { return null; }
 }
 // A Bash/PowerShell command that releases or installs agent-companion: a plugin install/update, a marketplace update, a push to a release/*
-// branch, or a PR merge/create naming one. Only these are refused in scope 'releases'.
-export const MARKETPLACE_UPDATE_RE = /\bplugin\s+marketplace\s+update\b/;
-export const RELEASE_PUSH_RE = /\bgit\b[^\n;&|]*\bpush\b[^\n;&|]*\brelease\//;
-export const RELEASE_PR_RE = /\bgh\s+pr\s+(?:merge|create)\b[^\n;&|]*\brelease\/|\bgh\s+pr\s+merge\b[^\n;&|]*\b(?:agent-templates|agent-companion)\b/;
-export function isReleaseAction(cmd) {
-  const c = String(cmd || '');
-  return INSTALL_CMD_RE.test(c) || MARKETPLACE_UPDATE_RE.test(c) || RELEASE_PUSH_RE.test(c) || RELEASE_PR_RE.test(c);
+// branch, a merge of one (git merge, or gh pr merge of a PR whose head is one), or a PR create naming one. Only these are refused in scope 'releases'.
+//
+// 0.31.77: matched on the command's real words, not its text. The command is split into segments (; | & && newline, parentheses) and words
+// (quotes joined into one word, heredoc and PowerShell here-string bodies dropped), so an echoed or printed push line, a commit message,
+// a PR body or a heredoc never matches: a quoted sentence is ONE word, never the three words `plugin install agent-companion`.
+// A shell -c / -Command / eval argument is a real command and is split again (3 levels).
+export const PR_LOOKUP_MS = 3000; // inside the pre hook's 5 s timeout
+export function commandSegments(cmd) {
+  const s = String(cmd ?? ''); const n = s.length;
+  const out = []; let words = []; let w = null; let i = 0; const pend = [];
+  const endWord = () => { if (w !== null) { words.push(w); w = null; } };
+  const endSeg = () => { endWord(); if (words.length) out.push(words); words = []; };
+  while (i < n) {
+    const c = s[i];
+    if (c === "'") { const j = s.indexOf("'", i + 1); const e = j < 0 ? n : j; w = (w ?? '') + s.slice(i + 1, e); i = e + 1; continue; }
+    if (c === '"') {
+      let j = i + 1; let buf = '';
+      while (j < n && s[j] !== '"') { if ((s[j] === '\\' || s[j] === '`') && j + 1 < n && '"\\`$'.includes(s[j + 1])) { buf += s[j + 1]; j += 2; } else buf += s[j++]; }
+      w = (w ?? '') + buf; i = j + 1; continue;
+    }
+    if (c === '@' && (s[i + 1] === "'" || s[i + 1] === '"') && /^[ \t]*\r?\n/.test(s.slice(i + 2))) { // PowerShell here-string: the body is text
+      const k = s.indexOf(`\n${s[i + 1]}@`, i + 2); i = k < 0 ? n : k + 3; w = (w ?? '') + 'x'; continue;
+    }
+    if (c === '<' && s[i + 1] === '<' && s[i + 2] !== '<') {
+      const m = /^<<-?[ \t]*(["']?)([A-Za-z_][\w.-]*)\1/.exec(s.slice(i));
+      if (m) { pend.push(m[2]); i += m[0].length; continue; }
+    }
+    if (c === '\n') {
+      endSeg(); i++;
+      for (const d of pend.splice(0)) { while (i < n) { let e = s.indexOf('\n', i); if (e < 0) e = n; const line = s.slice(i, e).trim(); i = e + 1; if (line === d) break; } }
+      continue;
+    }
+    if (c === ';' || c === '|' || c === '&' || c === '(' || c === ')') { endSeg(); i++; continue; }
+    if (c === ' ' || c === '\t' || c === '\r') { endWord(); i++; continue; }
+    if ((c === '\\' || c === '`') && i + 1 < n && /["'\s]/.test(s[i + 1])) { w = (w ?? '') + s[i + 1]; i += 2; continue; }
+    w = (w ?? '') + c; i++;
+  }
+  endSeg();
+  return out;
 }
-// The deny text for a release/install command while a hold in scope 'releases' is on; null otherwise (fails open).
-export function releaseActionDeny(cmd) {
+const PREFIX_WORDS = new Set(['sudo', 'command', 'builtin', 'time', 'nohup', 'exec', 'env', 'nice', 'call', '!', '{', '}', 'then', 'do', 'else', 'if', 'while', 'until']);
+const PRINT_CMDS = new Set(['echo', 'printf', 'write-host', 'write-output', 'write-error', 'write-warning', 'cat', 'type', 'print']);
+const SHELL_CMDS = /^(?:bash|sh|zsh|dash|ksh|pwsh|powershell|cmd|eval)$/;
+const binName = (x) => String(x).replace(/^.*[\\/]/, '').replace(/\.(?:exe|cmd|bat|ps1)$/i, '').toLowerCase();
+// Words that are the value of a text flag (commit message, PR title or body): never a branch name.
+const TEXT_FLAGS = new Set(['-m', '--message', '-F', '--file', '-b', '--body', '-t', '--title', '--subject', '--body-file']);
+const dropTextValues = (args) => { const o = []; for (let k = 0; k < args.length; k++) { if (TEXT_FLAGS.has(args[k])) { k++; continue; } if (/^--(?:message|body|title|subject)=/.test(args[k])) continue; o.push(args[k]); } return o; };
+// The head branch of a PR: only ever called for `gh pr merge` during a hold; null when it cannot be read (timeout, no gh, no network, unknown PR).
+// AGENT_COMPANION_GH_BIN replaces `gh` (a .mjs file is run with node): the tests' stand-in, so no test touches the network.
+export function prHeadLookup(pr, repo) {
   try {
-    if (!isHoldActive() || holdScope() !== 'releases' || !isReleaseAction(cmd)) return null;
+    const { spawnSync } = createRequire(import.meta.url)('node:child_process');
+    const bin = process.env.AGENT_COMPANION_GH_BIN || 'gh';
+    const a = ['pr', 'view', ...(pr ? [pr] : []), ...(repo ? ['--repo', repo] : []), '--json', 'headRefName', '-q', '.headRefName'];
+    const js = /\.m?js$/.test(bin);
+    const r = spawnSync(js ? process.execPath : bin, js ? [bin, ...a] : a, { encoding: 'utf8', timeout: PR_LOOKUP_MS, windowsHide: true });
+    const h = r.status === 0 ? String(r.stdout || '').trim() : '';
+    return h || null;
+  } catch { return null; }
+}
+// 'release' | 'unverified' (a gh pr merge whose head could not be looked up) | null.
+function wordsKind(words, lookup, depth) {
+  let i = 0;
+  while (i < words.length && (PREFIX_WORDS.has(words[i]) || /^[A-Za-z_]\w*=/.test(words[i]))) i++;
+  const w = words.slice(i);
+  if (!w.length) return null;
+  const c = binName(w[0]);
+  if (SHELL_CMDS.test(c)) {
+    if (depth >= 3) return null;
+    let inner = null;
+    if (c === 'eval') inner = w.slice(1).join(' ');
+    else { const k = w.findIndex((x, j) => j > 0 && /^(?:-[A-Za-z]*c|-command|\/[ck])$/i.test(x)); if (k > 0) inner = w[k + 1]; }
+    let kind = null;
+    if (inner) for (const seg of commandSegments(inner)) { const r = wordsKind(seg, lookup, depth + 1); if (r === 'release') return r; kind = kind || r; }
+    return kind;
+  }
+  if (PRINT_CMDS.has(c)) return null;
+  for (let j = 0; j < w.length; j++) {
+    if (w[j] !== 'plugin') continue;
+    if (/^(?:install|update)$/.test(w[j + 1] || '') && /^agent-companion\b/.test(w[j + 2] || '')) return 'release';
+    if (w[j + 1] === 'marketplace' && w[j + 2] === 'update') return 'release';
+  }
+  if (c === 'git') {
+    let k = 1;
+    while (k < w.length && w[k].startsWith('-')) k += /^(?:-C|-c|--git-dir|--work-tree|--namespace)$/.test(w[k]) ? 2 : 1;
+    const sub = w[k]; const args = dropTextValues(w.slice(k + 1));
+    if (sub === 'push' && args.some((a) => /\brelease\//.test(a))) return 'release';
+    if (sub === 'merge' && args.some((a) => /^(?:[\w.-]+\/)?release\/\S+$/.test(a))) return 'release';
+    return null;
+  }
+  if (c === 'gh' && w[1] === 'pr' && (w[2] === 'merge' || w[2] === 'create')) {
+    const raw = w.slice(3); const args = dropTextValues(raw);
+    if (args.some((a) => /\brelease\//.test(a))) return 'release';
+    if (w[2] !== 'merge') return null;
+    if (args.some((a) => /\b(?:agent-templates|agent-companion)\b/.test(a))) return 'release';
+    let pr = null; let repo = null;
+    for (let k = 0; k < raw.length; k++) {
+      if (/^(?:-R|--repo)$/.test(raw[k])) { repo = raw[++k] || null; continue; }
+      if (TEXT_FLAGS.has(raw[k]) || /^(?:--match-head-commit|-A|--author-email)$/.test(raw[k])) { k++; continue; }
+      if (raw[k].startsWith('--repo=')) { repo = raw[k].slice(7); continue; }
+      if (!raw[k].startsWith('-') && pr == null) pr = raw[k];
+    }
+    // Fail closed: a merge whose head cannot be read is refused. gh pr merge needs the same network, so an offline refusal costs nothing real,
+    // while letting it through would let a release merge past the hold whenever the lookup fails. Only during a hold, only this command.
+    const head = lookup(pr, repo);
+    return head == null ? 'unverified' : /^release\//.test(head) ? 'release' : null;
+  }
+  return null;
+}
+export function releaseActionKind(cmd, lookup = prHeadLookup) {
+  let kind = null;
+  for (const seg of commandSegments(cmd)) { const r = wordsKind(seg, lookup, 0); if (r === 'release') return r; kind = kind || r; }
+  return kind;
+}
+export function isReleaseAction(cmd, lookup = prHeadLookup) { return releaseActionKind(cmd, lookup) != null; }
+// The deny text for a release/install command while a hold in scope 'releases' is on; null otherwise (fails open, except the one
+// documented fail-closed case above).
+export function releaseActionDeny(cmd, lookup = prHeadLookup) {
+  try {
+    if (!isHoldActive() || holdScope() !== 'releases') return null;
+    const kind = releaseActionKind(cmd, lookup);
+    if (!kind) return null;
     const h = readHold() || {};
     const names = Array.isArray(h.flags) && h.flags.length ? h.flags.map((x) => x && x.name).filter(Boolean).join(', ') : 'unspecified';
-    return `[agent-companion] A post-release hold is on since ${h.since || '?'} (release ${h.version || '?'}; flags: ${names}), so this agent-companion release or install command is refused. All other work continues. Tell the operator at once. Only the operator lifts it, by saying "clear hold"; do not try to lift it yourself.`;
+    const why = kind === 'unverified' ? ' (the head branch of that PR could not be looked up in time, so it is treated as a release merge)' : '';
+    return `[agent-companion] A post-release hold is on since ${h.since || '?'} (release ${h.version || '?'}; flags: ${names}), so this agent-companion release or install command is refused${why}. All other work continues. Tell the operator at once. Only the operator lifts it, by saying "clear hold"; do not try to lift it yourself.`;
   } catch { return null; }
 }
 
