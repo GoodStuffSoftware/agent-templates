@@ -112,3 +112,29 @@ test('the daily routine checks cloud routines through RemoteTrigger and says so 
   assert.match(text, /only in a digest that prints something else/);
   assert.match(text, /A skipped check is not a clean one/);
 });
+
+test('Fable 5, 5.1 and 5.2 each classify to their own entry with their own price', async () => {
+  const { classifyModel, classifyReferenceModel } = await import('../hooks/lib/context.mjs');
+  const f = tiers.tiers.fable.resolvesTo;
+  assert.equal(f.modelId, 'claude-fable-5-2');
+  assert.deepEqual([f.pricing.inputPerMTok, f.pricing.outputPerMTok, f.pricing.cacheHitPerMTok], [8, 40, 0.2]);
+  // 5.2 is the current tier, so no reference entry may claim it (dated or not).
+  for (const id of ['claude-fable-5-2', 'claude-fable-5-2-20261101']) {
+    assert.equal(classifyReferenceModel(id), null, id);
+    assert.equal(classifyModel(id).alias, 'fable', id);
+  }
+  for (const [id, key, input, output, cache] of [
+    ['claude-fable-5-1', 'fable-5-1', 10, 50, 0.25],
+    ['claude-fable-5-1-20260801', 'fable-5-1', 10, 50, 0.25],
+    ['claude-fable-5', 'fable-5', 10, 50, 1],
+    ['claude-fable-5-20260101', 'fable-5', 10, 50, 1],
+  ]) {
+    const r = classifyReferenceModel(id);
+    assert.equal(r?.key, key, id);
+    assert.deepEqual([r.pricing.inputPerMTok, r.pricing.outputPerMTok, r.pricing.cacheHitPerMTok], [input, output, cache], id);
+  }
+  const cfg = JSON.parse(read('config', 'model-pricing.json'));
+  for (const [id, alias] of [['claude-fable-5-2', 'fable-5-2'], ['claude-fable-5-1', 'fable-5-1'], ['claude-fable-5', 'fable-5'], ['claude-fable-5-20260101', 'fable-5']]) {
+    assert.equal(classifyPricing(id, cfg).alias, alias, id);
+  }
+});

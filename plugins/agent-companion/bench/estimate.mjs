@@ -351,8 +351,14 @@ export function loadLocalJudgeVoteHistory({ resultsRoot } = {}) {
 // alias tier. Returns 1 (no scaling) whenever either model's pricing is
 // unreadable -- fail toward the seed's own already-measured number rather
 // than guessing a ratio.
+// The anchor is the model the seed was MEASURED on (claude-fable-5-1), not the
+// current `fable` tier: the tier moved to Fable 5.2 ($8/$40) while the $0.81
+// anchor was measured at 5.1 prices ($10/$50), so scaling against the tier
+// would make the anchor model itself read 1.25x. Falls back to the tier.
 function fablePricing() {
-  return modelTiers().tiers?.fable?.resolvesTo?.pricing || null;
+  const anchor = loadSeed()?.judgeVoteAnchor?.anchorModel || "claude-fable-5-1";
+  return classifyReferenceModel(anchor)?.pricing
+    || modelTiers().tiers?.fable?.resolvesTo?.pricing || null;
 }
 
 function judgeModelPricing(fullModelId) {
