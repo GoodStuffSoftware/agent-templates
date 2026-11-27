@@ -32,7 +32,7 @@ import { pushDeleteGuard } from './lib/push-delete-guard.mjs';
 import { claimOnce, readStamp, writeStamp } from './lib/subagent-context.mjs';
 import { fileURLToPath } from 'node:url';
 import {
-  tailOwnsCommand, evaluate, POLL_TOOLS, TAIL_BYTES, workerWaitPattern, workerWaitHint, workerWaitDenyText, workerWaitDecision,
+  evaluate, POLL_TOOLS, TAIL_BYTES, workerWaitPattern, workerWaitHint, workerWaitDenyText, workerWaitDecision,
   workerWaitMode, WORKER_WAIT_WINDOW_MINUTES,
 } from './lib/poll-guard.mjs';
 
@@ -133,7 +133,14 @@ try {
       // spends no round trip on a retry. Anything the rewrite cannot do safely falls through to the refusal below.
       // bash-tail.mjs is the one hook that rewrites shell calls (one rewrite per call survives), so it does this rewrite; this
       // hook just stays out of the way. A command bash-tail rewrites for another reason keeps the refusal below.
-      if (toolName === 'Bash' && opt('worker_wait_rewrite', true) && !tailOwnsCommand(input.command, p.cwd || process.cwd())) finish(null);
+      // The decision is lib/worker-wait-rewrite.mjs's, the same one bash-tail.mjs acts on (a dynamic import: it loads the
+      // resource gate and the tail wrapper, needed only on this rare path). Residual case: bash-tail crashing or timing out
+      // after this hook stood down cannot be seen from here; the wait then runs in the foreground.
+      if (toolName === 'Bash' && opt('worker_wait_rewrite', true)) {
+        let rewrites = false;
+        try { rewrites = (await import('./lib/worker-wait-rewrite.mjs')).tailWillRewriteWait(p, now); } catch { /* fail closed: keep the refusal */ }
+        if (rewrites) finish(null);
+      }
       const text = workerWaitDenyText(root, windowMinutes);
       recordDenial('worker-wait', p, `${hit.kind} repeat within ${windowMinutes} min of the one-wait notice`);
       deny(text);

@@ -4,7 +4,7 @@
 // tests/worker-wait.test.mjs and tests/worker-wait-review.test.mjs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
 import {
@@ -238,4 +238,33 @@ test('rewrite: still denied for PowerShell, for a heavy command and for a comman
       assert.notEqual(b.tail.json?.hookSpecificOutput?.updatedInput?.run_in_background, true, command);
     });
   } finally { cleanup(); }
+});
+
+// Review fix: poll-guard stands down only when bash-tail will rewrite. A deny or ask rule that matches the command makes
+// bash-tail leave the call alone, so poll-guard must keep its refusal (before the fix neither hook acted).
+test('rewrite: a deny rule matching the wait keeps poll-guard\'s refusal; without the rule poll-guard stands down and bash-tail rewrites', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const sleepPayload = (id) => payload({ agent_id: id, tool_input: { command: 'sleep 30' } });
+    for (const withRule of [false, true]) {
+      const id = 'g-perm' + (withRule ? '1' : '0');
+      mkdirSync(join(dir, '.claude'), { recursive: true });
+      writeFileSync(join(dir, '.claude', 'settings.json'), JSON.stringify(withRule ? { permissions: { deny: ['Bash(sleep:*)'] } } : {}));
+      both(dir, sleepPayload(id), { ...at(0), ...REWRITE });
+      const b = both(dir, sleepPayload(id), { ...at(3), ...REWRITE });
+      if (withRule) {
+        assert.equal(decisionOf(b.poll), 'deny', 'poll-guard keeps the refusal');
+        assert.notEqual(b.tail.json?.hookSpecificOutput?.updatedInput?.run_in_background, true);
+      } else {
+        assert.equal(decisionOf(b.poll), undefined, 'poll-guard stands down');
+        assert.equal(b.tail.json.hookSpecificOutput.updatedInput.run_in_background, true);
+      }
+    }
+  } finally { cleanup(); }
+});
+
+test('rewrite: worker_wait_rewrite is declared in plugin.json (default true)', () => {
+  const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).userConfig;
+  assert.equal(cfg.worker_wait_rewrite.type, 'boolean');
+  assert.equal(cfg.worker_wait_rewrite.default, true);
 });

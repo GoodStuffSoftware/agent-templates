@@ -378,9 +378,6 @@ function sanctionedWait(pluginRoot) {
     '(or --run <run-id|branch>); for a main-branch run, gh run watch <run-id> in the background.';
 }
 
-import { classifyCommand } from './resource-gate.mjs';
-import { analyze as analyzeTail } from './bash-tail.mjs';
-
 export function workerWaitHint(pluginRoot, { denyRepeat = false, windowMinutes = WORKER_WAIT_WINDOW_MINUTES } = {}) {
   return '[agent-companion] One-wait rule for workers: one blocking call or one background command, no sleep, ' +
     'poll or watch loops. ' + sanctionedWait(pluginRoot) +
@@ -411,14 +408,6 @@ export function workerWaitMode(raw) {
 
 // Pure. prev = the stored { s: session id, t: ms of the agent's last match } or null.
 // Returns { action: 'hint' | 'deny' | 'silent', first }.
-// True when bash-tail.mjs has a rewrite of its own for this command (heavy, a known long-runner, a worktree remove). Only one
-// rewrite survives a call, so the worker-wait rewrite leaves such a command alone and poll-guard keeps its refusal.
-export function tailOwnsCommand(command, cwd) {
-  try {
-    return classifyCommand(command, { cwd }).heavy.length > 0 || Boolean(analyzeTail(command).runner) || /worktree/.test(command);
-  } catch { return true; }
-}
-
 export function workerWaitDecision({ mode, prev, sessionId, nowMs, windowMs, firstClaim }) {
   if (mode === 'hint') return { action: firstClaim ? 'hint' : 'silent', first: !!firstClaim };
   const sameSession = prev && String(prev.s ?? '') === String(sessionId ?? '') && Number.isFinite(prev.t);

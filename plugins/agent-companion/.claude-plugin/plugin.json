@@ -1110,6 +1110,12 @@
       "description": "What the worker one-wait hook does with a subagent's sleep, poll or watch loop in Bash or PowerShell. \"deny-repeat\" (default): the first match gets the hint; a repeat by the same agent in the same session within worker_wait_repeat_window_minutes of its previous match is refused, and the refusal names the sanctioned wait (one run_in_background command, node scripts/pr-wait.mjs for a PR or CI run, a background gh run watch for a main-branch run); after the window the hint is given again. \"hint\": the hint once per worker, never a refusal. \"off\": the hook does nothing for workers (no hint, no refusal, no telemetry row). Refusals are logged to denials.jsonl; every match to worker-wait.jsonl. Commands run with run_in_background, and pr-wait.mjs itself, are never matched. Needs worker_wait_advisory on.",
       "default": "deny-repeat"
     },
+    "worker_wait_rewrite": {
+      "type": "boolean",
+      "title": "Worker one-wait guard: run a repeat wait in the background",
+      "description": "With worker_wait_guard deny-repeat: a subagent's repeat sleep, poll or watch loop in Bash is not refused but run as the sanctioned one-wait form (run_in_background, with the loop cap) and the agent is told in one line. Only bash-tail.mjs rewrites the call. PowerShell, a command the resource gate, a long-runner wrap or the worktree-remove rewrite would change, and a command a deny or ask rule in your settings matches keep the refusal. Off: every repeat is refused. Needs worker_wait_advisory on.",
+      "default": true
+    },
     "worker_wait_repeat_window_minutes": {
       "type": "number",
       "title": "Worker one-wait guard: repeat window (minutes)",

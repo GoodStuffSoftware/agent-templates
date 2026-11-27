@@ -260,7 +260,7 @@ export function scanSession({ sessionId, transcriptPath, deadline, state }) {
     let size = -1;
     try { size = statSync(p).size; } catch { continue; }
     if (size === f.off) continue;
-    Object.defineProperty(state, 'dirty', { value: true, writable: true, enumerable: false }); // not enumerable: the state's JSON stays as it was; // something to read: the state file is saved (an idle prompt does not rewrite it)
+    state.dirty = true; // not saved: saveState drops it. Something to read: the state file is saved (an idle prompt does not rewrite it)
     if (!advanceFile(p, f, deadline, ac)) { complete = false; break; }
   }
   let total = 0;
