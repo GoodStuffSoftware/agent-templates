@@ -2,6 +2,7 @@
 //
 // A held lead that stopped never sees another prompt, so the lead that runs `release-watch.mjs clear` must message each held session
 // (a desktop session message, local_<uuid>). release-watch.mjs prints the ids ("Send each of these sessions a local message now: ...").
+//   --event pre   PreToolUse (Bash, PowerShell): with a hold in scope "releases", refuses plugin install/update, marketplace update and release/* pushes or merges.
 //   --event post  after a Bash call that ran `release-watch.mjs clear`: adds that instruction to the lead's context and records the ids
 //                 with the transcript size at that moment (lib/release-watch-state.mjs notePendingMessages).
 //   --event stop  the lead's end of turn: when its transcript since the clear has no message to some listed id (SendMessage with `to`, or
@@ -9,8 +10,8 @@
 // Fails open on every path.
 
 import { openSync, readSync, closeSync, fstatSync } from 'node:fs';
-import { readStdin, passthrough } from './lib/context.mjs';
-import { MESSAGE_LINE, withoutSelf, clearInstruction, notePendingMessages, readPendingMessages, settlePendingMessages, takeOwedMessages, INSTALL_CMD_RE, noteInstaller } from './lib/release-watch-state.mjs';
+import { readStdin, passthrough, deny, recordDenial } from './lib/context.mjs';
+import { MESSAGE_LINE, releaseActionDeny, withoutSelf, clearInstruction, notePendingMessages, readPendingMessages, settlePendingMessages, takeOwedMessages, INSTALL_CMD_RE, noteInstaller } from './lib/release-watch-state.mjs';
 
 export const CLEAR_CMD_RE = /release-watch\.mjs["']?\s+clear(?:\s|$)/;
 const ID_RE = /^local_[A-Za-z0-9-]+$/;
@@ -54,6 +55,15 @@ export function messagedSince(path, offset, ids) {
 try {
   const p = readStdin();
   const event = process.argv[process.argv.indexOf('--event') + 1];
+  if (event === 'pre') {
+    // PreToolUse (Bash, PowerShell): while a hold in scope "releases" is on, refuse agent-companion release and install commands (0.31.75).
+    if (p.tool_name !== 'Bash' && p.tool_name !== 'PowerShell') passthrough();
+    const cmd = String((p.tool_input && p.tool_input.command) || '');
+    const text = releaseActionDeny(cmd);
+    if (!text) passthrough();
+    try { recordDenial('release-hold', p, 'release or install command refused by the hold'); } catch { /* telemetry */ }
+    deny(text);
+  }
   if (event === 'post') {
     if (!p.session_id || p.tool_name !== 'Bash') passthrough();
     const cmd = String((p.tool_input && p.tool_input.command) || '');
