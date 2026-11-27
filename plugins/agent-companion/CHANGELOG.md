@@ -2,6 +2,10 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.79 (unreleased)
+
+- **API work gates on the credit that is left, not on the plugin's own budget (options `api_credits_budget_mode`, `api_credits_reserve_usd`; scripts/lib/api-credits.mjs, scripts/api-credits.mjs, scripts/lib/api-spend.mjs).** New default mode `credit`: an account with a balance anchor (the primary, and each `api_targets` entry via `credits anchor <usd> --target <name>`) runs API work while its remaining credit minus a $5 reserve lasts; an account with no anchor keeps the fixed budget; `fixed` restores the old behaviour. A plain `api_credits_workspace_limits` entry is advisory in credit mode and `name=usd!` is enforced; a real Anthropic spend-limit rejection still falls back to the plan. `status` no longer reads the budget as credit and the alert line says the figure is the plugin's own budget and shows both accounts.
+
 ## 0.31.78 — 2026-11-27
 
 - **The struggle notice no longer advises a fresh session (hooks/lib/struggle.mjs).** At xhigh, max or unknown effort it said "or a fresh session with a handoff may help"; lead handoffs were measured as not cost effective (2026-11-14), so it now ends "it is likely a missing fact or rule. Name it and record it where knowledge-routing says." Counts and the effort mention are unchanged; worker handoff notices are untouched. To silence the whole detector today: `struggle_detector` false.
