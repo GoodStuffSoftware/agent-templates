@@ -895,20 +895,20 @@ test('accounts: a scan keeps units by minute, a session across the switch splits
   try {
     const switchFile = join(fx.dir, '.claude', 'session-sync', 'accounts', 'switch-history.json');
     const writeSwitch = (at) => { mkdirSync(dirname(switchFile), { recursive: true }); writeFileSync(switchFile, JSON.stringify([{ at: '2026-10-08T00:00:00.000Z', acct: 'acct-fake-aaa' }, { at, acct: 'acct-fake-bbb' }])); };
-    writeSwitch('2026-10-09T10:30:00.000Z');
-    put(join(root, 'projA', 'sess-fake.jsonl'), [asst('r1', '2026-10-09T10:10:00Z', SONNET, TEN_M), asst('r2', '2026-10-09T10:50:00Z', SONNET, TEN_M)]);
+    writeSwitch('2026-10-09T17:30:00.000Z');
+    put(join(root, 'projA', 'sess-fake.jsonl'), [asst('r1', '2026-10-09T17:10:00Z', SONNET, TEN_M), asst('r2', '2026-10-09T17:50:00Z', SONNET, TEN_M)]);
     run(root);
     const st = JSON.parse(readFileSync(checkupPaths().state, 'utf8'));
-    const h = T('2026-10-09T10:00:00Z') / 3600000;
+    const h = T('2026-10-09T17:00:00Z') / 3600000;
     assert.deepEqual(st.fine[h], { 10: 2, 50: 2 }, 'units by minute of the hour');
     let r = record();
     assert.deepEqual(r.weeks.map((w) => [w.id, w.units, w.dayUnits]), [['acct-fake-aaa', 2, 2], ['acct-fake-bbb', 2, 2]]);
     assert.equal('unattributed' in r, false);
 
-    // move the switch to 10:55: both requests were the first account's. Only a forced rebuild re-derives the closed day.
+    // move the switch to 17:55: both requests were the first account's. Only a forced rebuild re-derives the closed day.
     const other = '{"v":1,"day":"2026-10-08","units":{"total":1}}';
     writeFileSync(checkupPaths().history, `${other}\n${readFileSync(checkupPaths().history, 'utf8').split('\n').filter((l) => l.includes('"day":"2026-10-09"')).join('\n')}\n`);
-    writeSwitch('2026-10-09T10:55:00.000Z');
+    writeSwitch('2026-10-09T17:55:00.000Z');
     assert.deepEqual(rebuildHistoryDays([DAY, '2026-09-01'], { nowT: NOW }), [DAY], 'a day before the scan start is left alone');
     r = record();
     assert.deepEqual(r.weeks.map((w) => [w.units, w.dayUnits]), [[4, 4], [0, 0]]);
