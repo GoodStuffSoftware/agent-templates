@@ -381,7 +381,7 @@ function sanctionedWait(pluginRoot) {
 export function workerWaitHint(pluginRoot, { denyRepeat = false, windowMinutes = WORKER_WAIT_WINDOW_MINUTES } = {}) {
   return '[agent-companion] One-wait rule for workers: one blocking call or one background command, no sleep, ' +
     'poll or watch loops. ' + sanctionedWait(pluginRoot) +
-    (denyRepeat ? ' Another sleep, poll or watch loop within ' + windowMinutes + ' minutes of this notice is refused.' : '');
+    (denyRepeat ? ' Another sleep, poll or watch loop within ' + windowMinutes + ' minutes of this notice is refused or run in the background for you.' : '');
 }
 
 export function workerWaitDenyText(pluginRoot, windowMinutes = WORKER_WAIT_WINDOW_MINUTES) {

@@ -114,3 +114,15 @@ export function waitCapRewrite(command, minutes) {
     return { command: out, count: loops.length };
   } catch { return null; }
 }
+
+// Worker one-wait rewrite (0.31.79): a repeat foreground wait (sleep, poll or watch loop) in a worker is not refused; it runs
+// as the sanctioned one-wait form, a background command that notifies on finish, with the loop cap applied as for any background
+// loop. Returns the new tool input, or null when there is nothing to rewrite (already background).
+export const WAIT_REWRITE_NOTE = '[agent-companion] This wait runs as a background command (one-wait rule): its result arrives as a completion notice. Do not poll or re-run it.';
+export function waitRewriteInput(input, { capMinutes = 60 } = {}) {
+  try {
+    if (!input || typeof input.command !== 'string' || input.run_in_background === true) return null;
+    const cap = capMinutes > 0 && /sleep/.test(input.command) ? waitCapRewrite(input.command, capMinutes) : null;
+    return { ...input, command: cap ? cap.command : input.command, run_in_background: true };
+  } catch { return null; }
+}
