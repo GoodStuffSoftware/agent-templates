@@ -71,7 +71,7 @@ try {
     // PreToolUse (Bash, PowerShell): while a hold in scope "releases" is on, refuse agent-companion release and install commands (0.31.75).
     if (p.tool_name !== 'Bash' && p.tool_name !== 'PowerShell') passthrough();
     const cmd = String((p.tool_input && p.tool_input.command) || '');
-    const text = releaseActionDeny(cmd);
+    const text = releaseActionDeny(cmd, undefined, { cwd: typeof p.cwd === "string" ? p.cwd : undefined, shell: p.tool_name === 'PowerShell' ? 'ps' : 'bash' });
     if (!text) passthrough();
     try { recordDenial('release-hold', p, 'release or install command refused by the hold'); } catch { /* telemetry */ }
     deny(text);
