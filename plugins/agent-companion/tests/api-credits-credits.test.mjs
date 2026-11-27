@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DEFAULT_SHARES, record, readAnchor, anchorPath, creditsView, decide, loadConfig, recordFailure, DEFAULT_BUDGET_MODE, DEFAULT_RESERVE_USD } from '../scripts/lib/api-credits.mjs';
+import { billingStatusLines, DEFAULT_SHARES, record, readAnchor, anchorPath, creditsView, decide, loadConfig, recordFailure, DEFAULT_BUDGET_MODE, DEFAULT_RESERVE_USD } from '../scripts/lib/api-credits.mjs';
 import { makeFixture } from './helpers.mjs';
 import { main } from '../scripts/api-credits.mjs';
 
@@ -319,3 +319,32 @@ test('manifest: plugin.json declares mode default credit and reserve default 5',
   assert.equal(m.api_credits_budget_mode.default, 'credit');
   assert.equal(m.api_credits_reserve_usd.default, 5);
 });
+
+// --- 0.31.79 review fixes ----------------------------------------------------------------------------------------------
+test('gate: a plain workspace limit is enforced for an account with no anchor, even in credit mode', withFixture(async (fx) => {
+  const cfg = { ...CCFG, workspaceLimits: { reviewers: 10 }, workspaceLimitHard: {} };
+  gbook(fx, 12, cfg);
+  const d = gate(fx, { cfg, anchors: {} });
+  assert.equal(d.decision, 'plan', d.reason);
+  assert.match(d.reason, /workspace limit: reviewers/);
+}));
+
+test('status: a plain limit over its amount reads enforced without an anchor, advisory with one', () => {
+  const cfg = { ...CCFG, workspaceLimits: { reviewers: 10 }, workspaceLimitHard: {} };
+  const snap = { through: T('2026-11-10T00:00:00Z'), from: T('2026-11-01T00:00:00Z'), cost: [{ day: '2026-11-02', ws: WS_A, model: 'm', usd: 12 }], usage: null, hourly: null, hourlyFrom: null, workspaces: { [WS_A]: 'reviewers' }, keys: {}, missing: [] };
+  const none = billingStatusLines(snap, { cfg, entries: [], anchors: {}, now: GNOW }).join('\n');
+  assert.match(none, /AT OR OVER LIMIT/);
+  const withAnchor = billingStatusLines(snap, { cfg, entries: [], anchors: anchorOf(500), now: GNOW }).join('\n');
+  assert.match(withAnchor, /advisory/);
+});
+
+test('gate: an anchor before the billing window answers plan with a re-anchor hint', withFixture(async (fx) => {
+  const anchors = { primary: { usd: 100, asOf: T('2026-10-20T00:00:00Z'), setAt: T('2026-10-20T00:00:00Z') } };
+  const snap = { through: T('2026-11-10T00:00:00Z'), from: T('2026-11-01T00:00:00Z'), cost: [], usage: null, hourly: null, hourlyFrom: null, workspaces: {}, keys: {}, missing: [] };
+  const d = decide('review', { now: GNOW, cfg: CCFG, anchors, billing: snap, path: gpath(fx), env: GENV });
+  assert.equal(d.decision, 'plan', d.reason);
+  assert.match(d.reason, /before the billing window/);
+  assert.match(d.reason, /credits anchor/);
+  const ok = decide('review', { now: GNOW, cfg: CCFG, anchors: anchorOf(100), billing: snap, path: gpath(fx), env: GENV });
+  assert.equal(ok.decision, 'api', ok.reason);
+}));
