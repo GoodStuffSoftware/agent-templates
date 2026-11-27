@@ -650,7 +650,8 @@ export function scanTranscripts({ root = transcriptsRoot(), nowT = nowMs(), hold
   // Forget what can no longer matter.
   const keepFrom = nowT - KEEP_DAYS * DAY_MS;
   for (const h of Object.keys(st.hours)) if (Number(h) * HOUR_MS < keepFrom) delete st.hours[h];
-  if (st.fine) for (const h of Object.keys(st.fine)) if (Number(h) * HOUR_MS < keepFrom) delete st.fine[h];
+  if (!ctx.fine) delete st.fine; // option unset: a map left from when it was set is dropped, so the file matches 0.31.76
+  else if (st.fine) for (const h of Object.keys(st.fine)) if (Number(h) * HOUR_MS < keepFrom) delete st.fine[h];
   pruneFacts(st.facts, keepFrom);
   for (const [k, a] of Object.entries(st.facts.spawns)) if ((a.start || a.t0 || 0) < keepFrom) delete st.facts.spawns[k];
   for (const m of [st.facts.agentIds, st.facts.done]) for (const [k, t] of Object.entries(m)) if (t < keepFrom) delete m[k];

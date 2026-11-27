@@ -24,7 +24,7 @@
     "haiku-5-5": { "match": "haiku-5-5", "in": 0.1, "out": 0.5, "readMultiplier": 0.1 },
     "haiku-4-5": { "match": "haiku-4-5", "in": 1, "out": 5, "readMultiplier": 0.1 }
   },
-  "matchOrderNote": "Entries are matched in the order written above, first match wins — put the more specific pattern (opus-5-5, fable-5-2, fable-5-1) before the pattern it would otherwise also match (opus-5, fable-5). A negative lookahead on the generic entry keeps this from depending on iteration order alone.",
+  "matchOrderNote": "Entries are matched in the order written above, first match wins — put the more specific pattern (opus-5-5, fable-5-2, fable-5-1) before the pattern it would otherwise also match (opus-5, fable-5). A future minor such as claude-fable-5-3 matches no Fable row and is unpriced (dollar reports count it as unpriced) until a row is added. A negative lookahead on the generic entry keeps this from depending on iteration order alone.",
   "defaultReadMultiplier": 0.1,
   "writeMultiplier5m": 1.25,
   "writeMultiplier1h": 2,

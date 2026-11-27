@@ -1,6 +1,6 @@
 # Model routing table
 
-_Generated from `config/model-tiers.json` v8 (updated 2026-10-13) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
+_Generated from `config/model-tiers.json` v9 (updated 2026-11-27) by `scripts/routing-table.mjs`. Do not edit by hand — change the config and regenerate._
 
 For WHY the table is shaped this way — lowest-sufficient tier, effort as a separate lever, reviewer parity, self-review, the consequence floors, trials and per-user profiles, cost basis, and haiku-as-validator — see [`docs/ROUTING-RATIONALE.md`](./ROUTING-RATIONALE.md), a hand-written companion doc (this file is generated and cannot carry hand-written prose).
 
@@ -238,7 +238,7 @@ Across this machine's real sessions, CACHE READS are the largest cost bucket -- 
 | `haiku` | $0.01 |
 | `sonnet` | $0.1 |
 | `opus` | $0.2 |
-| `fable` | $0.25 |
+| `fable` | $0.2 |
 
 Cache-hit ($/MTok) rate per tier, read from tiers.*.resolvesTo.pricing.cacheHitPerMTok above -- kept here too as a flat lookup for a reader who wants the number without walking the tier objects. Sonnet 5.5's read price was cut from $0.20 to $0.10 at its launch (checked 2026-10-12), so Opus 5.5 now reads at twice Sonnet's price; against Sonnet 5 it was equal at $0.20. Haiku 5.5 reads at $0.01 up to 100K prompt tokens ($0.05 above). An equal read price never made Opus cost the same as Sonnet: measured 2026-10-06, per call at equal context Opus 5.5 is about 1.9x Sonnet (it writes more output), and its plan weight is about 1.5x per token.
 

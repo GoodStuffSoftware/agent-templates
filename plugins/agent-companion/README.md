@@ -833,7 +833,7 @@ deliberately a SEPARATE table: `model-tiers.json` classifies generic routing
 aliases (haiku/sonnet/opus/fable) for the spawn guards, which is coarser than
 pricing needs (opus-5 and opus-5-5 route to the same guard tier but do not
 cost the same; fable-5 and fable-5-1 share a sticker price but differ in
-cache-read multiplier). Extend `config/model-pricing.json` for a new model's
+cache-read multiplier, and fable-5-2 is cheaper again at $8/$40). Extend `config/model-pricing.json` for a new model's
 price; override without a release by writing the same shape to
 `~/.claude/agent-companion/config/model-pricing.json` (merged by alias, like
 every other override in this plugin; a copy at the old top-level place,

@@ -835,7 +835,8 @@ if (cfg.costDrivers) {
     L.push(`|---|---|`);
     for (const [alias, price] of Object.entries(cd.readPricePerMTokByTier)) {
       if (alias === 'note') continue;
-      L.push(`| \`${alias}\` | $${price} |`);
+      const live = cfg.tiers?.[alias]?.resolvesTo?.pricing?.cacheHitPerMTok;
+      L.push(`| \`${alias}\` | $${typeof live === 'number' ? live : price} |`);
     }
     L.push(``);
     if (cd.readPricePerMTokByTier.note) L.push(cd.readPricePerMTokByTier.note);

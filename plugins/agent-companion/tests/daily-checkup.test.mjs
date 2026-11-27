@@ -921,6 +921,17 @@ test('accounts: a scan keeps units by minute, a session across the switch splits
   } finally { fx.cleanup(); }
 }));
 
+test('accounts: unsetting the option drops a per-minute map left in the scan state', async () => {
+  const { fx, root } = mk();
+  try {
+    put(join(root, 'projA', 'sess-fake.jsonl'), [asst('r1', '2026-10-09T17:10:00Z', SONNET, TEN_M)]);
+    await withAccounts(async () => { run(root); })();
+    assert.ok(JSON.parse(readFileSync(checkupPaths().state, 'utf8')).fine, 'the option set writes the map');
+    run(root);
+    assert.ok(!('fine' in JSON.parse(readFileSync(checkupPaths().state, 'utf8'))), 'the option unset removes it');
+  } finally { fx.cleanup(); }
+});
+
 test('accounts unset: the checkup record, scan state, session-budget scan and notice are byte-identical to what origin/main produced', async () => {
   const { scenario } = await import('./fixtures/accounts-unset-scenario.mjs');
   const expected = JSON.parse(readFileSync(new URL('./fixtures/accounts-unset-main.json', import.meta.url), 'utf8'));
