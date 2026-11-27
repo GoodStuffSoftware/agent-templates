@@ -359,4 +359,56 @@ describe('lead count', () => {
       assert.ok(readFileSync(join(fx.stateDir, 'state', 'worker-ledger', 'lead-x.jsonl'), 'utf8').includes('"start"'));
     } finally { fx.cleanup(); }
   });
+  describe('the last helper finishing deletes the pending wakeup', () => {
+    const notify = () => run('user-prompt', { session_id: SID, hook_event_name: 'UserPromptSubmit', prompt: "<task-notification><summary>Agent x completed</summary></task-notification>" });
+    const armed = (resp) => run('tick', { session_id: SID, hook_event_name: 'PostToolUse', tool_name: 'CronCreate', tool_input: { cron: '5 14 23 10 *', recurring: false, prompt: KEEP_WARM_PROMPT }, tool_response: resp });
+
+    test('records the cron id; the last helper notice says to CronDelete it, once', () => {
+      const fx = makeFixture();
+      try {
+        startWorker('a1');
+        run('tick', bgSpawn());
+        armed({ id: 'wake-id-1', humanSchedule: 'once' });
+        stopWorker('a1');
+        const c = ctx(notify());
+        assert.match(c, /no helpers running/);
+        assert.match(c, /CronDelete id wake-id-1/);
+        assert.equal(ctx(notify()), '', 'told once: the pending wakeup is cleared');
+      } finally { fx.cleanup(); }
+    });
+
+    test('the text form of the CronCreate result carries the id too', () => {
+      const fx = makeFixture();
+      try {
+        startWorker('a1');
+        armed('Scheduled one-shot task zz9y8x7w (5 14 23 10 *). Next run: Oct 23 2:05pm. Session-only (not written to disk, dies when Claude exits). It will fire once then auto-delete.');
+        stopWorker('a1');
+        assert.match(ctx(notify()), /CronDelete id zz9y8x7w/);
+      } finally { fx.cleanup(); }
+    });
+
+    test('an unreadable response still tells the lead to CronList then CronDelete', () => {
+      const fx = makeFixture();
+      try {
+        startWorker('a1');
+        armed({});
+        stopWorker('a1');
+        assert.match(ctx(notify()), /CronList, then CronDelete/);
+      } finally { fx.cleanup(); }
+    });
+
+    test('a helper still running, or no pending wakeup: nothing is said', () => {
+      const fx = makeFixture();
+      try {
+        startWorker('a1');
+        startWorker('a2');
+        armed({ id: 'wake-id-1' });
+        stopWorker('a1');
+        assert.equal(ctx(notify()), '', 'a2 still runs: the ping stays');
+        stopWorker('a2');
+        const fx2 = makeFixture();
+        try { assert.equal(ctx(notify()), '', 'no wakeup was armed'); } finally { fx2.cleanup(); }
+      } finally { fx.cleanup(); }
+    });
+  });
 });

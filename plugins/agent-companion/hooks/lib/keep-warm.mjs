@@ -80,6 +80,22 @@ const writeState = (sid, st) => { try { writeJsonAtomic(stateFile(sid), st); } c
 export const maxPings = (maxMinutes = KEEP_WARM_MAX_DEFAULT_MIN) =>
   Math.floor((Math.max(0, Number(maxMinutes) || 0) * 60) / KEEP_WARM_DELAY_S);
 
+// The id the harness gave the pending wakeup (CronCreate's result), or null when the response carries none we can read.
+// Real shapes (a CronCreate tool_result in a 2.1.299 transcript): the structured result { id: '<8 hex>', humanSchedule, recurring, durable,
+// nextFireAt } and the text 'Scheduled one-shot task <id> (<cron>). Next run: ...'. Both are read; anything else is null.
+export function cronIdOf(resp) {
+  try {
+    const ID = /^[A-Za-z0-9_-]{3,64}$/;
+    if (resp && typeof resp === 'object' && !Array.isArray(resp)) {
+      if (typeof resp.id === 'string' && ID.test(resp.id)) return resp.id;
+      if (resp.structuredContent && typeof resp.structuredContent.id === 'string' && ID.test(resp.structuredContent.id)) return resp.structuredContent.id;
+    }
+    const text = typeof resp === 'string' ? resp : Array.isArray(resp && resp.content) ? resp.content.map((c) => (c && c.text) || '').join(' ') : '';
+    const m = /\bScheduled\b[^()\n]*?\btask ([A-Za-z0-9_-]{3,64})\b/.exec(text);
+    return m ? m[1] : null;
+  } catch { return null; }
+}
+
 /** A PostToolUse payload of an Agent spawn that went to the background. */
 export function isBackgroundSpawn(p) {
   if (!p || p.tool_name !== 'Agent') return false;
@@ -117,7 +133,7 @@ export function keepWarmToolNote(p, { now = Date.now(), maxMinutes = KEEP_WARM_M
       if (!MARKER_RE.test(JSON.stringify(input))) return null;
       const delay = Number(input.delaySeconds);
       const st = readState(p.session_id);
-      writeState(p.session_id, { ...st, dueAt: now + (Number.isFinite(delay) && delay > 0 ? delay * 1000 : KEEP_WARM_DELAY_S * 1000) });
+      writeState(p.session_id, { ...st, dueAt: now + (Number.isFinite(delay) && delay > 0 ? delay * 1000 : KEEP_WARM_DELAY_S * 1000), cronId: cronIdOf(p.tool_response) });
       return null;
     }
     if (!isBackgroundSpawn(p)) return null;
@@ -150,9 +166,18 @@ export function keepWarmToolNote(p, { now = Date.now(), maxMinutes = KEEP_WARM_M
  */
 export function keepWarmPingNote(p, { now = Date.now(), maxMinutes = KEEP_WARM_MAX_DEFAULT_MIN } = {}) {
   try {
-    if (!p || !p.session_id || !isPingPrompt(p.prompt)) return null;
+    if (!p || !p.session_id) return null;
     const limit = maxPings(maxMinutes);
     if (limit < 1) return null;
+    if (!isPingPrompt(p.prompt)) {
+      // A helper's completion notice while a wakeup is still pending and nothing else runs: the ping would only cost a turn. Delete it now.
+      if (!/^\s*<task-notification\b/i.test(String(p.prompt || ''))) return null;
+      const pst = readState(p.session_id);
+      if (!(Number(pst.dueAt) > now) || running(p, now).length) return null;
+      writeState(p.session_id, { ...pst, pings: 0, dueAt: 0, cronId: null });
+      const which = pst.cronId ? `the pending keep-warm wakeup (CronDelete id ${pst.cronId})` : `the pending keep-warm wakeup (CronList, then CronDelete the one whose prompt is "${KEEP_WARM_PROMPT}")`;
+      return `Keep-warm: no helpers running. Delete ${which}; no ping is needed.`;
+    }
     const st = readState(p.session_id);
     const pings = (Number(st.pings) || 0) + 1;
     const live = running(p, now);
