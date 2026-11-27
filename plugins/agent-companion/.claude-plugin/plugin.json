@@ -366,6 +366,12 @@
       "description": "What 100% of the weekly plan limit is, in the plan units the daily checkup uses (every request priced at the Sonnet price vector, times the model's plan weight). Default 0: derive it from config/plan-weights.json (100 x units per 1%, 2860 shipped, so 1% = 28.6 units), the same figure the session budget notice uses; set a number above 0 to override it. Weeks reset Friday 16:00Z.",
       "default": 0
     },
+    "claude_accounts": {
+      "type": "string",
+      "title": "Usage: claude.ai accounts, each with its own weekly reset and limit",
+      "description": "JSON array naming the claude.ai accounts you switch between, for usage analysis and budget notices that assume one week and one limit: [{\"id\":\"<account id as in the session-sync switch history>\",\"label\":\"<short name>\",\"weekResetUtc\":\"Wed 22:00\",\"weeklyLimitUnits\":2860,\"limitChanges\":[{\"from\":\"<ISO time of a plan change>\",\"weeklyLimitUnits\":2860}]}]. weekResetUtc is that account's weekly reset (UTC, \"Fri 16:00\" form); weeklyLimitUnits is its limit before the first change (omitted: the weekly_limit_units figure) and each limitChanges entry sets the limit from its time on. Each usage fact counts for the account active at that time (the switch history), and the daily checkup line, the usage report and the session budget notice give % of week and pace per account against that account's own week. Empty (default) = one account, one weekly reset (Fri 16:00Z) and one limit: behaviour is unchanged.",
+      "default": ""
+    },
     "daily_pace_target_pct": {
       "type": "number",
       "title": "Daily checkup: pace target (% of the weekly limit per day)",

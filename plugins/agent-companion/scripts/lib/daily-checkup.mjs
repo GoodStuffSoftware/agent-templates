@@ -61,6 +61,7 @@ import {
 } from './transcripts.mjs';
 import { planPriceSpecFor, planBaselineModel } from './pricing.mjs';
 import { weeklyLimitUnits, modelWeight } from '../../hooks/lib/plan-allowance.mjs';
+import { configuredAccounts, accountHistory, accountAt, accountLimitAt, weekStartAt } from '../../hooks/lib/account.mjs';
 import {
   newFacts, addRequest, addPrompt, pruneFacts, operatorPromptText, toolKindsOf, buildFactsFile, SETTLE_MS,
 } from './usage/facts.mjs';
@@ -722,7 +723,28 @@ function classTable(spawns, units) {
   return out;
 }
 
-export function buildDayRecord(state, startMs, { limit = weeklyLimitUnits(), target = DEFAULT_PACE_PCT, computedAt = nowMs() } = {}) {
+// Per-account week figures (option claude_accounts): each hour's units go to the account active at the start of that hour (accountAt),
+// counted from that account's own weekly reset, against that account's limit at the end of the day. [] entries never occur: an
+// account with no hours still gets its line (0%).
+export function accountWeeks(state, endMs, accounts, history, limit) {
+  return accounts.map((a) => {
+    const wStart = weekStartAt(a.weekResetUtc, endMs - 1);
+    let units = 0;
+    for (let h = Math.floor(wStart / HOUR_MS); h * HOUR_MS < endMs; h += 1) {
+      const b = state.hours[h];
+      if (b && accountAt(history, h * HOUR_MS) === a.id) units += b[0] + b[1];
+    }
+    const lim = accountLimitAt(a, endMs - 1, limit);
+    const elapsed = (endMs - wStart) / WEEK_MS;
+    const pctSoFar = r2((units / lim) * 100);
+    return {
+      id: a.id, label: a.label, start: iso(wStart), units: r1(units), limitUnits: lim, pctSoFar,
+      elapsedPct: r1(elapsed * 100), paceAtResetPct: r1(elapsed > 0 ? pctSoFar / elapsed : 0), partial: wStart < state.scanFromMs,
+    };
+  });
+}
+
+export function buildDayRecord(state, startMs, { limit = weeklyLimitUnits(), target = DEFAULT_PACE_PCT, computedAt = nowMs(), accounts = null, history = null } = {}) {
   const endMs = startMs + DAY_MS;
   const day = sumHours(state, startMs, endMs);
   const pct = (u) => r2((u / limit) * 100);
@@ -753,6 +775,7 @@ export function buildDayRecord(state, startMs, { limit = weeklyLimitUnits(), tar
       paceAtResetPct: r1(elapsed > 0 ? pct(weekUnits) / elapsed : 0),
       partial: wStart < state.scanFromMs,
     },
+    ...(accounts && accounts.length ? { weeks: accountWeeks(state, endMs, accounts, history || [], limit) } : {}),
     spawns: {
       total: acc.spawns,
       byType: classTable(acc.type, acc.uType),
@@ -793,9 +816,11 @@ export function readHistory(file = checkupPaths().history) {
 
 export function checkupOptions() {
   const target = Number(opt('daily_pace_target_pct', DEFAULT_PACE_PCT));
+  const accounts = configuredAccounts();
   return {
     limit: weeklyLimitUnits(), // the option weekly_limit_units (above 0) or 100 x units per 1% from plan-weights
     target: target > 0 ? target : DEFAULT_PACE_PCT,
+    ...(accounts.length ? { accounts, history: accountHistory() } : {}), // option claude_accounts; unset = the single week above
   };
 }
 
@@ -879,7 +904,7 @@ export function writeFactsFiles(state, nowT, deferredOut = null) {
 // history. Returns what it did.
 export function runCheckup({ root = transcriptsRoot(), nowT = nowMs(), holdMs = HOLD_RECENT_MS } = {}) {
   const p = checkupPaths();
-  const { limit, target } = checkupOptions();
+  const { limit, target, accounts, history } = checkupOptions();
   const scan = scanTranscripts({ root, nowT, holdMs });
   const { state, seen } = scan;
   const have = new Set(readHistory(p.history).map((r) => r.day));
@@ -887,7 +912,7 @@ export function runCheckup({ root = transcriptsRoot(), nowT = nowMs(), holdMs = 
   const written = [];
   for (let s = dayStartMs(state.scanFromMs); s <= lastClosedStart; s += DAY_MS) {
     if (s < state.scanFromMs || have.has(dayKeyOf(s))) continue;
-    const rec = buildDayRecord(state, s, { limit, target, computedAt: nowT });
+    const rec = buildDayRecord(state, s, { limit, target, computedAt: nowT, accounts, history });
     mkdirSync(dirname(p.history), { recursive: true });
     appendFileSync(p.history, `${JSON.stringify(rec)}\n`);
     written.push(rec.day);
@@ -978,8 +1003,12 @@ export function formatLine(rec, historyPath) {
   const lim = rec.limit && rec.limit.hits > 0
     ? `; usage limit hit that day${rec.limit.firstAt ? ` (first at ${rec.limit.firstAt})` : ''}` : '';
   const delta = rec.vsTargetPct >= 0 ? `+${r1(rec.vsTargetPct)}` : `${r1(rec.vsTargetPct)}`;
+  // Accounts configured: one week-so-far and pace figure per account, each against its own week; otherwise the single week.
+  const wk = Array.isArray(rec.weeks) && rec.weeks.length
+    ? rec.weeks.map((w) => `${w.label} week so far ${fmtPct(w.pctSoFar)}, pace at reset ${fmtPct(w.paceAtResetPct)}`).join('; ')
+    : `week so far ${fmtPct(rec.week.pctSoFar)}, pace at reset ${fmtPct(rec.week.paceAtResetPct)}`;
   return `[agent-companion] Daily checkup ${rec.day} (08:00Z to 08:00Z): ${fmtPct(rec.pct.total)} of the weekly limit `
-    + `against the ${fmtPct(rec.targetPct)} target (${delta}); week so far ${fmtPct(rec.week.pctSoFar)}, pace at reset ${fmtPct(rec.week.paceAtResetPct)}${sw}${lim}. `
+    + `against the ${fmtPct(rec.targetPct)} target (${delta}); ${wk}${sw}${lim}. `
     + `History: ${historyPath}`;
 }
 

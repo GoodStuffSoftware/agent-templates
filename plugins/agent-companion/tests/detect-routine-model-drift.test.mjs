@@ -159,6 +159,26 @@ test('a disabled task is not reported as unpinned or drifting; an enabled one st
   assert.match(after, /live-job/, 'an enabled task with no model: line still raises');
 });
 
+test('no drift: a run recorded on the alias `sonnet` satisfies a folder pin keyed to the full id claude-sonnet-5-5 (0.31.76)', async () => {
+  const { modelMatches } = await import('../scripts/lib/routine-model-drift.mjs');
+  assert.equal(modelMatches('claude-sonnet-5-5', 'sonnet'), true);
+  assert.equal(modelMatches('claude-opus-5-5', 'sonnet'), false);
+  assert.equal(modelMatches('claude-opus-5-5', 'claude-fable-5-1'), false);
+  const { dir, cleanup } = makeFixture();
+  try {
+    const sessions = join(dir, 'sessions');
+    const cwd = pinFolder(dir, 'scout-folder', { 'claude-opus-5-5': 'low', 'claude-sonnet-5-5': 'low' });
+    task(dir, 'scout', null);
+    record(sessions, { scheduledTaskId: 'scout', cwd, model: 'sonnet', effort: '' });
+    record(sessions, { scheduledTaskId: 'scout', cwd, model: 'sonnet', effort: 'low' });
+    assert.equal(kind(run(dir, sessions)).filter((s) => /keyed to|folder pin/.test(s.detail || '')).length, 0, 'the alias is the keyed model: nothing drifted');
+    // an alias that no key names is still drift
+    const other = pinFolder(dir, 'opus-only', { 'claude-opus-5-5': 'low' });
+    record(sessions, { scheduledTaskId: 'scout', cwd: other, model: 'sonnet', effort: 'high' });
+    assert.equal(kind(run(dir, sessions)).length, 1);
+  } finally { cleanup(); }
+});
+
 test('the kind is documented in the scout routine and skill', () => {
   for (const f of [['routines', 'calibration-scout-daily.md'], ['skills', 'calibration-scout', 'SKILL.md']]) {
     assert.match(readFileSync(join(PLUGIN_ROOT, ...f), 'utf8'), /routine_model_drift/);

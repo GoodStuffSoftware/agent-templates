@@ -99,8 +99,14 @@ export function modelMatches(expected, recorded) {
   // Aliases that resolve per mode or to "the most capable model": no single recorded id satisfies or
   // contradicts them, so they are not comparable and never count as drift.
   if (NOT_COMPARABLE.has(e)) return true;
-  if (/^claude-/.test(e)) return r.startsWith(e) || e.startsWith(r);
-  return new RegExp(`(^|[-.:/])${e.replace(/[^a-z0-9]/g, '')}([-.:/]|$)`).test(r);
+  const aliasIn = (alias, id) => new RegExp(`(^|[-.:/])${alias.replace(/[^a-z0-9]/g, '')}([-.:/]|$)`).test(id);
+  if (/^claude-/.test(e)) {
+    if (r.startsWith(e) || e.startsWith(r)) return true;
+    // The app records the ALIAS a run was started on (`sonnet`) while a folder pin is keyed to a full id (`claude-sonnet-5-5`):
+    // an alias that is a segment of the full id is that model (0.31.76; the scout's routine_model_drift false positive of 2026-11-27).
+    return !/^claude-/.test(r) && /^[a-z0-9]+$/.test(r) && aliasIn(r, e);
+  }
+  return aliasIn(e, r);
 }
 
 // The folder's effort pin for one recorded model: { level, keys } (level null when no key matches),
