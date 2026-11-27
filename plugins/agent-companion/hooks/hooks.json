@@ -50,6 +50,21 @@
             "type": "command",
             "command": "node",
             "args": [
+              "${CLAUDE_PLUGIN_ROOT}/hooks/hold-message.mjs",
+              "--event",
+              "pre"
+            ],
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "^(Bash|PowerShell)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
               "${CLAUDE_PLUGIN_ROOT}/hooks/bash-read.mjs"
             ],
             "timeout": 10

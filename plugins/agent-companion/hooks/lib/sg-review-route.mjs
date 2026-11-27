@@ -8,8 +8,10 @@
 //
 // Passes through (the spawn runs as written, with a route_reason for the telemetry row) when:
 //   - api_review_route is off (the default), or `writers` and the caller is the lead            -> off
-//   - the brief carries `API: no` (the retry marker after a failed API run, or a writer that     -> caller-no
-//     decided for itself; never loops)
+//   - the brief carries `API: no` AND an API run failed for that brief or its diff range in the    -> caller-no
+//     last 60 minutes (the retry marker after a failed API run; never loops). Without a recorded
+//     failure `API: no` is ignored and the review routes normally (route_reason caller-no-ignored
+//     on whatever it then does); `API: plan` is the deliberate opt-out                              -> caller-plan
 //   - the same brief was routed and failed in the last 30 minutes (a caller that left `API: no`  -> repeat
 //     off would loop)
 //   - the review has no diff range in its brief (the runner needs one), or two ranges compete   -> no-range | ambiguous-range
@@ -40,9 +42,9 @@ const PLUGIN_ROOT = (() => {
 const RANGE_G = /(?:^|[\s`'"(=])((?!\.)[\w./~^@{}-]+\.{2,3}(?!\.)[\w./~^@{}-]+)/g;
 const q = (s) => `"${String(s).replace(/"/g, '\\"')}"`;
 
-// The `API:` marker line of a brief: `no` (do not route) or `opus` (an Opus review may be routed).
+// The `API:` marker line of a brief: `no` (the retry marker: honoured only after a recorded API failure), `plan` (deliberate opt-out: run on the plan) or `opus` (an Opus review may be routed).
 export function apiMarker(brief) {
-  const m = /^[ \t>*_`-]*API[ \t]*:[ \t]*\**[ \t]*(no|opus)\b/im.exec(String(brief || ''));
+  const m = /^[ \t>*_`-]*API[ \t]*:[ \t]*\**[ \t]*(no|opus|plan)\b/im.exec(String(brief || ''));
   return m ? m[1].toLowerCase() : null;
 }
 
@@ -74,6 +76,19 @@ export function failedRecently(hash, file, now) {
   try {
     return tailRecords(file, { bytes: 1024 * 1024, filter: (l) => l.includes(hash) })
       .some((r) => r && r.source === 'api-review' && r.ok === false && r.brief_hash === hash && now - Date.parse(r.at) <= REPEAT_WINDOW_MS);
+  } catch { return false; }
+}
+// 0.31.75: an `API: no` is honoured only after an API run failed for this brief (hash with its marker lines removed, as the runner saw it)
+// or for the same diff range within the last hour. Plugin text used to put `API: no` in every writer-spawned reviewer brief, which
+// silently kept those reviews off the API.
+const FALLBACK_WINDOW_MS = 60 * 60000;
+export function stripMarkerLines(brief) { return String(brief || '').replace(/^[ \t>*_`-]*API[ \t]*:[ \t]*\**[ \t]*(?:no|opus|plan)\b[^\r\n]*(?:\r?\n|$)/gim, ''); }
+export function recentApiFailure(brief, range, file, now) {
+  try {
+    const hash = briefHash(stripMarkerLines(brief));
+    return tailRecords(file, { bytes: 1024 * 1024, filter: (l) => l.includes('api-review') })
+      .some((r) => r && r.source === 'api-review' && r.ok === false && now - Date.parse(r.at) <= FALLBACK_WINDOW_MS
+        && (r.brief_hash === hash || (range && r.diff_ref === range)));
   } catch { return false; }
 }
 // Brief and review files older than 7 days (the full brief text is kept on disk for the runner and the relay).
@@ -145,21 +160,28 @@ export async function routeReview({
     if (mode !== 'writers' && mode !== 'all') return row('subagent', 'off');
     if (mode === 'writers' && !subagentCaller) return row('subagent', 'off');
     const marker = apiMarker(brief);
-    if (marker === 'no') return row('subagent', 'caller-no');
+    if (marker === 'plan') return row('subagent', 'caller-plan');
     const info = diffRangeInfo(brief);
-    if (!info.range) return row('subagent', info.ambiguous ? 'ambiguous-range' : 'no-range');
+    let noIgnored = false;
+    if (marker === 'no') {
+      const tdir0 = deps.telemetryDir ? deps.telemetryDir() : telemetryDir();
+      if (recentApiFailure(brief, info.range, join(tdir0, 'review-verdicts.jsonl'), Date.now())) return row('subagent', 'caller-no');
+      noIgnored = true; // no recorded API failure: the marker is not honoured, route as if it were absent
+    }
+    const plan = (why) => row('subagent', noIgnored ? 'caller-no-ignored' : why);
+    if (!info.range) return plan(info.ambiguous ? 'ambiguous-range' : 'no-range');
     const range = info.range;
     const rm = declarationValue(decls || {}, 'RISK', '(low|mid|high)\\b');
     const risk = rm ? rm[1].toLowerCase() : null;
     const highMode = String((deps.opt || opt)('api_review_high', 'plan') || 'plan').toLowerCase();
-    if ((risk === 'high' && highMode !== 'api') || (/opus/i.test(String(model || '')) && marker !== 'opus')) return row('subagent', 'high-risk');
+    if ((risk === 'high' && highMode !== 'api') || (/opus/i.test(String(model || '')) && marker !== 'opus')) return plan('high-risk');
     const tdir = deps.telemetryDir ? deps.telemetryDir() : telemetryDir();
-    if (failedRecently(briefHash(brief), join(tdir, 'review-verdicts.jsonl'), Date.now())) return row('subagent', 'repeat');
+    if (failedRecently(briefHash(brief), join(tdir, 'review-verdicts.jsonl'), Date.now())) return plan('repeat');
     const tgt = apiTarget(brief);
     const mod = await import(pathToFileURL(join(PLUGIN_ROOT, 'scripts', 'lib', 'api-credits.mjs')).href);
     const cfg = mod.loadConfig(deps.opt);
     // An `API: target=<name>` naming no configured target (the list decide walks) is never a silent default: the review runs on the
-    // plan as for `API: no`, and the lead is told which name was unknown and which are known.
+    // plan (as for `API: plan`), and the lead is told which name was unknown and which are known.
     if (tgt && !(cfg.targets && cfg.targets[tgt])) {
       const known = Object.keys(cfg.targets || {}).join(', ');
       return { ...row('subagent', 'unknown-target'), notice: `agent-companion: this review's brief says \`API: target=${tgt}\`, but no API target of that name is configured (known: ${known}). It was NOT sent to the API: it runs as a plan subagent, as for \`API: no\`. Fix the target name in the brief (targets are set in api_targets) or drop the line.` };
@@ -167,9 +189,9 @@ export async function routeReview({
     const d = (deps.decide || mod.decide)('review', { billing: null, env: process.env, cfg, ...(tgt ? { target: tgt } : {}) });
     if (!d || d.decision !== 'api') {
       const why = String((d && d.reason) || '');
-      if (/^alternation/.test(why)) return row('subagent', 'plan-alternation');
-      if (/^(no API key|failed closed|API runs failed)/.test(why) || !d) return row('subagent', 'governor-fallback');
-      return row('subagent', 'plan-cap');
+      if (/^alternation/.test(why)) return plan('plan-alternation');
+      if (/^(no API key|failed closed|API runs failed)/.test(why) || !d) return plan('governor-fallback');
+      return plan('plan-cap');
     }
     const id = String(p && p.tool_use_id || '').replace(/[^\w-]/g, '') || randomUUID();
     const dir = join(deps.stateDir ? deps.stateDir() : stateDir(), 'review-briefs');
@@ -187,7 +209,7 @@ export async function routeReview({
     delete out.effort;
     delete out.isolation; // a worktree for a command runner is wasted, and the runner must see the brief's own worktree path
     delete out.team_name;
-    return { route: 'api', route_reason: 'api', updatedInput: out };
+    return { route: 'api', route_reason: noIgnored ? 'caller-no-ignored' : 'api', updatedInput: out };
   } catch {
     return row('subagent', 'error'); // fail open: the spawn runs as written
   }

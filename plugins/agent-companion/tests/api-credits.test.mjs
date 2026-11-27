@@ -633,8 +633,10 @@ test('the self-review clause runs the governor before spawning a reviewer, and k
   assert.ok(block.indexOf('1. Remove or flag') < block.indexOf('2. State `RISK') && block.indexOf('2. State `RISK') < block.indexOf('3. Only when your cell names a reviewer'));
   assert.ok(block.includes('Unless the cell has the reviewer check the running app, first run'), 'the API route is skipped when the reviewer checks the running app');
   assert.ok(doc.includes('--writer <your model/effort> --risk <your risk> --review-file'), 'the API runner is told the risk');
-  assert.ok(block.includes('Its brief opens with these five lines, as plain text:') && block.includes('   ROLE: reviewer\n   RISK: <your risk>\n   API: no\n   ```'), 'the writer\'s own reviewer carries API: no (one advance per review)');
-  assert.ok(doc.includes('The reviewer you spawn carries the line `API: no`, so the guard never decides it a second time'), 'the writer decides once; the guard does not decide its reviewer again');
+  assert.ok(block.includes('Its brief opens with these four lines, as plain text:') && block.includes('   ROLE: reviewer\n   RISK: <your risk>\n   ```'), 'the writer\'s reviewer brief header has no API line (0.31.75)');
+  assert.ok(!/^\s+API: no\s*$/m.test(block), 'the header never carries API: no');
+  assert.ok(block.includes('Add a fifth line `API: plan` only when `decide review` printed `plan`') && block.includes('Never write `API: no`'), 'API: plan only after a plan decision; API: no is the retry marker');
+  assert.ok(doc.includes('The reviewer you spawn does not carry `API: no`') && doc.includes('`API: plan` is the deliberate opt-out'), 'SELF-REVIEW.md says the same');
   assert.ok(doc.includes('the raw output of your own test and build runs'), 'the writer still runs the checks and hands over the output');
   assert.ok(block.includes('your raw test and build output'), 'the reviewer brief gets the raw output');
   assert.ok(block.includes('only throwaway test code'), 'throwaway test code has no review gate');

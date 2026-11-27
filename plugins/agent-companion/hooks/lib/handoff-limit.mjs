@@ -19,7 +19,7 @@
 // longest workers ran 135-206 calls up to 209-217K context before the auto-compaction).
 // Every notice and every deny is one row in telemetry handoff-limit.jsonl; the daily usage report's Efficiency block counts them.
 
-import { isHoldActive, holdWaitText } from './release-watch-state.mjs';
+import { isHoldActive, holdScope, holdWaitText } from './release-watch-state.mjs';
 import { openSync, fstatSync, readSync, closeSync, existsSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
 import { opt } from './context.mjs';
@@ -82,7 +82,7 @@ export function handoffConfig(soft) {
     soft: Number(soft) > 0 ? Number(soft) : 0,
     repeat: num('subagent_context_notice_repeat_tokens', HANDOFF_REPEAT_DEFAULT),
     hard: num('subagent_context_hard_tokens', HANDOFF_HARD_DEFAULT),
-    held: isHoldActive(), // post-release hold: the hard limit counts as 0, so the next call is refused
+    held: isHoldActive() && holdScope() === 'all', // post-release hold, scope all: the hard limit counts as 0, so the next call is refused (scope releases stops no worker)
     exempt: String(opt('subagent_handoff_exempt_types', '')).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
   };
 }

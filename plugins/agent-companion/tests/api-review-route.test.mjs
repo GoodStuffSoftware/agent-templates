@@ -63,9 +63,9 @@ test('RISK high stays on a subagent unless api_review_high is api; an Opus revie
   assert.equal(o.route, 'api'); assert.match(o.updatedInput.prompt, /--model opus/);
 });
 
-test('API: no passes through and the retry does not loop', async () => {
+test('API: no after a recorded API failure passes through and the retry does not loop', async () => {
   let calls = 0;
-  const r = await call(BRIEF('API: no'), { deps: { decide: () => { calls++; return API(); } } });
+  const r = await call(BRIEF('API: no'), { deps: { telemetryDir: () => failRow(), decide: () => { calls++; return API(); } } });
   assert.deepEqual([r.route, r.route_reason, r.updatedInput], ['subagent', 'caller-no', null]);
   assert.equal(calls, 0, 'the governor is not asked, so the counter does not move');
   assert.equal(apiMarker('x\n- **API:** no\n'), 'no'); assert.equal(apiMarker('API: opus'), 'opus'); assert.equal(apiMarker('no api here'), null);
@@ -193,10 +193,46 @@ test('S6: a routed spawn joins the pending list as the ac-haiku run it now is', 
   assert.equal(seen.length, 1, 'canary, team spawn and an unarmed state record nothing');
 });
 
-test('S1: a spawn that carries API: no (a writer that decided for itself) never reaches the governor; a lead review is decided once', async () => {
+test('S1: a spawn that carries API: no after a recorded failure never reaches the governor; a lead review is decided once', async () => {
   let calls = 0;
-  const r = await call(BRIEF('API: no'), { deps: { decide: () => { calls++; return API(); } } });
+  const r = await call(BRIEF('API: no'), { deps: { telemetryDir: () => failRow(), decide: () => { calls++; return API(); } } });
   assert.equal(r.route_reason, 'caller-no'); assert.equal(calls, 0);
   const lead = await call(BRIEF(), { subagentCaller: false, deps: { decide: () => { calls++; return API(); } } });
   assert.equal(lead.route, 'api'); assert.equal(calls, 1, 'a lead review without the marker is decided once, by the guard');
+});
+
+// ---- 0.31.75: `API: no` only after a recorded API failure; `API: plan` is the opt-out ----
+function failRow(over = {}) {
+  const tdir = mkdtempSync(join(tmpdir(), 'ac-route-tel-'));
+  writeFileSync(join(tdir, 'review-verdicts.jsonl'), JSON.stringify({ at: new Date().toISOString(), source: 'api-review', ok: false, diff_ref: 'main..fix/zz-demo', brief_hash: briefHash(BRIEF()), ...over }) + '\n');
+  return tdir;
+}
+test('API: no with a recorded recent API failure for the brief is honoured (caller-no, no governor call)', async () => {
+  let calls = 0;
+  const tdir = failRow();
+  const r = await call(BRIEF('API: no'), { deps: { telemetryDir: () => tdir, decide: () => { calls++; return API(); } } });
+  assert.deepEqual([r.route, r.route_reason, r.updatedInput], ['subagent', 'caller-no', null]);
+  assert.equal(calls, 0);
+  const sameRange = await call(BRIEF('API: no\nextra words'), { deps: { telemetryDir: () => failRow({ brief_hash: 'other' }), decide: () => { calls++; return API(); } } });
+  assert.equal(sameRange.route_reason, 'caller-no', 'a failure on the same diff range counts');
+});
+test('API: no without a recorded failure (none, old, other brief and range) is ignored: routed normally with caller-no-ignored', async () => {
+  const empty = mkdtempSync(join(tmpdir(), 'ac-route-tel-'));
+  let calls = 0;
+  const r = await call(BRIEF('API: no'), { deps: { telemetryDir: () => empty, decide: () => { calls++; return API(); } } });
+  assert.deepEqual([r.route, r.route_reason], ['api', 'caller-no-ignored']);
+  assert.equal(calls, 1, 'the guard decides it');
+  const old = await call(BRIEF('API: no'), { deps: { telemetryDir: () => failRow({ at: new Date(Date.now() - 2 * 3600e3).toISOString() }), decide: API } });
+  assert.equal(old.route_reason, 'caller-no-ignored', 'a failure older than an hour does not count');
+  const other = await call(BRIEF('API: no'), { deps: { telemetryDir: () => failRow({ brief_hash: 'zzzz', diff_ref: 'a..b' }), decide: API } });
+  assert.equal(other.route_reason, 'caller-no-ignored');
+  const plan = await call(BRIEF('API: no'), { deps: { telemetryDir: () => empty, decide: () => ({ decision: 'plan', reason: 'alternation: plan turn' }) } });
+  assert.deepEqual([plan.route, plan.route_reason], ['subagent', 'caller-no-ignored'], 'the reason is kept when the governor then answers plan');
+});
+test('API: plan is the deliberate opt-out: the review stays on the plan, the governor is not asked', async () => {
+  let calls = 0;
+  const r = await call(BRIEF('API: plan'), { deps: { decide: () => { calls++; return API(); } } });
+  assert.deepEqual([r.route, r.route_reason, r.updatedInput], ['subagent', 'caller-plan', null]);
+  assert.equal(calls, 0);
+  assert.equal(apiMarker('x\nAPI: plan\n'), 'plan');
 });

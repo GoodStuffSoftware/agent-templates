@@ -46,6 +46,7 @@ export const paths = () => {
     heldSessions: join(d, 'release-hold-sessions.json'),
     messagePending: join(d, 'release-hold-message-pending.json'),
     owner: join(d, 'release-owner.json'),
+    scopeNotice: join(d, 'release-hold-scope-notice.json'),
   };
 };
 
@@ -89,7 +90,33 @@ export function flagIsOpen(f = readFlag()) { return !!(f && Array.isArray(f.flag
 // Flags that report on the watch itself, not on the release: they show in the check, the tick and the flag line, but never start a hold
 // (a fresh install with no telemetry would otherwise hold all work).
 export const NO_HOLD_FLAGS = new Set(['usage-source-empty', 'harness-refusals', 'insufficient-data']);
-const holdable = (flags) => (Array.isArray(flags) ? flags : []).filter((x) => x && !NO_HOLD_FLAGS.has(x.name));
+// Sample floor (0.31.75): a flag starts a hold only when it carries at least release_watch_hold_min_events events AND release_watch_hold_min_n
+// samples (n: spawns, workers or finished workers, whatever the flag's rate is over). Below it the flag still notifies, never holds. 0 turns a floor off.
+// A flag that carries no count (a legacy v1 row) cannot be judged small and passes. Defaults come from the check history (README, 0.31.75).
+export const HOLD_MIN_EVENTS_DEFAULT = 8;
+export const HOLD_MIN_N_DEFAULT = 30;
+const optNum = (k, d) => { const n = Number(opt(k, d)); return Number.isFinite(n) && n >= 0 ? n : d; };
+// Severity flags that are meant to hold on a single event are exempt from the floor (runaway: a runaway session is a real fault even once).
+export const FLOOR_EXEMPT_FLAGS = new Set(['runaway']);
+// Flags whose n is not a sample count but active hours (guard:*, queue-clears): only the event floor applies to them.
+const hoursN = (name) => /^guard:/.test(String(name || '')) || name === 'queue-clears';
+export function meetsHoldFloor(x) {
+  try {
+    if (x && FLOOR_EXEMPT_FLAGS.has(x.name)) return true;
+    const minEv = optNum('release_watch_hold_min_events', HOLD_MIN_EVENTS_DEFAULT);
+    const minN = optNum('release_watch_hold_min_n', HOLD_MIN_N_DEFAULT);
+    if (minEv > 0 && typeof x.events === 'number' && x.events < minEv) return false;
+    if (minN > 0 && typeof x.n === 'number' && x.n < minN && !hoursN(x.name)) return false;
+    return true;
+  } catch { return true; }
+}
+// What a hold refuses: 'releases' (the default) = only agent-companion release and install actions; 'all' = new agents, resumes, queue
+// admissions, heavy commands, and running workers hand off (the 0.31.63 behaviour).
+export function holdScope() {
+  try { return String(opt('release_watch_hold_scope', 'releases')).trim().toLowerCase() === 'all' ? 'all' : 'releases'; } catch { return 'releases'; }
+}
+const holdable = (flags) => (Array.isArray(flags) ? flags : []).filter((x) => x && !NO_HOLD_FLAGS.has(x.name) && meetsHoldFloor(x));
+export const holdableFlags = holdable;
 const levelOf = (f) => (typeof f.level === 'number' ? f.level : typeof f.value === 'number' ? f.value : null);
 // 0.31.70 named a hook-signature flag with the raw error text; 0.31.71 collapses paths and numbers first. An answer stored under the old name still holds for the new one, so the upgrade does not raise it again.
 const legacySigName = (k) => { const m = /^(hook-signature:\S+ )([\s\S]*)$/.exec(k); return m ? m[1] + normalizeSignature(m[2]).slice(0, 48) : k; };
@@ -456,7 +483,7 @@ const readHeld = () => { const f = readJson(paths().heldSessions); return f && A
 // p: the hook payload (session_id, cwd, transcript_path, agent_id). Fails open; false when not held or nothing to record.
 export function noteHeld(p, at = now()) {
   try {
-    if (!p || !p.session_id || !isHoldActive()) return false;
+    if (!p || !p.session_id || !isHoldActive() || holdScope() !== 'all') return false; // releases scope stops no session: nobody is owed a resume message
     const h = readHold();
     return locked(paths().heldSessions, () => {
       let f = readHeld();
@@ -698,6 +725,7 @@ export function flagLine({ at = now(), sessionId = null } = {}) {
   try {
     if (isHoldActive()) {
       const h = readHold();
+      if (holdScope() !== 'all') return scopedHoldNotice(h, sessionId, at);
       const held = new Set((Array.isArray(h.flags) ? h.flags : []).map((x) => x && x.name));
       const ff = readFlag();
       const later = flagIsOpen(ff) ? ff.flags.filter((x) => x && x.name && !held.has(x.name)) : [];
@@ -714,10 +742,10 @@ export function flagLine({ at = now(), sessionId = null } = {}) {
       if (d > 0) {
         const n = Date.parse(f.notifiedAt); const start = n > 0 ? n : at; // never shown yet: this showing starts the countdown
         const left = Math.max(0, Math.ceil((start + d * 60e3 - at) / 60e3));
-        when = `Hold countdown: ${left} min left; unanswered, new agents and heavy jobs are held at ${iso(start + d * 60e3)} (option release_watch_hold_minutes). `;
+        when = `Hold countdown: ${left} min left; unanswered, ${holdScope() === 'all' ? 'new agents and heavy jobs' : 'agent-companion release and install actions'} are held at ${iso(start + d * 60e3)} (options release_watch_hold_minutes, release_watch_hold_scope). `;
       }
     }
-    return `[agent-companion] RELEASE WATCH ${f.version || ''} check ${f.check ?? '?'}: ${names}. Push-notify the operator at once (PushNotification) and relay their answer. The flag is acknowledged only when the operator says so ("ack", "keep it", "no rollback"); a question or a request for analysis leaves it open and the countdown running. ${when || (holdable(f.flags).length ? 'Unanswered, new agents and heavy jobs are held after the delay (option release_watch_hold_minutes); ' : 'This flag never starts a hold; ')}run \`node <plugin>/scripts/release-watch.mjs status\` for detail.`;
+    return `[agent-companion] RELEASE WATCH ${f.version || ''} check ${f.check ?? '?'}: ${names}. Push-notify the operator at once (PushNotification) and relay their answer. The flag is acknowledged only when the operator says so ("ack", "keep it", "no rollback"); a question or a request for analysis leaves it open and the countdown running. ${when || (holdable(f.flags).length ? `Unanswered, ${holdScope() === 'all' ? 'new agents and heavy jobs' : 'agent-companion release and install actions'} are held after the delay (option release_watch_hold_minutes); ` : (f.flags.some((x) => x && !NO_HOLD_FLAGS.has(x.name)) ? 'This flag is below the hold floor (options release_watch_hold_min_events, release_watch_hold_min_n): it notifies but never holds; ' : 'This flag never starts a hold; '))}run \`node <plugin>/scripts/release-watch.mjs status\` for detail.`;
   } catch { return null; }
 }
 
@@ -725,13 +753,49 @@ export function flagLine({ at = now(), sessionId = null } = {}) {
 // One message for every guard that refuses work while held. null when no hold (or on any read error: fail open).
 export function holdDenyMessage(what = 'new work', p = null) {
   try {
-    if (!isHoldActive()) return null;
+    if (!isHoldActive() || holdScope() !== 'all') return null; // releases scope: only release and install commands are refused (releaseActionDeny)
     noteHeld(p);
     const h = readHold() || {};
     const names = Array.isArray(h.flags) && h.flags.length ? h.flags.map((x) => x && x.name).filter(Boolean).join(', ') : 'unspecified';
     return `[agent-companion] A post-release hold is on since ${h.since || '?'} (release ${h.version || '?'}; flags: ${names}), so ${what} is refused. `
       + 'Tell the operator at once. Only the operator lifts it, by saying "clear hold"; do not try to lift it yourself. The lead may still answer the operator; leases already granted keep running.'
       + holdWaitText(kindOf(p));
+  } catch { return null; }
+}
+
+// ---- hold scope 'releases' ----
+// One notice per session while such a hold is on (a stamp file keyed by the hold's start). null for every later call.
+function scopedHoldNotice(h, sessionId, at) {
+  try {
+    const text = `[agent-companion] RELEASE HOLD since ${h.since}: ${h.reason}. Scope "releases" (option release_watch_hold_scope): only agent-companion release and install actions are refused (plugin install or update, plugin marketplace update, pushes or merges to release/* branches); all other work, agents and heavy jobs continue. Tell the operator once. Only the operator lifts it, by saying "clear hold".`;
+    if (!sessionId) return text;
+    const shown = locked(paths().scopeNotice, () => {
+      let f = readJson(paths().scopeNotice);
+      if (!f || f.holdSince !== h.since) f = { holdSince: h.since, sessions: {} };
+      if (f.sessions[sessionId]) return true;
+      f.sessions[sessionId] = iso(at);
+      writeJson(paths().scopeNotice, f);
+      return false;
+    });
+    return shown === true ? null : text;
+  } catch { return null; }
+}
+// A Bash/PowerShell command that releases or installs agent-companion: a plugin install/update, a marketplace update, a push to a release/*
+// branch, or a PR merge/create naming one. Only these are refused in scope 'releases'.
+export const MARKETPLACE_UPDATE_RE = /\bplugin\s+marketplace\s+update\b/;
+export const RELEASE_PUSH_RE = /\bgit\b[^\n;&|]*\bpush\b[^\n;&|]*\brelease\//;
+export const RELEASE_PR_RE = /\bgh\s+pr\s+(?:merge|create)\b[^\n;&|]*\brelease\/|\bgh\s+pr\s+merge\b[^\n;&|]*\b(?:agent-templates|agent-companion)\b/;
+export function isReleaseAction(cmd) {
+  const c = String(cmd || '');
+  return INSTALL_CMD_RE.test(c) || MARKETPLACE_UPDATE_RE.test(c) || RELEASE_PUSH_RE.test(c) || RELEASE_PR_RE.test(c);
+}
+// The deny text for a release/install command while a hold in scope 'releases' is on; null otherwise (fails open).
+export function releaseActionDeny(cmd) {
+  try {
+    if (!isHoldActive() || holdScope() !== 'releases' || !isReleaseAction(cmd)) return null;
+    const h = readHold() || {};
+    const names = Array.isArray(h.flags) && h.flags.length ? h.flags.map((x) => x && x.name).filter(Boolean).join(', ') : 'unspecified';
+    return `[agent-companion] A post-release hold is on since ${h.since || '?'} (release ${h.version || '?'}; flags: ${names}), so this agent-companion release or install command is refused. All other work continues. Tell the operator at once. Only the operator lifts it, by saying "clear hold"; do not try to lift it yourself.`;
   } catch { return null; }
 }
 
