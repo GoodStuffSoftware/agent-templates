@@ -172,6 +172,8 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`) }
       const reportDir = f['report-dir'] || ctx.opt('usage_analysis_report_dir', '') || null;
       const days = f.day ? [f.day] : null;
       const explicitDays = !!(f.day || f.from || f.to);
+      // A forced re-run of named days rebuilds their checkup record first (per-account lines, the unattributed figure), so the analysis reads it.
+      if (f.force && !f['dry-run'] && f.day) { try { dc.rebuildHistoryDays([f.day], { nowT }); } catch { /* the analysis still runs */ } }
       const analysis = runAnalysis({
         root: stateRoot,
         nowT,

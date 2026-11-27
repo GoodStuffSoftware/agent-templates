@@ -47,7 +47,7 @@ import { stateDir, appendLog, classifyModel } from './context.mjs';
 import { priceUsage } from '../../scripts/lib/pricing.mjs';
 import { usageOf, queueNotice, safe } from './runaway.mjs';
 import { requestUnits, modelWeight, weeklyLimitUnits, currentRate, rateLabel } from './plan-allowance.mjs';
-import { currentConfiguredAccount, accountLimitAt } from './account.mjs';
+import { currentConfiguredAccount, accountLimitAt, configuredAccounts, accountHistory, accountAt } from './account.mjs';
 
 export const SESSION_BUDGET_DEFAULT_UNITS = 350;
 const CHUNK_BYTES = 8 * 1024 * 1024;
@@ -84,16 +84,27 @@ function freshFile() {
   return { off: 0, settled: 0, estTurns: 0, unpriced: 0, pend: null, recent: [] };
 }
 
-function settle(f) {
+// Option claude_accounts: which account sent a message, by its timestamp (accountAt over the switch history). '' = no listed account
+// (no history covers that time, an uncertain interval, or an account the option does not list). null = the option is unset.
+function acctKeyOf(ac, ts) {
+  if (!ac) return null;
+  const a = accountAt(ac.history, ts);
+  return a && ac.ids.has(a) ? a : '';
+}
+
+function settle(f, ac) {
   if (!f.pend) return;
   const r = planUnitsOf(f.pend.usage, f.pend.model);
-  if (r) { f.settled += r.units; if (r.estimated) f.estTurns += 1; } else f.unpriced += 1;
+  if (r) {
+    f.settled += r.units; if (r.estimated) f.estTurns += 1;
+    if (ac) { const k = acctKeyOf(ac, f.pend.ts); const m = (f.acct ||= {}); m[k] = (m[k] || 0) + r.units; }
+  } else f.unpriced += 1;
   f.recent.push(f.pend.key);
   if (f.recent.length > RECENT_KEYS) f.recent.shift();
   f.pend = null;
 }
 
-function feedLine(f, line, anon) {
+function feedLine(f, line, anon, ac) {
   if (!line.includes('"type":"assistant"')) return anon;
   let rec;
   try { rec = JSON.parse(line); } catch { return anon; }
@@ -108,14 +119,15 @@ function feedLine(f, line, anon) {
     return anon;
   }
   if (f.recent.includes(key)) return anon; // a request already settled: never counted twice
-  settle(f);
-  f.pend = { key, usage: u, model: msg.model || '' };
+  settle(f, ac);
+  const ts = Date.parse(rec.timestamp);
+  f.pend = { key, usage: u, model: msg.model || '', ...(ac ? { ts: Number.isFinite(ts) ? ts : Date.now() } : {}) };
   return key.startsWith('anon-') ? anon + 1 : anon;
 }
 
 // Read what is new in one file. Returns true when the file was read to its
 // end, false when the deadline stopped it first.
-function advanceFile(path, f, deadline) {
+function advanceFile(path, f, deadline, ac) {
   let fd;
   try {
     fd = openSync(path, 'r');
@@ -133,7 +145,7 @@ function advanceFile(path, f, deadline) {
       else if (f.off + len < size) consumed = len; // one line longer than a chunk: skip it
       else break; // a partial last line still being written: next call
       const text = buf.toString('utf8', 0, end >= 0 ? end : consumed);
-      for (const line of text.split('\n')) anon = feedLine(f, line, anon);
+      for (const line of text.split('\n')) anon = feedLine(f, line, anon, ac);
       f.off += consumed;
     }
     return true;
@@ -145,15 +157,19 @@ function advanceFile(path, f, deadline) {
 }
 
 // Units, estimated turns and unpriced turns for one file, the open request included.
-function totalsOfFile(f) {
+function totalsOfFile(f, ac) {
   let units = f.settled;
   let est = f.estTurns;
   let unpriced = f.unpriced;
+  const by = ac ? { ...(f.acct || {}) } : null;
   if (f.pend) {
     const r = planUnitsOf(f.pend.usage, f.pend.model);
-    if (r) { units += r.units; if (r.estimated) est += 1; } else unpriced += 1;
+    if (r) {
+      units += r.units; if (r.estimated) est += 1;
+      if (by) { const k = acctKeyOf(ac, f.pend.ts); by[k] = (by[k] || 0) + r.units; }
+    } else unpriced += 1;
   }
-  return { units, est, unpriced };
+  return { units, est, unpriced, by };
 }
 
 // Every *.jsonl under <dir>, a few levels deep (workflow agents live under
@@ -230,6 +246,10 @@ export function scanSession({ sessionId, transcriptPath, deadline, state }) {
     const d = join(dirname(lead), id, 'subagents');
     try { if (statSync(d).isDirectory()) subDirs.push(d); } catch { /* none */ }
   }
+  // Option claude_accounts set: each message's units are also kept by the account active when it was sent (so a session across an account
+  // switch splits at the switch time). Unset: no history read, nothing extra saved, nothing extra returned.
+  const listed = configuredAccounts();
+  const ac = listed.length ? { history: accountHistory(), ids: new Set(listed.map((a) => a.id)) } : null;
   const paths = [lead];
   for (const d of subDirs) listTranscripts(d, paths);
   let complete = true;
@@ -239,20 +259,56 @@ export function scanSession({ sessionId, transcriptPath, deadline, state }) {
     let size = -1;
     try { size = statSync(p).size; } catch { continue; }
     if (size === f.off) continue;
-    if (!advanceFile(p, f, deadline)) { complete = false; break; }
+    if (!advanceFile(p, f, deadline, ac)) { complete = false; break; }
   }
   let total = 0;
   let estTurns = 0;
   let unpriced = 0;
+  const byAcct = ac ? {} : null;
   for (const f of Object.values(state.files)) {
-    const t = totalsOfFile(f);
+    const t = totalsOfFile(f, ac);
     total += t.units; estTurns += t.est; unpriced += t.unpriced;
+    if (byAcct) for (const [k, u] of Object.entries(t.by)) byAcct[k] = (byAcct[k] || 0) + u;
   }
-  return { total, files: paths.length, complete, estTurns, unpriced };
+  // Units counted before the option was set (or by a scan without it) belong to no account's record: they stay in the unattributed part.
+  if (byAcct) {
+    const rest = total - Object.values(byAcct).reduce((x, y) => x + y, 0);
+    if (rest > 1e-6) byAcct[''] = (byAcct[''] || 0) + rest;
+  }
+  return { total, files: paths.length, complete, estTurns, unpriced, ...(byAcct ? { byAcct } : {}) };
 }
 
-export function budgetNoticeText(total, rate = currentRate()) {
+// `byAcct` ({ <account id>: units, '': units no listed account owns }, scanSession's result with the option claude_accounts set): each
+// account's part is measured against that account's own limit at `now`. One listed account only: the usual sentence with that account's
+// week and label. Several, or a part no listed account owns: one clause per account. Null, or no listed account in it: the usual
+// sentence for the account signed in now.
+export function budgetNoticeText(total, rate = currentRate(), byAcct = null, now = Date.now()) {
   const n = Math.round(total);
+  const listed = byAcct ? configuredAccounts() : [];
+  const parts = listed.filter((a) => byAcct[a.id] > 0);
+  if (parts.length) {
+    const base = weeklyLimitUnits(rate.value);
+    const clause = (a) => {
+      const lim = accountLimitAt(a, now, base);
+      return { lim, pct: Math.round((byAcct[a.id] / lim) * 100) };
+    };
+    const unowned = byAcct[''] > 0.5 ? Math.round(byAcct['']) : 0;
+    const tail = ' A hand-off to a fresh session does not save usage; let auto-compaction handle context. '
+      + 'What cuts spend is fewer and smaller spawns: pick the lowest rung that fits, brief tightly, cap fan-out, and do not re-spawn for work a live worker can continue. '
+      + 'Hand over only when a fresh session is required (a plugin version change) or the job ends.';
+    if (parts.length === 1 && !unowned) {
+      const a = parts[0];
+      const { lim, pct } = clause(a);
+      // The measured rate is named only when it is the figure the week came from: the signed-in account's, with no limit of its own.
+      const cur = currentConfiguredAccount();
+      const own = !!a.weeklyLimitUnits || a.limitChanges.some((c) => c.fromMs <= now);
+      const basis = (rate.basis === 'default' || own || !cur || cur.id !== a.id ? '' : `, at ${rateLabel(rate)}`) + `, account ${a.label}`;
+      return `[agent-companion] This session, including its subagents, has used about ${n} plan units (~${pct}% of a ~${lim.toLocaleString('en-US')}-unit week${basis}).${tail}`;
+    }
+    const each = parts.map((a) => { const { lim, pct } = clause(a); return `account ${a.label} ${Math.round(byAcct[a.id])} units, ~${pct}% of its ~${lim.toLocaleString('en-US')}-unit week`; });
+    if (unowned) each.push(`${unowned} units not attributed to a listed account`);
+    return `[agent-companion] This session, including its subagents, has used about ${n} plan units across accounts (${each.join('; ')}).${tail}`;
+  }
   const week = weeklyPlanUnits(rate);
   const pct = Math.round((total / week) * 100);
   // The rate is named only when it is not the shipped default (the default week is what the text always said).
@@ -299,8 +355,9 @@ export function checkSessionBudget(p, { threshold, now = Date.now(), deadlineMs 
           scan_complete: r.complete,
           estimated_turns: r.estTurns,
           unpriced_turns: r.unpriced,
+          ...(r.byAcct ? { by_account: Object.entries(r.byAcct).map(([id, u]) => ({ id: id || null, units: Math.round(u * 100) / 100 })) } : {}),
         });
-        notify(p.session_id, budgetNoticeText(r.total, rate));
+        notify(p.session_id, budgetNoticeText(r.total, rate, r.byAcct || null, now));
       }
     }
     saveState(p.session_id, state);

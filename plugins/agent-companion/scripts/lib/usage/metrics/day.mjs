@@ -56,6 +56,18 @@ function paceTooEarly(w, params) {
   return el < min ? { gap: true, why: `only ${r4(el)}% of the plan week has elapsed (needs ${min}%): the pace is not compared across the week reset` } : null;
 }
 
+// With accounts configured (a record carrying `weeks`) the pace is one account's own week, never the mixed Friday week: the account named
+// by params.account (id or label), else the one that used most that day. null = no per-account weeks (the single-week path above).
+function paceWeekOf(rec, params) {
+  const ws = rec && Array.isArray(rec.weeks) && rec.weeks.length ? rec.weeks : null;
+  if (!ws) return null;
+  const want = params && typeof params.account === 'string' ? params.account : null;
+  const w = want ? ws.find((x) => x.id === want || x.label === want) : ws.reduce((m, x) => ((finite(x.dayUnits) || 0) > (finite(m.dayUnits) || 0) ? x : m), ws[0]);
+  if (!w) return { gap: true, why: `no configured account matches ${want}` };
+  if (!want && !((finite(w.dayUnits) || 0) > 0)) return { gap: true, why: 'no configured account used anything that day' };
+  return { w };
+}
+
 export const DAY_METRICS = [
   {
     id: 'day.units', source: 'facts', register: false, entity: 'day', label: 'M', unit: 'units/day', direction: 'up-is-worse', pool: 'sum',
@@ -126,7 +138,9 @@ export const DAY_METRICS = [
     // across the reset (a gap baseline gives no verdict), only days well inside one week against the day before.
     needs: ['H', 'week reset'], recordKinds: ['day'], params: { defaults: { minElapsedPct: PACE_MIN_ELAPSED_PCT } },
     day(p, rec) {
-      const w = rec && rec.week ? rec.week : null;
+      const pick = paceWeekOf(rec, p);
+      if (pick && pick.gap) return pick;
+      const w = pick ? pick.w : (rec && rec.week ? rec.week : null);
       if (!w || finite(w.paceAtResetPct) === null) return historyGap();
       if (w.partial) return { gap: true, why: 'the week figure is partial: the scan began after the week started' };
       const early = paceTooEarly(w, p);
@@ -135,14 +149,16 @@ export const DAY_METRICS = [
     },
     stat(recs, ctx) {
       const d = dayOf(recs);
-      const w = d && d.hist ? d.hist.week : null;
+      const pick = d && d.hist ? paceWeekOf(d.hist, ctx && ctx.params) : null;
+      if (pick && pick.gap) return pick;
+      const w = pick ? pick.w : (d && d.hist ? d.hist.week : null);
       if (!w || finite(w.paceAtResetPct) === null) return historyGap();
       if (w.partial) return { gap: true, why: 'the week figure is partial: the scan began after the week started' };
       const early = paceTooEarly(w, ctx && ctx.params);
       if (early) return early;
       return {
         num: w.paceAtResetPct, den: 1, scale: 1, sample: 1,
-        detail: { pctSoFar: w.pctSoFar, elapsedPct: w.elapsedPct, projectedAtResetPct: w.paceAtResetPct },
+        detail: { pctSoFar: w.pctSoFar, elapsedPct: w.elapsedPct, projectedAtResetPct: w.paceAtResetPct, ...(pick ? { account: pick.w.label || pick.w.id } : {}) },
       };
     },
   },
