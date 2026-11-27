@@ -31,6 +31,9 @@ import { envDumpGuard } from './lib/env-dump-guard.mjs';
 import { pushDeleteGuard } from './lib/push-delete-guard.mjs';
 import { claimOnce, readStamp, writeStamp } from './lib/subagent-context.mjs';
 import { fileURLToPath } from 'node:url';
+import { waitRewriteInput, WAIT_REWRITE_NOTE } from './lib/wait-cap.mjs';
+import { classifyCommand } from './lib/resource-gate.mjs';
+import { analyze as analyzeTail } from './lib/bash-tail.mjs';
 import {
   evaluate, POLL_TOOLS, TAIL_BYTES, workerWaitPattern, workerWaitHint, workerWaitDenyText, workerWaitDecision,
   workerWaitMode, WORKER_WAIT_WINDOW_MINUTES,
@@ -129,6 +132,19 @@ try {
     if (d.action === 'silent') finish(null);
     const root = process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL('..', import.meta.url));
     if (d.action === 'deny') {
+      // A repeat wait on Bash is not refused: it is run as the one sanctioned wait (run_in_background), so the agent
+      // spends no round trip on a retry. Anything the rewrite cannot do safely falls through to the refusal below.
+      if (toolName === 'Bash' && opt('worker_wait_rewrite', true)) {
+        // bash-tail.mjs owns every other rewrite and only one updatedInput survives a call: a command it would rewrite (heavy, a known
+        // long-runner, a worktree remove) keeps the refusal, so this rewrite never replaces the queue or the output tail.
+        let own = false;
+        try { own = classifyCommand(input.command, { cwd: p.cwd || process.cwd() }).heavy.length > 0 || Boolean(analyzeTail(input.command).runner) || /worktree/.test(input.command); } catch { own = true; }
+        const upd = own ? null : waitRewriteInput(input, { capMinutes: Number(opt('wait_loop_cap_minutes', 60)) });
+        if (upd) {
+          recordDenial('worker-wait', p, `${hit.kind} repeat within ${windowMinutes} min, run in the background`, 'rewrite');
+          writeAndExit(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput: upd, additionalContext: WAIT_REWRITE_NOTE } }));
+        }
+      }
       const text = workerWaitDenyText(root, windowMinutes);
       recordDenial('worker-wait', p, `${hit.kind} repeat within ${windowMinutes} min of the one-wait notice`);
       deny(text);

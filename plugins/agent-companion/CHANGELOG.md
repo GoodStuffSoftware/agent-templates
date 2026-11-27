@@ -2,6 +2,13 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.79 (unreleased)
+
+- **A repeat worker wait runs instead of being refused (hooks/poll-guard.mjs, hooks/lib/wait-cap.mjs; option `worker_wait_rewrite`, default true).** A worker's second foreground sleep, poll or watch loop on Bash within the repeat window used to be denied (20 retries, 10m47s in one lead's week). It now returns `updatedInput` with `run_in_background: true` (the sanctioned one-wait form; the loop cap applies) and a one-line note. Still denied, with the same text: PowerShell, and a command the resource gate or the output tail would rewrite (only one `updatedInput` survives a call).
+- **The python-stdin refusal leads with the call that works (hooks/lib/python-stdin.mjs).** No safe rewrite exists (the program is absent, so any rewrite would run something else); the text is shorter and names the script-file form first.
+- **The delegation guard's block text carries the repeat instruction in its first paragraph (hooks/delegation-guard.mjs).** Threshold, counting and the block are unchanged; the call still has to be sent again, because a hook cannot both stop a call and run it.
+- **Checked, no change:** the `update_plan` "Not shown: you are a subagent" refusal is not produced by this plugin or by the operator's hooks, and every ladder rung already disallows `mcp__ccd_turn`; the Edit "worktree" refusals come from the operator's `~/.claude/hooks/write-target-guard.mjs`, outside this repository.
+
 ## 0.31.78 — 2026-11-27
 
 - **The struggle notice no longer advises a fresh session (hooks/lib/struggle.mjs).** At xhigh, max or unknown effort it said "or a fresh session with a handoff may help"; lead handoffs were measured as not cost effective (2026-11-14), so it now ends "it is likely a missing fact or rule. Name it and record it where knowledge-routing says." Counts and the effort mention are unchanged; worker handoff notices are untouched. To silence the whole detector today: `struggle_detector` false.
