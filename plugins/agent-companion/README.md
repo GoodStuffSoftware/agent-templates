@@ -219,6 +219,23 @@ Every character a tool returns is re-read from the prompt cache on every later c
 - **Opt out:** `bash_tail: false` (or `CLAUDE_PLUGIN_OPTION_BASH_TAIL=0` (unless the settings home sets that option: it wins, see [Settings](#settings))). A command can also opt itself out by piping or redirecting, for instance `npm test 2>&1 | cat`.
 - **Measure it:** `node scripts/bash-tail-report.mjs [--days N] [--json]` reads `telemetry/bash-tail.jsonl` (see `docs/TELEMETRY.md`): runs wrapped, bytes produced vs characters returned, known runners left alone and why.
 
+## Bash hook dispatcher
+
+Six PreToolUse checks used to run on every `Bash` and `PowerShell` call, each as its own node process: `delegation-guard`, `bash-tail`, `hold-message --event pre`, `bash-read`, `poll-guard` and `subagent-context`. `hooks/hooks.json` now starts ONE entry, `hooks/bash-dispatch.mjs` (matcher `^(Bash|PowerShell)$`, timeout 15), which runs the same six scripts, unchanged and in that order, each on its own worker thread inside one process, and prints what Claude Code makes of their separate outputs: `permissionDecision` by precedence deny, defer, ask, allow (every deny reason kept), `additionalContext` and `systemMessage` joined, exit 2 if any check exits 2, one check's output passed on byte for byte. Claude Code runs matching hooks in parallel and applies no `updatedInput` chaining, so every check sees the original input here too. Each check has its own deadline (its old timeout); a check that throws, exits badly or hangs costs only itself, as a failed hook does today. The other entries for these tools moved to non-shell matchers (`delegation-guard` on `Edit|Write|NotebookEdit|Read|Grep|Glob`, `poll-guard` on `ScheduleWakeup|Monitor`, `subagent-context` on every tool except the two shells), so each tool still runs every hook it ran before. Telemetry rows in `hook-timing.jsonl` still name the check; see `docs/TELEMETRY.md`.
+
+**Fallback.** If a Claude Code version treats the single entry differently, replace the `bash-dispatch.mjs` entry in `hooks/hooks.json` with these six; nothing else changes. A test (`tests/bash-dispatch.test.mjs`) checks this snippet against the dispatcher's check list.
+
+```json
+[
+  { "matcher": "^(Bash|PowerShell)$", "hooks": [{ "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/delegation-guard.mjs"], "timeout": 10 }] },
+  { "matcher": "^(Bash|PowerShell)$", "hooks": [{ "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/bash-tail.mjs"], "timeout": 10 }] },
+  { "matcher": "^(Bash|PowerShell)$", "hooks": [{ "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/hold-message.mjs", "--event", "pre"], "timeout": 5 }] },
+  { "matcher": "^(Bash|PowerShell)$", "hooks": [{ "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/bash-read.mjs"], "timeout": 10 }] },
+  { "matcher": "^(Bash|PowerShell)$", "hooks": [{ "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/poll-guard.mjs"], "timeout": 10 }] },
+  { "matcher": "^(Bash|PowerShell)$", "hooks": [{ "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/subagent-context.mjs"], "timeout": 5 }] }
+]
+```
+
 ## Git brief (trial)
 
 A 7-day transcript count (2026-09-27 to 10-04) found about 5,100 Bash calls that only READ git state, 882 of them `git fetch origin`, each costing a turn. `scripts/git-brief.mjs` answers them in one call, and a hook puts the answer in front of the agent before it asks.

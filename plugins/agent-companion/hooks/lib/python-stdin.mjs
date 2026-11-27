@@ -27,12 +27,14 @@ import { recordDenial } from './context.mjs';
 export const PY_ACK = /guard-ack:\s*python-stdin/i;
 
 export const PY_MSG =
-  'Python reading its program from stdin with nothing on stdin hangs here (Python 3.14 on Windows takes the NUL device for a terminal and spins at ~1 core, ' +
-  'outliving the tool timeout). It fires on `python3 -` or a bare `python3` with `< /dev/null`, an EMPTY heredoc, or no stdin at all. ' +
-  'Next call, pick one: write the program to a script file and run `python3 <file>` (best for anything long); `python3 -c \x27...\x27`; ' +
-  '`python3 -m <module>`; a heredoc with a body (`python3 - <<\x27PY\x27 ... PY`); or a pipe (`echo ... | python3 -`). ' +
-  'The absolute python.exe path does NOT help. If stdin really is supplied another way, re-run with `# guard-ack: python-stdin` appended, ' +
-  'or set the plugin option python_stdin_guard to warn or off.';
+  'Python reading its program from stdin with nothing on stdin hangs here: Python 3.14 on Windows (every launcher: python3 / python.exe shim, ' +
+  '`py`, and the real python.exe) sees the NUL device as a terminal, starts its REPL and spins at ~1 core ' +
+  'writing to stderr, outliving the Bash tool timeout. It fires on `python3 -` or a bare ' +
+  '`python3` with `< /dev/null`, an EMPTY heredoc, or no stdin at all (the Bash tool often hands commands a NUL stdin). Use instead: ' +
+  '`python3 -c \'...\'`; `python3 -m <module>`; write the script to a scratch file and run `python3 <file>`; ' +
+  'feed the program through a heredoc with a body; or pipe it in (`echo ... | python3 -`). ' +
+  'The absolute python.exe path does NOT help (same bug). If stdin really is ' +
+  'supplied another way, re-run with `# guard-ack: python-stdin` appended, or set the plugin option python_stdin_guard to warn or off.';
 
 const PY_LAUNCHER = /^(?:python|pythonw|py|pyw)(?:\d+(?:\.\d+)?)?(?:-(?:32|64|arm64))?(?:\.exe)?$/i;
 const PY_PREFIX = new Set(['exec', 'command', 'builtin', 'nohup', 'time', '!', 'then', 'do', 'else', 'elif', 'if', 'while', 'until']);

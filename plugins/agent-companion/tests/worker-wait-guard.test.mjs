@@ -26,7 +26,7 @@ function payload(extra = {}) {
 }
 function run(dir, p, env = {}) {
   return runHook('hooks/poll-guard.mjs', p, {
-    env: { CLAUDE_PLUGIN_OPTION_WORKER_WAIT_REWRITE: '0', CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), ...env },
+    env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), ...env },
   });
 }
 const tel = (dir, name) => readJsonl(join(dir, '.claude', 'agent-companion', 'telemetry', name));
@@ -196,40 +196,4 @@ test('the options exist in plugin.json with the documented defaults', () => {
   assert.equal(cfg.worker_wait_guard.default, 'deny-repeat');
   assert.equal(cfg.worker_wait_repeat_window_minutes.default, WORKER_WAIT_WINDOW_MINUTES);
   assert.equal(cfg.worker_wait_repeat_window_minutes.type, 'number');
-});
-
-// 0.31.79: a repeat Bash wait is rewritten to the sanctioned background form instead of refused.
-const REWRITE = { CLAUDE_PLUGIN_OPTION_WORKER_WAIT_REWRITE: '1' };
-test('rewrite: a repeat Bash wait runs in the background (updatedInput), is not denied, and is logged as a rewrite', () => {
-  const { dir, cleanup } = makeFixture();
-  try {
-    const first = run(dir, payload({ agent_id: 'g-rw' }), { ...at(0), ...REWRITE });
-    assert.equal(first.json?.hookSpecificOutput?.updatedInput, undefined, 'the first match is still only a hint');
-    const b = run(dir, payload({ agent_id: 'g-rw' }), { ...at(5), ...REWRITE });
-    assert.equal(decisionOf(b), undefined);
-    const u = b.json.hookSpecificOutput.updatedInput;
-    assert.equal(u.run_in_background, true);
-    assert.match(u.command, /gh pr checks 31/);
-    assert.match(u.command, /wait-cap|SECONDS/, 'the loop cap applies to the background loop');
-    assert.match(ctxOf(b), /background command/);
-    assert.deepEqual(denialsOf(dir).map((d) => d.outcome), ['rewrite']);
-  } finally { cleanup(); }
-});
-
-test('rewrite: still denied for PowerShell, for a heavy command and for a command bash-tail rewrites', () => {
-  const { dir, cleanup } = makeFixture();
-  try {
-    const cases = [
-      ['PowerShell', 'while ($true) { Start-Sleep 20 }'],
-      ['Bash', 'npm test; until gh pr checks 31; do sleep 20; done'],
-      ['Bash', 'git worktree remove x; sleep 30'],
-    ];
-    cases.forEach(([tool, command], i) => {
-      const id = 'g-keep' + i;
-      run(dir, payload({ agent_id: id, tool_name: tool, tool_input: { command } }), { ...at(0), ...REWRITE });
-      const b = run(dir, payload({ agent_id: id, tool_name: tool, tool_input: { command } }), { ...at(3), ...REWRITE });
-      assert.equal(decisionOf(b), 'deny', command);
-      assert.equal(b.json.hookSpecificOutput.updatedInput, undefined, command);
-    });
-  } finally { cleanup(); }
 });

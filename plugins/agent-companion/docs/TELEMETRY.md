@@ -523,6 +523,13 @@ most about 16 MB is kept. Read with `node scripts/hook-timing.mjs`.
 
 The row is written after both clocks are read, so the write is not in the figures.
 
+Since 0.31.79 the six checks of a Bash or PowerShell call run as worker threads inside the one process
+of `hooks/bash-dispatch.mjs` (README, "Bash hook dispatcher"). Each still writes its own row, named by
+its script (`delegation-guard`, `bash-tail`, `hold-message`, `bash-read`, `poll-guard`,
+`subagent-context`), but `cpu_ms` there is the whole process's CPU so far (`process.cpuUsage()` is not
+per thread), so those rows over-count by the other checks' CPU and `wall_ms` starts at the worker's
+own start. Compare per call (`call`), not per row.
+
 ### `bash-tail.jsonl` — the Bash output tail
 
 Three kinds of row, told apart by `event`. Read with `node scripts/bash-tail-report.mjs`.

@@ -20,6 +20,7 @@ import {
   outOfScope, isServedCall, attendedCoverage, LOCK_MAX_AGE_MS,
 } from '../hooks/lib/delegation.mjs';
 import { acquireLock, releaseLock } from '../hooks/lib/file-lock.mjs';
+import { CHECKS } from '../hooks/bash-dispatch.mjs';
 import { callerIsSubagent, isMainThread } from '../hooks/lib/context.mjs';
 
 const TOOL_INPUT = {
@@ -267,9 +268,15 @@ test('never blocked: delegation, messaging, tool discovery, operator questions, 
   const hooks = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks;
   const entries = hooks.PreToolUse.filter((e) => e.hooks.some((x) => x.args.some((a) => a.endsWith('/hooks/delegation-guard.mjs'))));
   assert.equal(entries.length, 1);
-  const re = new RegExp(entries[0].matcher);
+  // 0.31.79: Bash and PowerShell reach the guard through the bash-dispatch entry (one process for all their PreToolUse checks).
+  const dispatchEntry = hooks.PreToolUse.find((e) => e.hooks.some((x) => x.args.some((a) => a.endsWith('/hooks/bash-dispatch.mjs'))));
+  assert.ok(dispatchEntry && CHECKS.some((c) => c.script === 'delegation-guard.mjs' && c.args.length === 0));
+  const own = new RegExp(entries[0].matcher);
+  const viaDispatch = new RegExp(dispatchEntry.matcher);
+  const re = { test: (t) => own.test(t) || viaDispatch.test(t) };
   for (const t of EXECUTION_TOOLS) assert.ok(re.test(t), `matcher misses ${t}`);
   for (const t of NEVER) assert.equal(re.test(t), false, `matcher would send ${t} to the guard`);
+  assert.equal(own.test('Bash') || own.test('PowerShell'), false, 'a shell call must not start the guard twice');
   const post = hooks.PostToolUse.filter((e) => e.hooks.some((x) => x.args.some((a) => a.endsWith('/hooks/delegation-guard.mjs'))));
   assert.equal(post.length, 1);
   assert.deepEqual(post[0].hooks[0].args.slice(1), ['--event', 'reset']);

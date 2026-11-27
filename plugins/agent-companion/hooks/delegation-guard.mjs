@@ -98,8 +98,7 @@ function instructions({ mode, streak, threshold, tool }) {
   const rungs = rungsByType();
   const head = mode === 'block'
     ? `Delegation guard (delegation_guard: block): this ${tool} call was NOT run. It is main-thread execution-class ` +
-      `call ${streak} in a row with no delegation in between; the threshold is ${threshold} (delegation_threshold). ` +
-      'If it truly belongs on the main thread, send the same call again unchanged and it runs.'
+      `call ${streak} in a row with no delegation in between; the threshold is ${threshold} (delegation_threshold).`
     : `Delegation guard (delegation_guard: warn): that ${tool} call is main-thread execution-class call ${streak} ` +
       `in a row with no delegation in between; the threshold is ${threshold} (delegation_threshold). ` +
       'This guard did not stop the call.';

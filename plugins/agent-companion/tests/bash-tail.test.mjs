@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { makeFixture, runHook, readJsonl, decisionOf, PLUGIN_ROOT } from './helpers.mjs';
+import { CHECKS } from '../hooks/bash-dispatch.mjs';
 import {
   analyze, lex, wrapCommand, shellPath, outputTarget, pruneOldOutputs, modeAllowed,
   readPermissionRules, blockingPermissionRule, WRAPPER_HELPERS,
@@ -404,7 +405,9 @@ test('hook: hooks.json registers it on exactly ^Bash$ and plugin.json declares b
   const hooks = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8')).hooks.PreToolUse;
   const entry = hooks.find((h) => h.matcher === '^(Bash|PowerShell)$');
   assert.ok(entry);
-  assert.ok(entry.hooks[0].args[0].endsWith('hooks/bash-tail.mjs'));
+  // 0.31.79: the Bash and PowerShell hooks run through one entry (hooks/bash-dispatch.mjs), which runs bash-tail among its checks.
+  assert.ok(entry.hooks[0].args[0].endsWith('hooks/bash-dispatch.mjs'));
+  assert.ok(CHECKS.some((c) => c.script === 'bash-tail.mjs' && c.args.length === 0));
   const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).userConfig;
   assert.equal(cfg.bash_tail.default, true);
   assert.equal(cfg.bash_tail_permission_modes.default, 'bypassPermissions');
