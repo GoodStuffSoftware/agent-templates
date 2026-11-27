@@ -2,7 +2,7 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
-## 0.31.78 (unreleased)
+## 0.31.78 — 2026-11-27
 
 - **The struggle notice no longer advises a fresh session (hooks/lib/struggle.mjs).** At xhigh, max or unknown effort it said "or a fresh session with a handoff may help"; lead handoffs were measured as not cost effective (2026-11-14), so it now ends "it is likely a missing fact or rule. Name it and record it where knowledge-routing says." Counts and the effort mention are unchanged; worker handoff notices are untouched. To silence the whole detector today: `struggle_detector` false.
 
