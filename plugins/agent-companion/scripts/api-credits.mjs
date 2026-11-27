@@ -5,7 +5,7 @@
 //   node api-credits.mjs record <category> <usd> <meta> --api-key-source ANTHROPIC_API_KEY [--target <name>]  appends spend; without the flag it is refused (exit 2, nothing booked, a line in api-credits-rejects.jsonl)
 //   node api-credits.mjs status                         spend by category, the pace, what is left, the review limits in force, then billed spend (month and cycle, by workspace, key and model), the booked figure beside it, gaps, credits left (estimate), workspace limits
 //   node api-credits.mjs credits [--json]               used this cycle (billed per workspace and model, booked not yet billed), remaining (Console balance anchor minus billed since), caps
-//   node api-credits.mjs credits anchor <usd> [--date <ISO>]  records the Console balance and its date (agent-companion state); replaces the last anchor
+//   node api-credits.mjs credits anchor <usd> [--date <ISO>] [--target <name>]  records the Console balance and its date for the primary account or a named target (agent-companion state); replaces that account's last anchor
 //   node api-credits.mjs record-fallback <review id> [--reason <r>]  marks a review as redone on the plan (the id api-review.mjs printed)
 //   node api-credits.mjs reviews [--since <ISO date>] [--until <ISO date>]  real reviews only (no probe or measure rows): count, spend, median, stopped or fallen back
 //   node api-credits.mjs summary                        one line: "API credits: reviews $X of the review share of the budget, cycle day N"
@@ -17,7 +17,7 @@
 
 import { isMain } from './lib/is-main.mjs';
 import { CATEGORIES, TargetError, namedTargets, resolveTargets, targetLines, decide, record, recordFallback, reviewStats, reviewSummaryLine, reviewShareLines, status, summaryLine, billingStatusLines } from './lib/api-credits.mjs';
-import { creditsView, creditsLines, readAnchor, writeAnchor } from './lib/api-credits.mjs';
+import { creditsView, creditsLines, readAnchor, readAnchors, writeAnchor } from './lib/api-credits.mjs';
 import { runApi, reviewLimitsLine } from './lib/api-run.mjs';
 import { getBilling, getTargetOrgs, loadSpendConfig } from './lib/api-spend.mjs';
 import { opt } from '../hooks/lib/context.mjs';
@@ -53,7 +53,23 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     // Nothing is fetched for a category that fails closed anyway, and a failed or absent billing source never blocks the decision.
     const b = CATEGORIES.includes(rest[0]) ? await billing() : { ok: false };
     if (targetArg !== null && CATEGORIES.includes(rest[0])) { try { resolveTargets(rest[0], cfg, targetArg); } catch (e) { if (e instanceof TargetError) { out(e.message); return 2; } throw e; } }
-    const d = decide(rest[0], { now, cfg, env, billing: b.ok ? b.snapshot : null, peek, target: targetArg });
+    // 0.31.79: a named target with a balance anchor is gated on its own billing (its org's cost report); fetched only then.
+    const anchors = readAnchors();
+    let targetBilling = {};
+    if (CATEGORIES.includes(rest[0]) && cfg.budgetMode === 'credit') {
+      const want = namedTargets(cfg).filter((t) => anchors[String(t.name).toLowerCase()]);
+      if (want.length) {
+        try {
+          const sub = { ...cfg, targets: Object.fromEntries(Object.entries(cfg.targets || {}).filter(([n, t]) => t.builtin || want.some((w) => w.name === n))) };
+          let tm;
+          const late = new Promise((r) => { tm = setTimeout(() => r([]), billingDeadlineMs); if (tm.unref) tm.unref(); });
+          let orgs;
+          try { orgs = await Promise.race([getTargetOrgs({ now, cfg: sub, env, primary: b, ...(billingFetch ? { fetchImpl: billingFetch } : {}), ...(readKey ? { readKey } : {}) }), late]); } finally { clearTimeout(tm); }
+          for (const g of orgs) if (g.ok && g.snapshot) for (const n of g.targets) targetBilling[n] = g.snapshot;
+        } catch { targetBilling = {}; /* booked spend stands in */ }
+      }
+    }
+    const d = decide(rest[0], { now, cfg, env, billing: b.ok ? b.snapshot : null, peek, target: targetArg, anchors, targetBilling });
     out(d.decision); out(d.reason);
     if (d.target) out(`target: ${d.target}`);
     return 0;
@@ -96,7 +112,7 @@ export async function main(argv, { out = (s) => process.stdout.write(`${s}\n`), 
     out(st.text + limits + share + '\n' + billingStatusLines(b.ok ? b.snapshot : null, { cfg, entries: (st.ledger && st.ledger.entries) || [], now, reason: b.reason || '', cacheAgeMs: b.ok ? b.ageMs : null }).join('\n') + (tl.length ? `\n${tl.join('\n')}` : ''));
     return 0;
   }
-  if (cmd === 'credits') return creditsCommand(rest, { out, now, cfg, env, billing, fetchImpl: billingFetch, readKey });
+  if (cmd === 'credits') return creditsCommand(rest, { out, now, cfg, env, billing, fetchImpl: billingFetch, readKey, targetArg });
   if (cmd === 'summary') { out(summaryLine({ now, cfg })); return 0; }
   if (cmd === 'probe') {
     const r = await runApi({
@@ -129,17 +145,19 @@ async function targetReport({ st, cfg, now, env, b, fetchImpl, readKey }) {
 // `credits [--json]` and `credits anchor <usd> [--date <ISO>]`. The view never fails: without an admin key, or when the Admin API
 // call fails, it prints the ledger-only view with the reason in one line and exits 0. The anchor is the Console balance on a date
 // (the Admin API cannot read the balance); it is stored in the agent-companion state.
-async function creditsCommand(rest, { out, now, cfg, env, billing, fetchImpl, readKey }) {
+async function creditsCommand(rest, { out, now, cfg, env, billing, fetchImpl, readKey, targetArg = null }) {
   if (rest[0] === 'anchor') {
     const di = rest.indexOf('--date');
     const dateRaw = di >= 0 ? rest[di + 1] : null;
     const args = rest.slice(1).filter((_, i) => di < 0 || (i + 1 !== di && i + 1 !== di + 1));
-    if (args.length !== 1 || (di >= 0 && !dateRaw)) { out('usage: api-credits.mjs credits anchor <usd> [--date <ISO date or time>]  (the balance the Console shows on that date)'); return 2; }
+    if (args.length !== 1 || (di >= 0 && !dateRaw)) { out('usage: api-credits.mjs credits anchor <usd> [--date <ISO date or time>] [--target <name>]  (the balance the Console shows on that date, for the primary account or the named target)'); return 2; }
     const asOf = dateRaw === null ? now : (/^\d{4}-\d{2}-\d{2}/.test(dateRaw) ? Date.parse(dateRaw) : NaN);
+    const tgt = targetArg === null ? 'primary' : String(targetArg).toLowerCase();
+    if (!(cfg.targets || { primary: 1 })[tgt]) { out(`unknown target "${String(targetArg).slice(0, 40)}" (known: ${Object.keys(cfg.targets || { primary: 1 }).join(', ')})`); return 2; }
     try {
-      const prev = readAnchor();
-      const a = writeAnchor(args[0], { asOf, now });
-      out(`anchored: Console balance $${a.usd.toFixed(2)} as of ${new Date(a.asOf).toISOString()}${prev ? `; replaced $${prev.usd.toFixed(2)} as of ${new Date(prev.asOf).toISOString().slice(0, 10)}` : ''}`);
+      const prev = readAnchor(undefined, tgt);
+      const a = writeAnchor(args[0], { asOf, now, target: tgt });
+      out(`anchored${tgt === 'primary' ? '' : ` ${tgt}`}: Console balance $${a.usd.toFixed(2)} as of ${new Date(a.asOf).toISOString()}${prev ? `; replaced $${prev.usd.toFixed(2)} as of ${new Date(prev.asOf).toISOString().slice(0, 10)}` : ''}`);
       return 0;
     } catch (e) { out(`anchor failed: ${e.message}`); return 2; }
   }

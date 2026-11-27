@@ -50,7 +50,7 @@ import { requestUnits, modelWeight, weeklyLimitUnits, currentRate, rateLabel } f
 import { currentConfiguredAccount, accountLimitAt, configuredAccounts, accountHistory, accountAt } from './account.mjs';
 
 export const SESSION_BUDGET_DEFAULT_UNITS = 350;
-const CHUNK_BYTES = 8 * 1024 * 1024;
+const CHUNK_BYTES = 4 * 1024 * 1024; // the deadline is checked between chunks, so one big file overruns it by one 4 MB read at most
 export const BUDGET_DEADLINE_MS = 2500;
 const RECENT_KEYS = 64;
 const MAX_FILES = 2000;
@@ -202,7 +202,7 @@ function saveState(sessionId, s) {
     mkdirSync(budgetDir(), { recursive: true });
     const f = stateFileOf(sessionId);
     const tmp = `${f}.${process.pid}.tmp`;
-    const { fresh, ...rest } = s;
+    const { fresh, dirty, ...rest } = s;
     writeFileSync(tmp, JSON.stringify(rest));
     renameSync(tmp, f);
   } catch { /* best effort */ }
@@ -255,10 +255,12 @@ export function scanSession({ sessionId, transcriptPath, deadline, state }) {
   let complete = true;
   for (const p of paths) {
     const key = p === lead ? '(lead)' : relative(dirname(lead), p).replace(/\\/g, '/');
+    if (Date.now() > deadline) { complete = false; break; } // the stat of a thousand files is bounded too
     const f = state.files[key] || (state.files[key] = freshFile());
     let size = -1;
     try { size = statSync(p).size; } catch { continue; }
     if (size === f.off) continue;
+    state.dirty = true; // not saved: saveState drops it. Something to read: the state file is saved (an idle prompt does not rewrite it)
     if (!advanceFile(p, f, deadline, ac)) { complete = false; break; }
   }
   let total = 0;
@@ -360,7 +362,7 @@ export function checkSessionBudget(p, { threshold, now = Date.now(), deadlineMs 
         notify(p.session_id, budgetNoticeText(r.total, rate, r.byAcct || null, now));
       }
     }
-    saveState(p.session_id, state);
+    if (state.dirty || state.fresh || fired || state.level !== prior) saveState(p.session_id, state);
     if (state.fresh) pruneBudgetState(now);
     return { fired, total: r.total, level, complete: r.complete, files: r.files, estTurns: r.estTurns, unpriced: r.unpriced };
   } catch {

@@ -32,8 +32,13 @@ import {
 import { unattendedReason } from '../scripts/lib/usage/surface.mjs';
 import { drainNotices, renderNotices } from './lib/runaway.mjs';
 import { interruptedNotices } from './lib/interrupted-workers.mjs';
-import { checkSessionBudget, SESSION_BUDGET_DEFAULT_UNITS } from './lib/session-budget.mjs';
+import { checkSessionBudget, SESSION_BUDGET_DEFAULT_UNITS, BUDGET_DEADLINE_MS } from './lib/session-budget.mjs';
 
+// One deadline over the whole hook (0.31.79), well inside its 10 s timeout: the scans below stop reading at it and the notices already computed
+// are delivered (a timed-out hook delivers nothing). Env AC_RUNAWAY_DEADLINE_MS sets it for tests.
+const T0 = Date.now();
+const DEADLINE_MS = Number(process.env.AC_RUNAWAY_DEADLINE_MS) > 0 ? Number(process.env.AC_RUNAWAY_DEADLINE_MS) : 4000;
+const DEADLINE = T0 + DEADLINE_MS;
 const EVENTS = new Set(['UserPromptSubmit', 'PostToolUse']);
 // hooks.json registers this script twice on UserPromptSubmit so the release flag cannot be lost to the slow scans: '--watch' runs only the
 // release watch (cheap: small state files), '--no-watch' runs everything else (budget scan, interrupted workers, drain; can reach the hook timeout
@@ -48,8 +53,8 @@ try {
   if (callerIsSubagent(p)) passthrough();
   const event = EVENTS.has(p.hook_event_name) ? p.hook_event_name : null;
   if (!event) passthrough();
-  if (!ONLY_WATCH) try { checkSessionBudget(p, { threshold: opt('session_budget_units', SESSION_BUDGET_DEFAULT_UNITS) }); } catch { /* advisory: never in the way */ }
-  const interrupted = !ONLY_WATCH && event === 'UserPromptSubmit' && opt('interrupted_worker_notice', true) ? interruptedNotices(p) : [];
+  if (!ONLY_WATCH) try { checkSessionBudget(p, { threshold: opt('session_budget_units', SESSION_BUDGET_DEFAULT_UNITS), deadlineMs: Math.max(1, Math.min(BUDGET_DEADLINE_MS, DEADLINE - Date.now())) }); } catch { /* advisory: never in the way */ }
+  const interrupted = !ONLY_WATCH && event === 'UserPromptSubmit' && opt('interrupted_worker_notice', true) ? interruptedNotices(p, { deadline: DEADLINE }) : [];
   // Release watch: the open-flag or hold line on every lead prompt. Only a typed prompt (origin human, proven by the payload or the
   // transcript) stops the hold countdown or lifts a hold; scheduled wakeups, notifications and peer messages never do.
   let watch = null;

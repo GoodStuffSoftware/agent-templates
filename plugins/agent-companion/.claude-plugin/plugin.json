@@ -1,6 +1,6 @@
 {
   "name": "agent-companion",
-  "version": "0.31.78",
+  "version": "0.31.79",
   "description": "Guardrails and calibration for agent teams: keeps the main thread delegating, caps premium-model fan-out, holds agents to a short reporting contract, watches instruction budget, backs up the memory corpus, and detects harness drift.",
   "author": {
     "name": "Good Stuff Software"
@@ -237,8 +237,20 @@
     "api_credits_budget_usd": {
       "type": "number",
       "title": "API credits: monthly budget (USD)",
-      "description": "The plan's monthly Claude Platform API credit, in USD: the figure `api-credits.mjs status` subtracts billed spend from (\"credits left (estimate)\") and the budget `decide` paces. Default 200 = the Ultra plan's monthly credit per Anthropic's API-credits-for-subscribers page (read 2026-11-15; Max is $100, Team $20 or $100 per seat, pooled to at most $500): set your own plan's amount. Spend is paced linearly across the billing cycle, so the credits last the month.",
+      "description": "The plugin's OWN monthly budget for API work, in USD (not an Anthropic cap and not your credit). In budget mode \"fixed\" it gates every account: `decide` paces it across the billing cycle and `api-credits.mjs status` subtracts billed spend from it. In budget mode \"credit\" (the default) it gates only an account that has no balance anchor (`api-credits.mjs credits anchor <usd>`); an anchored account is gated on its remaining Console credit minus api_credits_reserve_usd instead. Default 200 = the Ultra plan's monthly credit per Anthropic's API-credits-for-subscribers page (read 2026-11-15; Max is $100, Team $20 or $100 per seat, pooled to at most $500): set your own plan's amount.",
       "default": 200
+    },
+    "api_credits_budget_mode": {
+      "type": "string",
+      "title": "API credits: what gates API work (credit or fixed)",
+      "description": "\"credit\" (default): an account with a balance anchor (`api-credits.mjs credits anchor <usd>`, for the primary and with --target <name> for each api_targets entry) runs API work while its remaining credit (anchor minus billed spend since the anchor date) stays above api_credits_reserve_usd; the plugin's own budgets do not stop it. An account with no anchor keeps the fixed budget. \"fixed\": the plugin's own budgets (api_credits_budget_usd pacing, workspace limits) gate every account and anchors only inform. Any other value reads as credit.",
+      "default": "credit"
+    },
+    "api_credits_reserve_usd": {
+      "type": "number",
+      "title": "API credits: reserve kept back in credit mode (USD)",
+      "description": "In budget mode \"credit\", API work stops (falls back to the plan) when an anchored account has less than this much credit left, so a run is never started on an empty balance. Default 5.",
+      "default": 5
     },
     "api_credits_cycle_day": {
       "type": "number",
@@ -291,7 +303,7 @@
     "api_credits_workspace_limits": {
       "type": "string",
       "title": "API credits: monthly spend limit per workspace (USD)",
-      "description": "name=usd pairs (a workspace name or wrkspc_ id), e.g. \"reviewers=100,workers=60\". The Console's workspace spend limits cannot be read back through the API, so keep this map in step with them by hand. api-credits.mjs status shows each workspace's billed spend this calendar month against its limit, and decide answers plan for a category whose workspace is at or over its limit (billed plus booked-but-unreported spend). Default empty: no limit is enforced.",
+      "description": "name=usd pairs (a workspace name or wrkspc_ id), e.g. \"reviewers=100,workers=60!\". The Console's workspace spend limits cannot be read back through the API, so keep this map in step with them by hand. api-credits.mjs status shows each workspace's billed spend this calendar month against its limit. In budget mode \"fixed\" decide answers plan for a category whose workspace is at or over its limit (billed plus booked-but-unreported spend). In budget mode \"credit\" (the default) a plain limit is advisory and does not stop work while credit remains, but only for an account that has a balance anchor (credits anchor); an account without one enforces it as in fixed mode; add ! after the amount (workers=60!) to mirror a real Console limit you want enforced. A real Anthropic spend-limit rejection always falls back to the plan. Default empty: no limit is enforced.",
       "default": ""
     },
     "api_credits_category_workspaces": {
@@ -322,13 +334,13 @@
       "type": "number",
       "title": "API reviews: soft spend note of one review (USD)",
       "description": "A review on the API credits that has spent this much gets a note (stderr, the review-path label, the ledger entry and a long-runs.jsonl row the scout lists) and goes on; nothing is stopped. Used by both engines. Measured over 29 real reviews (2026-11-03 to 11-07): median $0.52, p90 $0.96, max $1.00. It must stay below api_review_hard_usd: a value at or above an active hard stop is clamped to half of it, and the review says so once. Default 1.00.",
-      "default": 1.0
+      "default": 1
     },
     "api_review_hard_usd": {
       "type": "number",
       "title": "API reviews: hard spend backstop of one review (USD, 0 = none)",
       "description": "Reviews on the API credits have soft limits: a note at 8 minutes (logged to long-runs.jsonl) and at api_review_soft_usd of spend (listed by the scout), and the review goes on. Only a hung review (no message or tool result for 10 minutes) and this backstop stop one: a review that has spent this much without finishing is ended (fetch: its next turn is the last; sdk: aborted, and falls back to the plan reviewer) (a client-side estimate; each turn is booked in the ledger as it completes). Measured real reviews cost a median $0.52 and at most $1.00, so $2.00 means a runaway (the earlier $0.50 cut off 7 of 29 reviews and wasted their spend). 0 disables the backstop. --max-usd overrides it for one review.",
-      "default": 2.0
+      "default": 2
     },
     "api_admin_key_source": {
       "type": "string",
@@ -339,7 +351,7 @@
     "api_targets": {
       "type": "string",
       "title": "API targets: named keys (and workspaces) work can be sent to",
-      "description": "JSON object naming extra API targets: {\"name\":{\"key\":\"bws:<secret>\" or \"env:<NAME>\",\"workspace\":\"<workspace id, optional>\",\"admin\":\"<Admin API key source, optional>\",\"budget\":<USD, optional>}}. Names are a-z, 0-9, _ and -; \"primary\" is built in (api_credits_key_source) and cannot be redefined. Each target has its own breaker and budget lane, and every booked run records its target; status, credits and the cost report list them grouped by organization id, and a target whose admin key is missing or failing shows \"no cost data\". A job can name a target with `--target <name>` (api-review.mjs, api-worker.mjs) or the brief line `API: target=<name>`. Key values are read in-process only. Empty (default) = no extra targets and behaviour is unchanged.",
+      "description": "JSON object naming extra API targets: {\"name\":{\"key\":\"bws:<secret>\" or \"env:<NAME>\",\"workspace\":\"<workspace id, optional>\",\"admin\":\"<Admin API key source, optional>\",\"budget\":<USD, optional>}}. Names are a-z, 0-9, _ and -; \"primary\" is built in (api_credits_key_source) and cannot be redefined. Each target has its own breaker and budget lane, and every booked run records its target; status, credits and the cost report list them grouped by organization id, and a target whose admin key is missing or failing shows \"no cost data\". A job can name a target with `--target <name>` (api-review.mjs, api-worker.mjs) or the brief line `API: target=<name>`. Key values are read in-process only. In budget mode \"credit\" an anchored target (`credits anchor <usd> --target <name>`) is gated on its remaining credit minus api_credits_reserve_usd, and its budget field applies only without an anchor. Empty (default) = no extra targets and behaviour is unchanged.",
       "default": ""
     },
     "api_category_targets": {
@@ -742,7 +754,8 @@
       "type": "string",
       "title": "Publication-leak sweep: private token file",
       "description": "Path to a private token file (same format as LEAK_CHECK_TOKEN_FILE: one name per line, `prefix: xyz` for a prefix) fed into EVERY sweep scan — universal, applies regardless of a repo's strict status. Default: ~/.claude/agent-companion/leak-tokens.txt, used automatically IF that file exists; set this only to point elsewhere. The file must live outside any repo the sweep scans (the same rule scripts/leak-check.mjs's own --token-file enforces).",
-      "default": ""    },
+      "default": ""
+    },
     "bash_tail": {
       "type": "boolean",
       "title": "Bash output tail",
@@ -1097,6 +1110,12 @@
       "description": "What the worker one-wait hook does with a subagent's sleep, poll or watch loop in Bash or PowerShell. \"deny-repeat\" (default): the first match gets the hint; a repeat by the same agent in the same session within worker_wait_repeat_window_minutes of its previous match is refused, and the refusal names the sanctioned wait (one run_in_background command, node scripts/pr-wait.mjs for a PR or CI run, a background gh run watch for a main-branch run); after the window the hint is given again. \"hint\": the hint once per worker, never a refusal. \"off\": the hook does nothing for workers (no hint, no refusal, no telemetry row). Refusals are logged to denials.jsonl; every match to worker-wait.jsonl. Commands run with run_in_background, and pr-wait.mjs itself, are never matched. Needs worker_wait_advisory on.",
       "default": "deny-repeat"
     },
+    "worker_wait_rewrite": {
+      "type": "boolean",
+      "title": "Worker one-wait guard: run a repeat wait in the background",
+      "description": "With worker_wait_guard deny-repeat: a subagent's repeat sleep, poll or watch loop in Bash is not refused but run as the sanctioned one-wait form (run_in_background, with the loop cap) and the agent is told in one line. Only bash-tail.mjs rewrites the call. PowerShell, a command the resource gate, a long-runner wrap or the worktree-remove rewrite would change, and a command a deny or ask rule in your settings matches keep the refusal. Off: every repeat is refused. Needs worker_wait_advisory on.",
+      "default": true
+    },
     "worker_wait_repeat_window_minutes": {
       "type": "number",
       "title": "Worker one-wait guard: repeat window (minutes)",
@@ -1277,7 +1296,6 @@
       "description": "On (default): the daily checkup runs the usage analysis stage (scripts/usage-analysis.mjs, zero model calls) and the SessionStart hook shows its 3-line summary once, and again only when the set of regressions changes. Off: neither the stage nor the summary runs.",
       "default": true
     },
-
     "usage_analysis_report_dir": {
       "type": "string",
       "title": "Daily usage analysis: report directory",

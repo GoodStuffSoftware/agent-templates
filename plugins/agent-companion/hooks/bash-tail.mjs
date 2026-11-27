@@ -49,24 +49,17 @@
 // step writes `worktree-remove-denied` and `worktree-remove-rewritten` rows to the same stream
 // (tool, command_chars, count; no mode or classes).
 
-import { readStdin, opt, passthrough, noteAgentType, appendLog, telemetryDir, callerIsSubagent, isFixtureSession, claudeDir, homeRoot, writeAndExit } from './lib/context.mjs';
-import { homedir } from 'node:os';
+import { isReviewerSession, recordDenial, readStdin, opt, passthrough, noteAgentType, appendLog, telemetryDir, callerIsSubagent, isFixtureSession, writeAndExit } from './lib/context.mjs';
 import { isServedCall } from './lib/delegation.mjs';
 import {
   analyze, wrapCommand, outputTarget, pruneOldOutputs, modeAllowed, shellPath, TELEMETRY_STREAM,
-  readPermissionRules, blockingPermissionRule,
 } from './lib/bash-tail.mjs';
 import { diffCapTarget, diffCapWrap } from './lib/diff-cap.mjs';
 import { worktreeRemoveDecision } from './lib/worktree-remove.mjs';
-import { waitCapRewrite } from './lib/wait-cap.mjs';
+import { waitCapRewrite, WAIT_REWRITE_NOTE } from './lib/wait-cap.mjs';
+import { tailWaitApplies, tailRewritesWait, tailStampKey, windowMinutesOpt, permissionHit } from './lib/worker-wait-rewrite.mjs';
+import { readStamp, writeStamp } from './lib/subagent-context.mjs';
 import { gateDecision, gateMode, DEFAULT_GATE_MODE, TELEMETRY_STREAM as GATE_STREAM } from './lib/resource-gate.mjs';
-
-// Enterprise-managed settings, where Claude Code reads them.
-function managedSettingsPaths() {
-  if (process.platform === 'win32') return ['C:/Program Files/ClaudeCode/managed-settings.json'];
-  if (process.platform === 'darwin') return ['/Library/Application Support/ClaudeCode/managed-settings.json'];
-  return ['/etc/claude-code/managed-settings.json'];
-}
 
 function row(p, extra) {
   appendLog(TELEMETRY_STREAM, {
@@ -88,22 +81,10 @@ function gateRow(p, extra) {
   });
 }
 
-// Deny and ask rules from settings (every mode), read once per call, matched
-// against the text that would run.
-function permissionHit(p, command) {
-  const managed = homeRoot() === homedir() ? managedSettingsPaths() : [];
-  return blockingPermissionRule(readPermissionRules({
-    cwd: typeof p.cwd === 'string' && p.cwd ? p.cwd : process.cwd(),
-    claudeDirPath: claudeDir(),
-    projectDir: process.env.CLAUDE_PROJECT_DIR,
-    managedPaths: managed,
-    stopAt: homeRoot(),
-  }), command);
-}
-
 let input = null;
 let gateCommand = null; // the command after step 1, when the gate rewrote it
 let origCommand = null; // the caller's command, when step 0 rewrote it (steps 1 and 2 then see the rewritten text)
+let bgRewrite = false; // step 0a made the call a background command (the worker one-wait rewrite)
 let gateText = null; // additionalContext from step 1 (hint mode, rewrite note)
 
 // What the call becomes once the tail step is done (or skipped): the gate's
@@ -112,6 +93,7 @@ function finish(command, extra = {}) {
   const out = { hookEventName: 'PreToolUse' };
   const cmd = command ?? gateCommand ?? (origCommand ? input.command : null);
   if (cmd && input && cmd !== (origCommand ?? input.command)) out.updatedInput = { ...input, command: cmd };
+  if (bgRewrite) out.updatedInput = { ...input, command: cmd ?? input.command, run_in_background: true };
   if (gateText) out.additionalContext = gateText;
   if (!out.updatedInput && !out.additionalContext) passthrough();
   Object.assign(out, extra);
@@ -150,6 +132,30 @@ try {
       }
     }
   } catch { /* fails open: the command runs as written */ }
+
+  // ---- step 0a: worker one-wait rewrite (0.31.79) ------------------------------------------
+  // A subagent's REPEAT foreground sleep / poll / watch loop (same window and session rule as poll-guard.mjs's deny-repeat) runs as
+  // the sanctioned one-wait form, a background command that notifies on finish, instead of being refused. poll-guard.mjs
+  // leaves such a call alone; any command this hook rewrites for another reason (heavy, a long-runner, worktree remove) keeps
+  // poll-guard's refusal. Own stamp, so it does not race poll-guard's. Bash only; option worker_wait_rewrite (default true).
+  try {
+    if (tailWaitApplies(p, isPs)) {
+      const key = tailStampKey(p);
+      const fake = Date.parse(process.env.AGENT_COMPANION_FAKE_NOW || '');
+      const now = Number.isFinite(fake) ? fake : Date.now();
+      const prev = readStamp(key);
+      writeStamp(key, { s: String(p.session_id ?? ''), t: now });
+      // The same predicate poll-guard.mjs uses to stand down (lib/worker-wait-rewrite.mjs): the two cannot disagree.
+      if (tailRewritesWait(p, { isPs, prev, nowMs: now })) {
+        const windowMinutes = windowMinutesOpt();
+        gateRow(p, { event: 'worker-wait-rewritten', tool: p.tool_name, command_chars: input.command.length });
+        recordDenial('worker-wait', p, 'repeat wait within ' + windowMinutes + ' min, run in the background', 'rewrite');
+        bgRewrite = true;
+        input = { ...input, run_in_background: true };
+        gateText = WAIT_REWRITE_NOTE;
+      }
+    }
+  } catch { /* fails open: poll-guard's refusal applies instead */ }
 
   // ---- step 0b: wait-loop cap (hooks/lib/wait-cap.mjs) ------------------------------------
   // A BACKGROUND Bash command with an unbounded `until/while ... sleep ...` loop gets a $SECONDS deadline in the

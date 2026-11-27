@@ -4,7 +4,7 @@
 // tests/worker-wait.test.mjs and tests/worker-wait-review.test.mjs.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeFixture, runHook, readJsonl, PLUGIN_ROOT } from './helpers.mjs';
 import {
@@ -26,7 +26,7 @@ function payload(extra = {}) {
 }
 function run(dir, p, env = {}) {
   return runHook('hooks/poll-guard.mjs', p, {
-    env: { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), ...env },
+    env: { CLAUDE_PLUGIN_OPTION_WORKER_WAIT_REWRITE: '0', CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), ...env },
   });
 }
 const tel = (dir, name) => readJsonl(join(dir, '.claude', 'agent-companion', 'telemetry', name));
@@ -196,4 +196,75 @@ test('the options exist in plugin.json with the documented defaults', () => {
   assert.equal(cfg.worker_wait_guard.default, 'deny-repeat');
   assert.equal(cfg.worker_wait_repeat_window_minutes.default, WORKER_WAIT_WINDOW_MINUTES);
   assert.equal(cfg.worker_wait_repeat_window_minutes.type, 'number');
+});
+
+// 0.31.79: a repeat Bash wait is rewritten to the sanctioned background form instead of refused. bash-tail.mjs does the
+// rewrite (the one hook that rewrites shell calls); poll-guard.mjs only stays out of the way.
+const REWRITE = { CLAUDE_PLUGIN_OPTION_WORKER_WAIT_REWRITE: '1' };
+function both(dir, p, env) {
+  const e = { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), ...env };
+  return { tail: runHook('hooks/bash-tail.mjs', p, { env: e }), poll: runHook('hooks/poll-guard.mjs', p, { env: e }) };
+}
+test('rewrite: a repeat Bash wait runs in the background (updatedInput from bash-tail), poll-guard does not deny, and it is logged as a rewrite', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const first = both(dir, payload({ agent_id: 'g-rw' }), { ...at(0), ...REWRITE });
+    assert.equal(first.tail.json?.hookSpecificOutput?.updatedInput, undefined, 'the first match is still only a hint');
+    const b = both(dir, payload({ agent_id: 'g-rw' }), { ...at(5), ...REWRITE });
+    assert.equal(decisionOf(b.poll), undefined);
+    assert.equal(b.poll.json?.hookSpecificOutput?.updatedInput, undefined, 'only bash-tail returns updatedInput');
+    const u = b.tail.json.hookSpecificOutput.updatedInput;
+    assert.equal(u.run_in_background, true);
+    assert.match(u.command, /gh pr checks 31/);
+    assert.match(u.command, /wait-cap|SECONDS/, 'the loop cap applies to the background loop');
+    assert.match(ctxOf(b.tail), /background command/);
+    assert.deepEqual(denialsOf(dir).map((d) => d.outcome), ['rewrite']);
+  } finally { cleanup(); }
+});
+
+test('rewrite: still denied for PowerShell, for a heavy command and for a command bash-tail rewrites', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const cases = [
+      ['PowerShell', 'while ($true) { Start-Sleep 20 }'],
+      ['Bash', 'npm test; until gh pr checks 31; do sleep 20; done'],
+      ['Bash', 'git worktree remove x; sleep 30'],
+    ];
+    cases.forEach(([tool, command], i) => {
+      const id = 'g-keep' + i;
+      both(dir, payload({ agent_id: id, tool_name: tool, tool_input: { command } }), { ...at(0), ...REWRITE });
+      const b = both(dir, payload({ agent_id: id, tool_name: tool, tool_input: { command } }), { ...at(3), ...REWRITE });
+      assert.equal(decisionOf(b.poll), 'deny', command);
+      assert.notEqual(b.tail.json?.hookSpecificOutput?.updatedInput?.run_in_background, true, command);
+    });
+  } finally { cleanup(); }
+});
+
+// Review fix: poll-guard stands down only when bash-tail will rewrite. A deny or ask rule that matches the command makes
+// bash-tail leave the call alone, so poll-guard must keep its refusal (before the fix neither hook acted).
+test('rewrite: a deny rule matching the wait keeps poll-guard\'s refusal; without the rule poll-guard stands down and bash-tail rewrites', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const sleepPayload = (id) => payload({ agent_id: id, tool_input: { command: 'sleep 30' } });
+    for (const withRule of [false, true]) {
+      const id = 'g-perm' + (withRule ? '1' : '0');
+      mkdirSync(join(dir, '.claude'), { recursive: true });
+      writeFileSync(join(dir, '.claude', 'settings.json'), JSON.stringify(withRule ? { permissions: { deny: ['Bash(sleep:*)'] } } : {}));
+      both(dir, sleepPayload(id), { ...at(0), ...REWRITE });
+      const b = both(dir, sleepPayload(id), { ...at(3), ...REWRITE });
+      if (withRule) {
+        assert.equal(decisionOf(b.poll), 'deny', 'poll-guard keeps the refusal');
+        assert.notEqual(b.tail.json?.hookSpecificOutput?.updatedInput?.run_in_background, true);
+      } else {
+        assert.equal(decisionOf(b.poll), undefined, 'poll-guard stands down');
+        assert.equal(b.tail.json.hookSpecificOutput.updatedInput.run_in_background, true);
+      }
+    }
+  } finally { cleanup(); }
+});
+
+test('rewrite: worker_wait_rewrite is declared in plugin.json (default true)', () => {
+  const cfg = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).userConfig;
+  assert.equal(cfg.worker_wait_rewrite.type, 'boolean');
+  assert.equal(cfg.worker_wait_rewrite.default, true);
 });

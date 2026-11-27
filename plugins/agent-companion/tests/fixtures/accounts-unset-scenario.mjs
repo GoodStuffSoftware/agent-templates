@@ -40,7 +40,7 @@ export async function scenario(pluginRoot) {
     const bstate = { files: {} };
     const r = sb.scanSession({ sessionId: 'sess-fake-1', transcriptPath: lead, deadline: Date.now() + 60000, state: bstate });
     const notice = sb.budgetNoticeText(r.total);
-    return { written: out.written, history: strip(history), state: strip(state), budget: strip(JSON.stringify({ r, bstate })), notice };
+    return { written: out.written, history: strip(history), state: strip(state), budget: strip(JSON.stringify({ r, bstate: (({ dirty, ...rest }) => rest)(bstate) })), notice };
   } finally {
     if (savedOpt === undefined) delete process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS; else process.env.CLAUDE_PLUGIN_OPTION_CLAUDE_ACCOUNTS = savedOpt;
     fx.cleanup();

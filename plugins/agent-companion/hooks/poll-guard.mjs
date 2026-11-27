@@ -129,6 +129,18 @@ try {
     if (d.action === 'silent') finish(null);
     const root = process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL('..', import.meta.url));
     if (d.action === 'deny') {
+      // A repeat wait on Bash is not refused: it is run as the one sanctioned wait (run_in_background), so the agent
+      // spends no round trip on a retry. Anything the rewrite cannot do safely falls through to the refusal below.
+      // bash-tail.mjs is the one hook that rewrites shell calls (one rewrite per call survives), so it does this rewrite; this
+      // hook just stays out of the way. A command bash-tail rewrites for another reason keeps the refusal below.
+      // The decision is lib/worker-wait-rewrite.mjs's, the same one bash-tail.mjs acts on (a dynamic import: it loads the
+      // resource gate and the tail wrapper, needed only on this rare path). Residual case: bash-tail crashing or timing out
+      // after this hook stood down cannot be seen from here; the wait then runs in the foreground.
+      if (toolName === 'Bash' && opt('worker_wait_rewrite', true)) {
+        let rewrites = false;
+        try { rewrites = (await import('./lib/worker-wait-rewrite.mjs')).tailWillRewriteWait(p, now); } catch { /* fail closed: keep the refusal */ }
+        if (rewrites) finish(null);
+      }
       const text = workerWaitDenyText(root, windowMinutes);
       recordDenial('worker-wait', p, `${hit.kind} repeat within ${windowMinutes} min of the one-wait notice`);
       deny(text);

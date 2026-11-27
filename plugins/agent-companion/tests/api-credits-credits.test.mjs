@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DEFAULT_SHARES, record, readAnchor, anchorPath, creditsView } from '../scripts/lib/api-credits.mjs';
+import { billingStatusLines, DEFAULT_SHARES, record, readAnchor, anchorPath, creditsView, decide, loadConfig, recordFailure, DEFAULT_BUDGET_MODE, DEFAULT_RESERVE_USD } from '../scripts/lib/api-credits.mjs';
 import { makeFixture } from './helpers.mjs';
 import { main } from '../scripts/api-credits.mjs';
 
@@ -216,3 +216,135 @@ test('creditsView: pure, ledger unreadable is a warning, not a throw', () => {
   assert.equal(v.source, 'ledger-only');
   assert.ok(v.warnings.some((w) => /ledger is unreadable/.test(w)));
 });
+
+// --- 0.31.79 credit-mode gate: decide() on the remaining Console credit minus the reserve ---------------------------------
+const GENV = { AC_API_KEY: 'present', AC_KEY_A: 'present' };
+const GNOW = T('2026-11-10T12:00:00Z');
+const CCFG = { ...CFG, budgetMode: 'credit', reserveUsd: 5, workspaceLimits: {}, workspaceLimitHard: {} };
+const anchorAt = (usd) => ({ usd, asOf: T('2026-11-01T00:00:00Z'), setAt: T('2026-11-01T00:00:00Z') });
+const anchorOf = (usd, extra = {}) => ({ primary: anchorAt(usd), ...extra });
+const gpath = (fx) => join(fx.dir, 'gate-ledger.json');
+const gate = (fx, { cfg = CCFG, anchors = anchorOf(100), cat = 'review', target = null } = {}) =>
+  decide(cat, { now: GNOW, cfg, anchors, billing: null, path: gpath(fx), env: GENV, target });
+const gbook = (fx, usd, cfg = CCFG, target = null) => record('review', usd, 'item', { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-11-05T09:00:00Z'), cfg, path: gpath(fx), target });
+
+test('gate: credit left above the reserve answers api, even when the fixed budget would be spent', withFixture(async (fx) => {
+  gbook(fx, 120); // past the fixed $200 budget's pace cap, but $380 of the $500 balance remains
+  const d = gate(fx, { anchors: anchorOf(500) });
+  assert.equal(d.decision, 'api', d.reason);
+  assert.match(d.reason, /credit left of the \$500\.00 Console balance/);
+}));
+
+test('gate: spent down to the reserve answers plan with the top-up hint', withFixture(async (fx) => {
+  gbook(fx, 96); // 100 - 96 = 4, below the $5 reserve
+  const d = gate(fx);
+  assert.equal(d.decision, 'plan');
+  assert.match(d.reason, /credit: .*minus the \$5\.00 reserve/);
+  assert.match(d.reason, /credits anchor/);
+}));
+
+test('gate: no anchor keeps the fixed budget', withFixture(async (fx) => {
+  const d = gate(fx, { anchors: {} });
+  assert.equal(d.decision, 'api');
+  assert.doesNotMatch(d.reason, /Console balance/);
+  gbook(fx, 1000); // fixed budget blown
+  const e = gate(fx, { anchors: {} });
+  assert.equal(e.decision, 'plan');
+  assert.match(e.reason, /balance: |pace: /);
+}));
+
+test('gate: a "!" workspace limit is enforced in credit mode', withFixture(async (fx) => {
+  const cfg = { ...CCFG, workspaceLimits: { reviewers: 10 }, workspaceLimitHard: { reviewers: true } };
+  gbook(fx, 12, cfg);
+  const d = gate(fx, { cfg, anchors: anchorOf(500) });
+  assert.equal(d.decision, 'plan');
+  assert.match(d.reason, /workspace limit: reviewers .*enforced, set with !/);
+}));
+
+test('gate: a plain workspace limit in credit mode does not stop work and is noted as advisory', withFixture(async (fx) => {
+  const cfg = { ...CCFG, workspaceLimits: { reviewers: 10 }, workspaceLimitHard: {} };
+  gbook(fx, 12, cfg);
+  const d = gate(fx, { cfg, anchors: anchorOf(500) });
+  assert.equal(d.decision, 'api', d.reason);
+  assert.match(d.reason, /advisory in credit mode/);
+}));
+
+test('gate: fixed mode ignores the anchor and gates on the fixed budget', withFixture(async (fx) => {
+  const cfg = { ...CCFG, budgetMode: 'fixed' };
+  gbook(fx, 1000, cfg);
+  const d = gate(fx, { cfg, anchors: anchorOf(5000) });
+  assert.equal(d.decision, 'plan');
+  assert.doesNotMatch(d.reason, /Console balance/);
+}));
+
+test('gate: a named target gates on its own anchor, and failover moves on when the primary credit is spent', withFixture(async (fx) => {
+  const cfg = { ...CCFG, targets: { primary: { name: 'primary', keySource: 'env:AC_API_KEY', builtin: true }, spare: { name: 'spare', keySource: 'env:AC_KEY_A', workspace: '', admin: '' } }, categoryTargets: { review: ['primary', 'spare'] } };
+  gbook(fx, 96, cfg); // primary down to $4 of $100: below the reserve
+  const anchors = anchorOf(100, { spare: anchorAt(50) });
+  const d = gate(fx, { cfg, anchors });
+  assert.equal(d.decision, 'api', d.reason);
+  assert.equal(d.target, 'spare');
+  assert.match(d.reason, /\$50\.00 Console balance/);
+  gbook(fx, 47, cfg, 'spare'); // spare down to $3
+  const e = gate(fx, { cfg, anchors, target: 'spare' });
+  assert.equal(e.decision, 'plan');
+  assert.match(e.reason, /target spare: credit: /);
+}));
+
+test('gate: a real spend-limit rejection (breaker tripped) falls back to the plan even with credit left', withFixture(async (fx) => {
+  assert.equal(gate(fx, { anchors: anchorOf(500) }).decision, 'api');
+  recordFailure('HTTP 400: You have reached your specified workspace API usage limits', { now: GNOW, cfg: CCFG, path: gpath(fx), hard: true });
+  const d = gate(fx, { anchors: anchorOf(500) });
+  assert.equal(d.decision, 'plan');
+  assert.match(d.reason, /API runs failed/);
+}));
+
+test('default: a real install with no mode set (normal option path) gets credit mode and the $5 reserve, and the gate uses it', withFixture(async (fx) => {
+  assert.equal(DEFAULT_BUDGET_MODE, 'credit');
+  assert.equal(DEFAULT_RESERVE_USD, 5);
+  const cfg = loadConfig(); // the real option reader, nothing set
+  assert.equal(cfg.budgetMode, 'credit');
+  assert.equal(cfg.reserveUsd, 5);
+  assert.equal(loadConfig((k, d) => (k === 'api_credits_budget_mode' ? 'fixed' : d)).budgetMode, 'fixed');
+  assert.equal(loadConfig((k, d) => (k === 'api_credits_budget_mode' ? 'bogus' : d)).budgetMode, 'credit');
+  // decide() with no cfg argument builds the same default: fixed budget blown, anchored credit left -> api on credit
+  record('review', 1000, 'big', { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-11-05T09:00:00Z'), path: gpath(fx) });
+  const d = decide('review', { now: GNOW, anchors: anchorOf(5000), path: gpath(fx), env: GENV });
+  assert.equal(d.decision, 'api', d.reason);
+  assert.match(d.reason, /Console balance/);
+}));
+
+test('manifest: plugin.json declares mode default credit and reserve default 5', () => {
+  const m = JSON.parse(readFileSync(new URL('../.claude-plugin/plugin.json', import.meta.url), 'utf8')).userConfig;
+  assert.equal(m.api_credits_budget_mode.default, 'credit');
+  assert.equal(m.api_credits_reserve_usd.default, 5);
+});
+
+// --- 0.31.79 review fixes ----------------------------------------------------------------------------------------------
+test('gate: a plain workspace limit is enforced for an account with no anchor, even in credit mode', withFixture(async (fx) => {
+  const cfg = { ...CCFG, workspaceLimits: { reviewers: 10 }, workspaceLimitHard: {} };
+  gbook(fx, 12, cfg);
+  const d = gate(fx, { cfg, anchors: {} });
+  assert.equal(d.decision, 'plan', d.reason);
+  assert.match(d.reason, /workspace limit: reviewers/);
+}));
+
+test('status: a plain limit over its amount reads enforced without an anchor, advisory with one', () => {
+  const cfg = { ...CCFG, workspaceLimits: { reviewers: 10 }, workspaceLimitHard: {} };
+  const snap = { through: T('2026-11-10T00:00:00Z'), from: T('2026-11-01T00:00:00Z'), cost: [{ day: '2026-11-02', ws: WS_A, model: 'm', usd: 12 }], usage: null, hourly: null, hourlyFrom: null, workspaces: { [WS_A]: 'reviewers' }, keys: {}, missing: [] };
+  const none = billingStatusLines(snap, { cfg, entries: [], anchors: {}, now: GNOW }).join('\n');
+  assert.match(none, /AT OR OVER LIMIT/);
+  const withAnchor = billingStatusLines(snap, { cfg, entries: [], anchors: anchorOf(500), now: GNOW }).join('\n');
+  assert.match(withAnchor, /advisory/);
+});
+
+test('gate: an anchor before the billing window answers plan with a re-anchor hint', withFixture(async (fx) => {
+  const anchors = { primary: { usd: 100, asOf: T('2026-10-20T00:00:00Z'), setAt: T('2026-10-20T00:00:00Z') } };
+  const snap = { through: T('2026-11-10T00:00:00Z'), from: T('2026-11-01T00:00:00Z'), cost: [], usage: null, hourly: null, hourlyFrom: null, workspaces: {}, keys: {}, missing: [] };
+  const d = decide('review', { now: GNOW, cfg: CCFG, anchors, billing: snap, path: gpath(fx), env: GENV });
+  assert.equal(d.decision, 'plan', d.reason);
+  assert.match(d.reason, /before the billing window/);
+  assert.match(d.reason, /credits anchor/);
+  const ok = decide('review', { now: GNOW, cfg: CCFG, anchors: anchorOf(100), billing: snap, path: gpath(fx), env: GENV });
+  assert.equal(ok.decision, 'api', ok.reason);
+}));
