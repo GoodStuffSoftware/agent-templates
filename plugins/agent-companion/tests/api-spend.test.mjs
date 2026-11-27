@@ -60,7 +60,7 @@ test('line: reviewers and total spend this cycle, cents to dollars, default work
   record('review', 12.34, 't', { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
   const r = await run(s, p);
   assert.equal(r.ok, true);
-  assert.equal(r.line, 'API credits: reviewers $12.34 of $100 · total $17.34 of $200 · cycle day 10');
+  assert.equal(r.line, "API credits: reviewers $12.34 of $100 · primary account total $17.34 of the plugin's own $200 budget (a pacing figure, not an Anthropic cap) · cycle day 10");
   assert.deepEqual(r.notify, []);
   const c = s.calls.find((x) => x.url.includes('cost_report'));
   assert.match(c.url, /starting_at=2026-11-01T00%3A00%3A00.000Z/);
@@ -91,7 +91,7 @@ test('first day of the cycle: no completed day yet, no cost call, zero spend', a
   const p = tmp();
   const s = stub();
   const r = await run(s, { ...p, o: { now: T('2026-11-01T09:00:00Z') } });
-  assert.equal(r.line, 'API credits: reviewers $0 of $100 · total $0 of $200 · cycle day 1');
+  assert.equal(r.line, "API credits: reviewers $0 of $100 · primary account total $0 of the plugin's own $200 budget (a pacing figure, not an Anthropic cap) · cycle day 1");
   assert.equal(s.calls.some((x) => x.url.includes('cost_report')), false);
 });
 
@@ -146,7 +146,7 @@ test('unexplained spend: reviewers beyond the ledger by more than max($1, 10%)',
   const p = tmp();
   record('review', 20, 't', { apiKeySource: 'ANTHROPIC_API_KEY', now: T('2026-11-05T00:00:00Z'), cfg: CFG, path: p.ledger });
   const r = await run(stub({ cents: { [REV]: 5200 } }), p);
-  assert.equal(r.line, 'API credits: reviewers $52 of $100 · total $52 of $200 · cycle day 10 · unexplained $32');
+  assert.equal(r.line, "API credits: reviewers $52 of $100 · primary account total $52 of the plugin's own $200 budget (a pacing figure, not an Anthropic cap) · cycle day 10 · unexplained $32");
   assert.deepEqual(r.notify.map((n) => n.id).sort(), ['reviewers-50', 'unexplained']);
   const u = r.notify.find((n) => n.id === 'unexplained');
   assert.match(u.message, /\$32\.00/);
@@ -472,7 +472,7 @@ test('status lines: billed month and cycle by workspace, key and model, booked b
   assert.match(text, /by workspace: reviewers \$25\.00 of \$50\.00 limit \(50%\), workers \$3\.00, default \$1\.00/);
   assert.match(text, /by model: sonnet-5-5 \$23\.00, haiku-5-5 \$6\.00/);
   assert.match(text, /by key \(tokens; est = list price\): review-key 0\.01M tokens, est \$/);
-  assert.match(text, /credits left \(estimate\) = monthly plan credit \$200 - billed this cycle \$29\.00 = \$171\.00/);
+  assert.match(text, /primary account credit: no balance anchor; gated by the plugin.s own fixed budget \$200/);
   assert.match(text, /workspace limits \(calendar month, billed\): reviewers \$25\.00 of \$50\.00 \(50%\)/);
   assert.match(text, /gaps: none/);
   assert.ok(!/GAP/.test(text));
@@ -520,7 +520,7 @@ test('CLI: decide and status use the Admin API; without a key they fall back and
     assert.equal(s.calls.length, calls, 'status reuses the cache of decide');
     const text = st.join('\n');
     assert.match(text, /billing \(Admin API, cached \d+ min ago\)|billing \(Admin API, fetched now\)/);
-    assert.match(text, /credits left \(estimate\)/);
+    assert.match(text, /primary account credit: /);
     assert.match(text, /GAP: all categories: booked \$150\.00 but billed \$29\.00/);
     assert.ok(!text.includes(KEY));
     // no admin key: booked only

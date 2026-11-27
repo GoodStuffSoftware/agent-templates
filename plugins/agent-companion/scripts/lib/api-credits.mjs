@@ -449,7 +449,7 @@ export function spendView(billing, category, { cfg, cy, entries, now }) {
 
 // `peek` (0.31.63): answer without advancing the review alternation counter (turn.review), so status and diagnostics
 // never flip the next real routing decision. Only the spawn guard's call (and a writer's manual path) advances it.
-export function decide(category, { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), env = process.env, billing = null, peek = false, target = null } = {}) {
+export function decide(category, { now = Date.now(), cfg = loadConfig(), path = ledgerPath(), env = process.env, billing = null, peek = false, target = null, anchors = null, targetBilling = {} } = {}) {
   const plan = (reason) => ({ decision: 'plan', reason });
   try {
     if (!CATEGORIES.includes(category)) return plan(`unknown category "${category}"`);
@@ -467,10 +467,14 @@ export function decide(category, { now = Date.now(), cfg = loadConfig(), path = 
     }
     const joined = () => reasons.join('; then ');
     if (!usable.length) return plan(joined());
-    return mutate(now, cfg, path, (c, cy) => {
+    // 0.31.79: per-account balance anchors (primary and named targets). With none stored every account keeps its fixed budget.
+    const anchorMap = anchors || readAnchors();
+    return mutate(now, cfg, path, (c, cy, led) => {
       let hit = null;
       for (const t of usable) {
-        const r = t.name === PRIMARY ? evalPrimary(category, { cfg, c, cy, billing, now }) : evalNamed(category, t, { c });
+        const r = t.name === PRIMARY
+          ? evalPrimary(category, { cfg, c, cy, billing, now, anchor: anchorMap[PRIMARY] || null, led })
+          : evalNamed(category, t, { c, cfg, led, anchor: anchorMap[String(t.name).toLowerCase()] || null, snap: (targetBilling || {})[t.name] || null });
         if (r.api) { hit = { t, tail: r.tail }; break; }
         reasons.push(t.name === PRIMARY ? r.reason : `target ${t.name}: ${r.reason}`);
       }
@@ -499,13 +503,35 @@ export const laneOf = (c, name) => (!name || name === PRIMARY ? c : ((c.lanes ||
 export const entriesOf = (entries, name) => (entries || []).filter((e) => (e.target || PRIMARY) === (name || PRIMARY));
 
 // The primary lane: the governor as it was before targets (billing snapshot, pace, reserve, workspace limit, breaker).
-function evalPrimary(category, { cfg, c, cy, billing, now }) {
+// 0.31.79: credit mode (cfg.budgetMode === 'credit', what loadConfig sets by default) gates an account that has a balance anchor on
+// its remaining credit minus the reserve, in place of the plugin's own fixed budget. Returns null when the fixed budget applies.
+const creditMode = (cfg, anchor) => !!anchor && cfg.budgetMode === 'credit';
+function creditGate({ cfg, anchor, snap, entries, avg, label }) {
+  const rem = creditRemaining({ anchor, snap: snap && Number.isFinite(snap.through) ? snap : null, entries });
+  const reserve = Number.isFinite(cfg.reserveUsd) ? cfg.reserveUsd : DEFAULT_RESERVE_USD;
+  const left = rem.afterBooked - reserve;
+  const tag = rem.verified ? '' : ` (${BOOKED_ONLY})`;
+  const text = `$${rem.afterBooked.toFixed(2)} credit left of the $${anchor.usd.toFixed(2)} Console balance on ${iso(anchor.asOf).slice(0, 10)} (${rem.basis}), minus the $${reserve.toFixed(2)} reserve`;
+  if (left < avg || left <= 0) return { api: false, reason: `${label}credit: ${text}; plan until the Console balance is topped up and \`credits anchor <usd>\` is re-run${tag}` };
+  return { api: true, tail: `${text}${tag}` };
+}
+
+function evalPrimary(category, { cfg, c, cy, billing, now, anchor = null, led = null }) {
   const plan = (reason) => ({ api: false, reason });
   if (c.tripped) return plan(`API runs failed ${c.fails} ${c.fails === 1 ? 'time' : 'times'} in a row this cycle (${c.tripped.reason}); plan until the cycle ends or a probe succeeds`);
   const sh = cfg.shares;
   const view = spendView(billing, category, { cfg, cy, entries: entriesOf(c.entries, PRIMARY), now });
   const tag = view.verified ? '' : ` (${BOOKED_ONLY})`;
-  if (view.limit !== null && view.wsMonth >= view.limit) return plan(`workspace limit: ${view.wsName} at $${view.wsMonth.toFixed(2)} of its $${view.limit.toFixed(2)} monthly limit${tag}`);
+  const inCredit = creditMode(cfg, anchor);
+  // In credit mode the plugin's own numbers do not stop work: a limit set without "!" is advisory; only a "!" limit (a mirror of a real Console limit) is enforced.
+  const limitHit = view.limit !== null && view.wsMonth >= view.limit;
+  if (limitHit && (!(cfg.budgetMode === 'credit') || view.limitHard)) return plan(`workspace limit: ${view.wsName} at $${view.wsMonth.toFixed(2)} of its $${view.limit.toFixed(2)} monthly limit${view.limitHard ? ' (enforced, set with !)' : ''}${tag}`);
+  if (inCredit) {
+    const cnt = c.n[category] || 0;
+    const avg = cnt > 0 ? (c.spent[category] || 0) / cnt : cfg.itemEstimate;
+    const g = creditGate({ cfg, anchor, snap: view.verified ? billing : null, entries: led ? laneEntriesAll(led, PRIMARY) : entriesOf(c.entries, PRIMARY), avg, label: '' });
+    return g.api && limitHit ? { api: true, tail: `${g.tail}; ${view.wsName} is past its $${view.limit.toFixed(2)} limit, advisory in credit mode` } : g;
+  }
   const nonReserve = CATEGORIES.reduce((a, k) => a + (sh[k] || 0), 0) || 1;
   const pool = cfg.budget * (cy.reserveReleased ? 1 : 1 - (sh.reserve || 0));
   const total = view.verified ? view.total : sum(c.spent);
@@ -522,11 +548,15 @@ function evalPrimary(category, { cfg, c, cy, billing, now }) {
 
 // A named target's lane: its own breaker and booked spend; its optional budget is a plain ceiling (no pacing: a failover target
 // is for the runs the earlier targets could not take). No budget set: only its breaker and the provider's own limits bound it.
-function evalNamed(category, t, { c }) {
+function evalNamed(category, t, { c, cfg = {}, led = null, anchor = null, snap = null }) {
   const L = laneOf(c, t.name);
   if (L.tripped) return { api: false, reason: `API runs failed ${L.fails} ${L.fails === 1 ? 'time' : 'times'} in a row this cycle (${L.tripped.reason}); plan until the cycle ends or a probe succeeds` };
   const total = sum(L.spent);
   const spent = L.spent[category] || 0;
+  if (creditMode(cfg, anchor)) {
+    const cnt = L.n[category] || 0;
+    return creditGate({ cfg, anchor, snap, entries: led ? laneEntriesAll(led, t.name) : entriesOf(c.entries, t.name), avg: cnt > 0 ? spent / cnt : 0, label: '' });
+  }
   if (t.budget) {
     const cnt = L.n[category] || 0;
     const avg = cnt > 0 ? spent / cnt : 0;
@@ -698,7 +728,7 @@ export function status({ now = Date.now(), cfg = loadConfig(), path = ledgerPath
   }
   { const rj = rejectsInCycle({ now, cfg, path }); if (rj > 0) lines.push(`REJECTED records this cycle: ${rj} (see ${rejectsPath(path)}): callers tried to book spend without proof of an API-billed run`); }
   if (!unreadable) lines.push(`real reviews this cycle: ${reviewSummaryLine(summarizeReviews(c.entries))}`);
-  lines.push(`total spent $${total.toFixed(2)} of $${cfg.budget}; left $${(cfg.budget - total).toFixed(2)} (reserve $${((sh.reserve || 0) * cfg.budget).toFixed(2)})`);
+  lines.push(`total spent $${total.toFixed(2)} of the plugin's own $${cfg.budget} budget (${cfg.budgetSource || 'api_credits_budget_usd'}; not an Anthropic cap, not credit); budget mode ${cfg.budgetMode || 'fixed'}${cfg.budgetMode === 'credit' ? `: an account with a balance anchor is gated on its remaining credit minus a $${Number.isFinite(cfg.reserveUsd) ? cfg.reserveUsd : DEFAULT_RESERVE_USD} reserve, not on this budget` : ''}; budget left $${(cfg.budget - total).toFixed(2)} (budget reserve $${((sh.reserve || 0) * cfg.budget).toFixed(2)})`);
   { const w = sharesWarning(sh); if (w) lines.push(w); }
   if (c.tripped) lines.push(`BREAKER TRIPPED ${c.tripped.at}: ${c.tripped.reason}; decide answers plan until the cycle ends or a probe succeeds`);
   else if (c.fails) lines.push(`${c.fails} billing/auth failure(s) in a row (trips at ${TRIP_AFTER})`);
@@ -722,7 +752,8 @@ function laneLine(t, c) {
 
 // cycle: the ledger cycle (top level = primary lane, lanes = named). orgs: getTargetOrgs() result ([] before it is fetched), grouped
 // by org id with the org name only as secondary text. A group with no cost data says so and never fails the report.
-export function targetLines({ cfg, cycle = emptyCycle(), orgs = [], now = Date.now() }) {
+export function targetLines({ cfg, cycle = emptyCycle(), orgs = [], now = Date.now(), anchors = null }) {
+  const anchorMap = anchors || readAnchors();
   const named = namedTargets(cfg);
   const lines = [];
   for (const e of cfg.targetErrors || []) lines.push(`api_targets: ${e}`);
@@ -746,9 +777,10 @@ export function targetLines({ cfg, cycle = emptyCycle(), orgs = [], now = Date.n
       seen.add(name);
       const ws = g.ok && g.snapshot && t.workspace ? `; workspace ${workspaceName(g.snapshot, t.workspace)} billed $${billedSince(g.snapshot, cy.start, t.workspace).toFixed(2)}` : '';
       lines.push(`    ${laneLine(t, cycle)}${ws}`);
+      lines.push(`      ${accountCreditLine(t.name, { cfg, anchor: anchorMap[String(t.name).toLowerCase()] || null, snap: g.ok ? g.snapshot : null, entries: entriesOf(cycle.allEntries || cycle.entries || [], t.name) })}`);
     }
   }
-  for (const t of all) if (!seen.has(t.name)) lines.push(`    ${laneLine(t, cycle)}`);
+  for (const t of all) if (!seen.has(t.name)) { lines.push(`    ${laneLine(t, cycle)}`); lines.push(`      ${accountCreditLine(t.name, { cfg, anchor: anchorMap[String(t.name).toLowerCase()] || null, entries: entriesOf(cycle.allEntries || cycle.entries || [], t.name) })}`); }
   return lines;
 }
 
@@ -875,7 +907,20 @@ function periodLines(snap, label, fromMs, { cfg, entries, cy }) {
 }
 
 // The billed-spend section of `status`. snap = null: the fallback line only.
-export function billingStatusLines(snap, { cfg, entries, now, reason = '', cacheAgeMs = null }) {
+// One account's gate, in words: remaining credit from its anchor (billed since, then minus the reserve), or the fixed budget.
+function accountCreditLine(name, { cfg, anchor = null, snap = null, entries = [] }) {
+  const t = (cfg.targets || {})[name];
+  const budget = t && t.name !== PRIMARY ? t.budget : cfg.budget;
+  const src = t && t.name !== PRIMARY ? 'the target\'s own budget' : (cfg.budgetSource || 'api_credits_budget_usd');
+  const reserve = Number.isFinite(cfg.reserveUsd) ? cfg.reserveUsd : DEFAULT_RESERVE_USD;
+  const who = name === PRIMARY ? 'primary account' : `target ${name}`;
+  const credit = cfg.budgetMode === 'credit';
+  if (!anchor) return `${who} credit: no balance anchor; gated by the plugin's own fixed budget ${budget ? `$${budget} (${src})` : '(none set)'}; set one with \`credits anchor <usd>${name === PRIMARY ? '' : ` --target ${name}`}\``;
+  const rem = creditRemaining({ anchor, snap: snap && Number.isFinite(snap.through) ? snap : null, entries });
+  return `${who} credit: ${usd2(rem.afterBooked)} left = Console balance ${usd2(anchor.usd)} on ${iso(anchor.asOf).slice(0, 10)} - ${rem.basis} ${usd2(rem.spentSince)}; minus the ${usd2(reserve)} reserve = ${usd2(rem.afterBooked - reserve)} usable; ${credit ? 'this gates API work (the fixed budget does not)' : `informs only (budget mode is fixed: the plugin's own $${budget} budget gates)`}`;
+}
+
+export function billingStatusLines(snap, { cfg, entries, anchors = null, now, reason = '', cacheAgeMs = null }) {
   if (!snap) return [`billing: ${BOOKED_ONLY}${reason ? ` (${reason})` : ''}; the figures above are what runs booked for themselves`];
   const cy = cycleOf(now, cfg.cycleDay);
   const monthStart = monthStartOf(now);
@@ -884,14 +929,17 @@ export function billingStatusLines(snap, { cfg, entries, now, reason = '', cache
   if (cy.start !== monthStart) lines.push(...periodLines(snap, `credit cycle from ${iso(cy.start).slice(0, 10)}`, cy.start, { cfg, entries, cy }));
   const billedCycle = billedSince(snap, cy.start);
   const win = bookedBetween(entries, Math.max(snap.through, cy.start));
-  lines.push(`credits left (estimate) = monthly plan credit $${cfg.budget} - billed this cycle ${usd2(billedCycle)} = ${usd2(cfg.budget - billedCycle)}; minus ${usd2(win)} booked since the last complete day = ${usd2(cfg.budget - billedCycle - win)} (cost is before credits; the Console Billing page shows the real balance)`);
+  // 0.31.79: the budget is the plugin's own number, not credit. Remaining credit comes from the account's balance anchor only.
+  lines.push(`this cycle: billed ${usd2(billedCycle)} + ${usd2(win)} booked since the last complete day (cost is before credits; the Console Billing page shows the real balance)`);
+  lines.push(accountCreditLine(PRIMARY, { cfg, anchor: anchors ? anchors[PRIMARY] : readAnchors()[PRIMARY], snap, entries }));
   for (const [cat, w] of Object.entries(cfg.categoryWorkspaces || {})) if (resolveWorkspace(snap, w) === null) lines.push(`category ${cat}: workspace ${w} not found, booked spend only`);
   const wsMonth = [];
   for (const [name, lim] of Object.entries(cfg.workspaceLimits || {})) {
     const id = /^wrkspc_/.test(name) ? name : resolveWorkspace(snap, name);
     const billed = id === null ? 0 : billedSince(snap, monthStart, id);
     const unk = id === null ? ' (no such workspace in the organization)' : '';
-    wsMonth.push(`${name} ${usd2(billed)} of $${lim.toFixed(2)} (${pct(billed, lim)})${billed >= lim ? ' AT OR OVER LIMIT: decide answers plan for its categories' : ''}${unk}`);
+    const enforced = cfg.budgetMode !== 'credit' || (cfg.workspaceLimitHard || {})[name];
+    wsMonth.push(`${name} ${usd2(billed)} of $${lim.toFixed(2)} (${pct(billed, lim)})${billed >= lim ? (enforced ? ' AT OR OVER LIMIT: decide answers plan for its categories' : ' over the plugin\'s own limit, advisory in credit mode (a "!" limit would be enforced)') : ''}${unk}`);
   }
   lines.push(wsMonth.length ? `workspace limits (calendar month, billed): ${wsMonth.join('; ')}` : 'workspace limits: none configured (api_credits_workspace_limits; the API cannot read the Console limits)');
   const g = billingGaps(snap, { cfg, cy, entries, now });
