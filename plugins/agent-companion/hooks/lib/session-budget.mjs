@@ -47,6 +47,7 @@ import { stateDir, appendLog, classifyModel } from './context.mjs';
 import { priceUsage } from '../../scripts/lib/pricing.mjs';
 import { usageOf, queueNotice, safe } from './runaway.mjs';
 import { requestUnits, modelWeight, weeklyLimitUnits, currentRate, rateLabel } from './plan-allowance.mjs';
+import { currentConfiguredAccount, accountLimitAt } from './account.mjs';
 
 export const SESSION_BUDGET_DEFAULT_UNITS = 350;
 const CHUNK_BYTES = 8 * 1024 * 1024;
@@ -58,8 +59,12 @@ const STATE_TTL_MS = 7 * 86400000;
 // The weekly limit in plan units: 100 x the units per 1% of the account in use (hooks/lib/plan-allowance.mjs currentRate(): the
 // account's own rate, else its plan's, else the shipped default in config/plan-weights.json plus the user file). The plan units
 // themselves are the same for every account; only the size of the week differs. An account the plugin cannot tell uses the default.
-export function weeklyPlanUnits(rate = currentRate()) {
-  return weeklyLimitUnits(rate.value);
+// With the option claude_accounts set and the signed-in account listed there, the week is THAT account's limit now (its limit
+// changes by date applied); otherwise exactly the single-account figure.
+export function weeklyPlanUnits(rate = currentRate(), now = Date.now()) {
+  const a = currentConfiguredAccount();
+  const base = weeklyLimitUnits(rate.value);
+  return a ? accountLimitAt(a, now, base) : base;
 }
 
 // Plan units for one usage record (lib/runaway.mjs usageOf shape).
@@ -251,7 +256,8 @@ export function budgetNoticeText(total, rate = currentRate()) {
   const week = weeklyPlanUnits(rate);
   const pct = Math.round((total / week) * 100);
   // The rate is named only when it is not the shipped default (the default week is what the text always said).
-  const basis = rate.basis === 'default' ? '' : `, at ${rateLabel(rate)}`;
+  const acct = currentConfiguredAccount();
+  const basis = (rate.basis === 'default' ? '' : `, at ${rateLabel(rate)}`) + (acct ? `, account ${acct.label}` : '');
   return `[agent-companion] This session, including its subagents, has used about ${n} plan units (~${pct}% of a ~${week.toLocaleString('en-US')}-unit week${basis}). `
     + 'A hand-off to a fresh session does not save usage; let auto-compaction handle context. '
     + 'What cuts spend is fewer and smaller spawns: pick the lowest rung that fits, brief tightly, cap fan-out, and do not re-spawn for work a live worker can continue. '

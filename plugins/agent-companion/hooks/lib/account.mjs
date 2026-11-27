@@ -34,7 +34,7 @@
 
 import { openSync, readSync, closeSync, readFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { homeRoot, claudeDir, stateDir, stateRootPath } from './context.mjs';
+import { homeRoot, claudeDir, stateDir, stateRootPath, opt } from './context.mjs';
 import { readSampleLines } from './plan-meter.mjs';
 
 const SIGNED_IN_RE = /"lastKnownAccountUuid"\s*:\s*"([0-9a-f-]{36})"/;
@@ -204,4 +204,60 @@ export function accountAt(history, t) {
     }
   }
   return found;
+}
+
+// --- Per-account weekly limits (0.31.76) ---------------------------------------------------------------------------------------
+// Each claude.ai account has its own weekly reset and weekly limit, and a plan change moves the limit mid-week. The option
+// `claude_accounts` (a JSON array, default empty = one account, one week, one limit: nothing below runs) lists them:
+//   [{ "id": "<account id as in the switch history>", "label": "<short name>", "weekResetUtc": "Wed 22:00",
+//      "weeklyLimitUnits": 2860, "limitChanges": [{ "from": "2026-11-26T01:37:00Z", "weeklyLimitUnits": 2860 }] }]
+// weeklyLimitUnits is the limit before the first change (missing: the single-account limit); each change sets the limit from its time on.
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const RESET_RE = /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (\d{2}):(\d{2})$/;
+const posNum = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
+
+// The accounts the option lists, validated: [{ id, label, weekResetUtc, weeklyLimitUnits|null, limitChanges: [{ fromMs, weeklyLimitUnits }] }].
+// [] when the option is unset or unparseable (a bad entry is dropped, never thrown).
+export function configuredAccounts(raw = opt('claude_accounts', '')) {
+  let list = raw;
+  if (typeof raw === 'string') { if (!raw.trim()) return []; try { list = JSON.parse(raw); } catch { return []; } }
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const a of list) {
+    if (!a || typeof a !== 'object' || typeof a.id !== 'string' || !a.id || !RESET_RE.test(String(a.weekResetUtc || ''))) continue;
+    const changes = (Array.isArray(a.limitChanges) ? a.limitChanges : [])
+      .map((c) => ({ fromMs: Date.parse(c && c.from), weeklyLimitUnits: posNum(c && c.weeklyLimitUnits) }))
+      .filter((c) => Number.isFinite(c.fromMs) && c.weeklyLimitUnits)
+      .sort((x, y) => x.fromMs - y.fromMs);
+    out.push({ id: a.id, label: typeof a.label === 'string' && a.label ? a.label : a.id.slice(0, 8), weekResetUtc: a.weekResetUtc, weeklyLimitUnits: posNum(a.weeklyLimitUnits), limitChanges: changes });
+  }
+  return out;
+}
+
+// One account's weekly limit in force at t (ms): the last limitChanges entry at or before t, else its own base limit, else `fallback`.
+export function accountLimitAt(account, t, fallback) {
+  let v = account.weeklyLimitUnits || fallback;
+  for (const c of account.limitChanges) if (c.fromMs <= t) v = c.weeklyLimitUnits;
+  return v;
+}
+
+// The latest weekly reset (UTC, "Wed 22:00") at or before t (ms); NaN for a malformed spec.
+export function weekStartAt(resetUtc, t) {
+  const m = RESET_RE.exec(resetUtc);
+  if (!m) return NaN;
+  const day = 24 * 3600000;
+  const d0 = Math.floor(t / day) * day;
+  for (let k = 0; k <= 7; k++) {
+    const d = d0 - k * day;
+    const at = d + (+m[2]) * 3600000 + (+m[3]) * 60000;
+    if (WEEKDAYS[new Date(d).getUTCDay()] === m[1] && at <= t) return at;
+  }
+  return NaN;
+}
+
+// The configured account signed in now, or null (option unset, or an account the list does not name).
+export function currentConfiguredAccount(accounts = configuredAccounts()) {
+  if (!accounts.length) return null;
+  const cur = currentAccount();
+  return accounts.find((a) => a.id === cur) || null;
 }
