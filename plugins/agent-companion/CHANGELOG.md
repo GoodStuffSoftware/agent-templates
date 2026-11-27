@@ -2,7 +2,7 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
-## 0.31.79 (unreleased)
+## 0.31.79 — 2026-11-27
 
 - **The every-prompt hook ends in time on a big lead (hooks/runaway-notice.mjs, lib/session-budget.mjs, lib/interrupted-workers.mjs).** A lead with over a thousand subagent transcripts (1,146 files, about 260 MB) hit the 10 s hook timeout 78 times after an idle spell, and a timed-out hook delivers nothing. The hook now has one 4 s deadline (env `AC_RUNAWAY_DEADLINE_MS` sets it) checked per file and per 4 MB read; the budget scan and the interrupted-worker scan both stop at it and the notices already found are delivered. Each scan saves its progress (the interrupted scan caches size, mtime and result per file under `state/interrupted-scan/`), so the next prompt continues where it stopped and a few prompts later the whole tree is cached and a warm run is well under a second. Notices are the same as an unlimited run.
 - **Keep-warm deletes its pending wakeup when the last helper reports (hooks/lib/keep-warm.mjs).** The id of the CronCreate wakeup is recorded (read from the real result shape, `{ id, humanSchedule, ... }` or the text "Scheduled one-shot task <id> ..."); when a helper's notice arrives with no helper left running, the lead is told once to CronDelete that id instead of letting a no-op ping fire.
