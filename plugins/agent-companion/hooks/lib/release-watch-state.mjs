@@ -96,8 +96,11 @@ export const NO_HOLD_FLAGS = new Set(['usage-source-empty', 'harness-refusals', 
 export const HOLD_MIN_EVENTS_DEFAULT = 8;
 export const HOLD_MIN_N_DEFAULT = 30;
 const optNum = (k, d) => { const n = Number(opt(k, d)); return Number.isFinite(n) && n >= 0 ? n : d; };
+// Severity flags that are meant to hold on a single event are exempt from the floor (runaway: a runaway session is a real fault even once).
+export const FLOOR_EXEMPT_FLAGS = new Set(['runaway']);
 export function meetsHoldFloor(x) {
   try {
+    if (x && FLOOR_EXEMPT_FLAGS.has(x.name)) return true;
     const minEv = optNum('release_watch_hold_min_events', HOLD_MIN_EVENTS_DEFAULT);
     const minN = optNum('release_watch_hold_min_n', HOLD_MIN_N_DEFAULT);
     if (minEv > 0 && typeof x.events === 'number' && x.events < minEv) return false;

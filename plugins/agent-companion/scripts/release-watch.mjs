@@ -815,7 +815,7 @@ export function status(at = S.now(), { all = false, json = false, installed = nu
   if (S.flagIsOpen(flag)) {
     const a = flag.ack;
     const who = flag.ackedAt ? `answered ${flag.ackedAt}${a ? ` in session ${String(a.session || '').slice(0, 8)} (signal ${a.signal}, shown ${a.shownAt || '?'})` : ''}`
-      : `unanswered${(() => { const d = Number(opt('release_watch_hold_minutes', 30)); const n = Date.parse(flag.notifiedAt); return d > 0 && n > 0 ? `, hold at ${iso(n + d * 60e3)}` : ''; })()}`;
+      : `unanswered${(() => { const d = Number(opt('release_watch_hold_minutes', 30)); const n = Date.parse(flag.notifiedAt); return d > 0 && n > 0 && S.holdableFlags(flag.flags).length ? `, hold at ${iso(n + d * 60e3)}` : ''; })()}`;
     lines.push(`flag open since ${flag.openedAt}, ${flag.notifiedAt ? `notified ${flag.notifiedAt}` : 'not yet shown'}, ${who}: ${flag.flags.map((x) => `${x.name}=${x.value}${x.detail ? ' (' + x.detail + ')' : ''}`).join('; ')}`);
   } else lines.push('no open flag');
   lines.push(hold && !hold.clearedAt ? `HOLD since ${hold.since}: ${hold.reason}` : 'hold: none');

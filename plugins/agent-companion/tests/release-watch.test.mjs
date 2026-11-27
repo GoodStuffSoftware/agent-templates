@@ -11,9 +11,10 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = join(ROOT, 'scripts', 'release-watch.mjs');
 const HOUR = 3600e3;
 const T = Date.parse('2026-03-01T10:00:00Z');
+process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_SCOPE = 'all'; // these tests cover the all-calls hold (0.31.75: the default scope is releases)
 
 let tmp; let state; let claude;
-const env = () => ({ ...process.env, AGENT_COMPANION_DESKTOP_SESSIONS_DIR: join(tmp, 'desk'), CLAUDE_CONFIG_DIR: claude, AGENT_COMPANION_STATE_DIR: state, AGENT_COMPANION_FAKE_NOW: '', CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_MINUTES: '' });
+const env = () => ({ ...process.env, AGENT_COMPANION_DESKTOP_SESSIONS_DIR: join(tmp, 'desk'), CLAUDE_CONFIG_DIR: claude, AGENT_COMPANION_STATE_DIR: state, AGENT_COMPANION_FAKE_NOW: '', CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_MINUTES: '', CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_SCOPE: 'all' });
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'rw-'));
   state = join(tmp, 'ac'); claude = join(tmp, 'claude');
@@ -1674,4 +1675,48 @@ test('designed-denies: every guard deny text is listed, and a crash still is not
     for (const [name, val] of Object.entries(mod)) if (/_MSG$/.test(name) && typeof val === 'string') assert.ok(D.isDesignedDeny(val), `${f} ${name} is missing from designed-denies.mjs`);
   }
   for (const crash of ['TypeError: Cannot read properties of undefined', 'Error: Cannot find module', 'SyntaxError: Unexpected token', '[agent-companion] hook crashed']) assert.ok(!D.isDesignedDeny(crash), crash);
+});
+
+// ---- 0.31.75: hold sample floor, severity exemption, scope ----
+const holdAfter = (flags) => { S.openFlag({ version: '1', flags, at: T, check: '+1h' }); S.noteShown('s1', T); return S.maybeHold({ holdMinutes: 30, at: T + 31 * 60e3 }); };
+test('floor: a flag below 8 events or 30 samples notifies but never holds; at the floor it holds', () => {
+  assert.equal(holdAfter([{ name: 'spawn-rewrites', value: 11, events: 4, n: 34 }]), null, '4 events over 34 spawns: no hold');
+  assert.equal(S.flagIsOpen(), true, 'the flag is still open and shown');
+  assert.match(S.flagLine({ at: T + 60e3, sessionId: 's1' }) || '', /below the hold floor/);
+  assert.equal(S.isHoldActive(), false);
+});
+test('floor: n under 30 never holds; exactly at the floor holds', () => {
+  assert.equal(holdAfter([{ name: 'partial-share', value: 40, events: 9, n: 20 }]), null, 'n 20 is under the sample floor');
+});
+test('floor: exactly 8 events over 30 samples holds', () => {
+  assert.ok(holdAfter([{ name: 'spawn-rewrites', value: 11, events: 8, n: 30 }]));
+});
+
+test('floor: severity flags (runaway) hold on one event; options move or switch off the floor', () => {
+  assert.ok(holdAfter([{ name: 'runaway', value: 1, events: 1, n: 0 }]), 'runaway with 1 event still starts a hold');
+  assert.equal(S.meetsHoldFloor({ name: 'runaway', events: 1, n: 1 }), true);
+  assert.equal(S.meetsHoldFloor({ name: 'other', events: 1, n: 1 }), false);
+  assert.equal(S.meetsHoldFloor({ name: 'other', value: 3 }), true, 'a flag with no counts cannot be judged small');
+  process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_MIN_EVENTS = '0'; process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_MIN_N = '0';
+  try { assert.equal(S.meetsHoldFloor({ name: 'other', events: 1, n: 1 }), true, 'floor 0 = off'); }
+  finally { delete process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_MIN_EVENTS; delete process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_MIN_N; }
+});
+
+test('scope: releases (default) refuses only release actions; all keeps the all-calls hold', () => {
+  const was = process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_SCOPE;
+  try {
+    delete process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_SCOPE;
+    assert.equal(S.holdScope(), 'releases');
+    assert.ok(holdAfter([{ name: 'spawn-rewrites', value: 11, events: 20, n: 90 }]));
+    assert.equal(S.holdDenyMessage('new agents'), null, 'releases scope: no all-calls denial');
+    assert.equal(S.noteHeld({ session_id: 'a' }), false, 'releases scope records no held sessions');
+    for (const c of ['claude plugin install agent-companion@x', 'claude plugin update agent-companion', 'claude plugin marketplace update', 'git push origin HEAD:release/0.31.75', 'gh pr merge 5 --repo o/agent-templates', 'gh pr create --base main --head release/0.31.75']) {
+      assert.match(S.releaseActionDeny(c) || '', /post-release hold/, c);
+    }
+    for (const c of ['git push origin fix/x', 'npm test', 'gh pr merge 5 --repo o/other', 'claude plugin install other-plugin']) assert.equal(S.releaseActionDeny(c), null, c);
+    process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_SCOPE = 'all';
+    assert.equal(S.holdScope(), 'all');
+    assert.equal(S.releaseActionDeny('claude plugin update agent-companion'), null, 'all scope: the all-calls path owns the refusal');
+    assert.ok(S.holdDenyMessage('new agents'), 'all scope keeps the old denial');
+  } finally { process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_SCOPE = was; }
 });

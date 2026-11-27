@@ -6,7 +6,7 @@ Why a writer reviews its own work, the cost history and how to reverse it: the `
 
 ## API review
 
-Run this only when your cell has a reviewer that reads (not one that checks the running app) and `node "<plugin>/scripts/api-credits.mjs" decide review` printed `api`. One decision per review: the counter moves once. The reviewer you spawn carries the line `API: no`, so the guard never decides it a second time.
+Run this only when your cell has a reviewer that reads (not one that checks the running app) and `node "<plugin>/scripts/api-credits.mjs" decide review` printed `api`. One decision per review: the counter moves once. The reviewer you spawn does not carry `API: no` (that line is only the retry marker after a recorded API failure; the guard ignores it otherwise). If `decide review` printed `plan`, add the line `API: plan` to the reviewer brief so the guard does not decide a second time; `API: plan` is the deliberate opt-out of API routing.
 
 1. Write the reviewer brief (the lead's brief TEXT goes into the file, never only a path to it: the runner sends the file's text and its tools cannot read outside the repository).
 2. Run, in the background (`run_in_background`), then wait for its notification (a review is not cut by the clock: it logs itself at 8 minutes and goes on; a foreground Bash call is cut at 10 minutes and kills it mid-run):

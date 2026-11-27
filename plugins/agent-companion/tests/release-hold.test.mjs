@@ -18,9 +18,13 @@ const putHold = (obj) => { mkdirSync(join(process.env.AGENT_COMPANION_STATE_DIR,
 const HOLD = { since: '2026-03-01T12:00:00.000Z', version: '9.9.9', reason: 'test', flags: [{ name: 'guard:demo/deny' }], workers: 'handoff', clearedAt: null };
 const reason = (r) => r.json?.hookSpecificOutput?.permissionDecisionReason || '';
 
-function withFx(fn) {
+// These tests cover the all-calls hold; since 0.31.75 that is release_watch_hold_scope=all (the default scope is releases).
+function withFx(fn, scope = 'all') {
   const fx = makeFixture();
-  return Promise.resolve().then(() => fn(fx)).finally(() => fx.cleanup());
+  const was = process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_SCOPE;
+  if (scope === null) delete process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_SCOPE; else process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_SCOPE = scope;
+  const restore = () => { if (was === undefined) delete process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_SCOPE; else process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_SCOPE = was; };
+  return Promise.resolve().then(() => fn(fx)).finally(() => { restore(); fx.cleanup(); });
 }
 
 // ---- spawn-guard
@@ -512,4 +516,25 @@ test('held records: parallel writers (separate processes) lose no record', () =>
   })));
   const ids = sessionsOf().map((x) => x.sessionId).sort();
   assert.deepEqual(ids, Array.from({ length: N }, (_, i) => 'par-' + i).sort(), 'every writer\'s record is kept');
+}));
+
+// ---- 0.31.75: scope releases (the default) ----
+const bashPayload = (command) => ({ hook_event_name: 'PreToolUse', session_id: 's1', tool_name: 'Bash', tool_input: { command } });
+function holdMessagePre(command) {
+  const r = spawnSync(process.execPath, [join(PLUGIN_ROOT, 'hooks', 'hold-message.mjs'), '--event', 'pre'], { input: JSON.stringify(bashPayload(command)), encoding: 'utf8', env: process.env, windowsHide: true });
+  return r.stdout ? JSON.parse(r.stdout) : null;
+}
+test('scope releases: a hold refuses only plugin install/update, marketplace update and release pushes or merges; spawns, heavy commands and other calls pass', () => withFx(() => {
+  putHold(HOLD);
+  for (const c of ['claude plugin install agent-companion@x', 'claude plugin update agent-companion', 'claude plugin marketplace update', 'git push origin HEAD:release/0.31.75', 'gh pr merge 5 --repo o/agent-templates']) {
+    assert.equal(decisionOf(holdMessagePre(c)), 'deny', c);
+  }
+  for (const c of ['git push origin fix/x', 'npm test', 'ls']) assert.notEqual(decisionOf(holdMessagePre(c)), 'deny', c);
+  assert.doesNotMatch(reason(runHook('hooks/spawn-guard.mjs', spawnPayload)), /post-release hold/, 'new agents are not refused');
+}, null));
+
+test('scope all: the hold hook leaves release commands to the all-calls denial, which still refuses spawns', () => withFx(() => {
+  putHold(HOLD);
+  assert.notEqual(decisionOf(holdMessagePre('claude plugin update agent-companion')), 'deny');
+  assert.equal(decisionOf(runHook('hooks/spawn-guard.mjs', spawnPayload).json), 'deny');
 }));
