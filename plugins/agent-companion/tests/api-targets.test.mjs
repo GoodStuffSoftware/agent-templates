@@ -238,8 +238,8 @@ test('hook: API: target=<name> is read and passed to the governor and to api-rev
     assert.equal(r.route, 'api');
     assert.deepEqual(seen, ['a']);
     assert.match(r.updatedInput.prompt, /api-review\.mjs.* --target a /);
-    const n = await call(brief('API: no'), () => { throw new Error('not asked'); });
-    assert.equal(n.route_reason, 'caller-no');
+    const n = await call(brief('API: plan'), () => { throw new Error('not asked'); });
+    assert.equal(n.route_reason, 'caller-plan');
     // an unknown name is caught in the hook before the governor (the same target list), with a notice for the lead
     const bad = await call(brief('API: target=nope'), () => { throw new Error('not asked'); });
     assert.deepEqual([bad.route, bad.route_reason], ['subagent', 'unknown-target']);

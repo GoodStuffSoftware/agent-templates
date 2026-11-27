@@ -181,7 +181,7 @@ export async function routeReview({
     const mod = await import(pathToFileURL(join(PLUGIN_ROOT, 'scripts', 'lib', 'api-credits.mjs')).href);
     const cfg = mod.loadConfig(deps.opt);
     // An `API: target=<name>` naming no configured target (the list decide walks) is never a silent default: the review runs on the
-    // plan as for `API: no`, and the lead is told which name was unknown and which are known.
+    // plan (as for `API: plan`), and the lead is told which name was unknown and which are known.
     if (tgt && !(cfg.targets && cfg.targets[tgt])) {
       const known = Object.keys(cfg.targets || {}).join(', ');
       return { ...row('subagent', 'unknown-target'), notice: `agent-companion: this review's brief says \`API: target=${tgt}\`, but no API target of that name is configured (known: ${known}). It was NOT sent to the API: it runs as a plan subagent, as for \`API: no\`. Fix the target name in the brief (targets are set in api_targets) or drop the line.` };

@@ -1697,6 +1697,8 @@ test('floor: severity flags (runaway) hold on one event; options move or switch 
   assert.equal(S.meetsHoldFloor({ name: 'runaway', events: 1, n: 1 }), true);
   assert.equal(S.meetsHoldFloor({ name: 'other', events: 1, n: 1 }), false);
   assert.equal(S.meetsHoldFloor({ name: 'other', value: 3 }), true, 'a flag with no counts cannot be judged small');
+  assert.equal(S.meetsHoldFloor({ name: 'guard:x/deny', events: 30, n: 5 }), true, 'n is active hours for guard:* and queue-clears: only the event floor applies');
+  assert.equal(S.meetsHoldFloor({ name: 'guard:x/deny', events: 3, n: 5 }), false);
   process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_MIN_EVENTS = '0'; process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_MIN_N = '0';
   try { assert.equal(S.meetsHoldFloor({ name: 'other', events: 1, n: 1 }), true, 'floor 0 = off'); }
   finally { delete process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_MIN_EVENTS; delete process.env.CLAUDE_PLUGIN_OPTION_RELEASE_WATCH_HOLD_MIN_N; }
