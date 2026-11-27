@@ -198,20 +198,26 @@ test('the options exist in plugin.json with the documented defaults', () => {
   assert.equal(cfg.worker_wait_repeat_window_minutes.type, 'number');
 });
 
-// 0.31.79: a repeat Bash wait is rewritten to the sanctioned background form instead of refused.
+// 0.31.79: a repeat Bash wait is rewritten to the sanctioned background form instead of refused. bash-tail.mjs does the
+// rewrite (the one hook that rewrites shell calls); poll-guard.mjs only stays out of the way.
 const REWRITE = { CLAUDE_PLUGIN_OPTION_WORKER_WAIT_REWRITE: '1' };
-test('rewrite: a repeat Bash wait runs in the background (updatedInput), is not denied, and is logged as a rewrite', () => {
+function both(dir, p, env) {
+  const e = { CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), ...env };
+  return { tail: runHook('hooks/bash-tail.mjs', p, { env: e }), poll: runHook('hooks/poll-guard.mjs', p, { env: e }) };
+}
+test('rewrite: a repeat Bash wait runs in the background (updatedInput from bash-tail), poll-guard does not deny, and it is logged as a rewrite', () => {
   const { dir, cleanup } = makeFixture();
   try {
-    const first = run(dir, payload({ agent_id: 'g-rw' }), { ...at(0), ...REWRITE });
-    assert.equal(first.json?.hookSpecificOutput?.updatedInput, undefined, 'the first match is still only a hint');
-    const b = run(dir, payload({ agent_id: 'g-rw' }), { ...at(5), ...REWRITE });
-    assert.equal(decisionOf(b), undefined);
-    const u = b.json.hookSpecificOutput.updatedInput;
+    const first = both(dir, payload({ agent_id: 'g-rw' }), { ...at(0), ...REWRITE });
+    assert.equal(first.tail.json?.hookSpecificOutput?.updatedInput, undefined, 'the first match is still only a hint');
+    const b = both(dir, payload({ agent_id: 'g-rw' }), { ...at(5), ...REWRITE });
+    assert.equal(decisionOf(b.poll), undefined);
+    assert.equal(b.poll.json?.hookSpecificOutput?.updatedInput, undefined, 'only bash-tail returns updatedInput');
+    const u = b.tail.json.hookSpecificOutput.updatedInput;
     assert.equal(u.run_in_background, true);
     assert.match(u.command, /gh pr checks 31/);
     assert.match(u.command, /wait-cap|SECONDS/, 'the loop cap applies to the background loop');
-    assert.match(ctxOf(b), /background command/);
+    assert.match(ctxOf(b.tail), /background command/);
     assert.deepEqual(denialsOf(dir).map((d) => d.outcome), ['rewrite']);
   } finally { cleanup(); }
 });
@@ -226,10 +232,10 @@ test('rewrite: still denied for PowerShell, for a heavy command and for a comman
     ];
     cases.forEach(([tool, command], i) => {
       const id = 'g-keep' + i;
-      run(dir, payload({ agent_id: id, tool_name: tool, tool_input: { command } }), { ...at(0), ...REWRITE });
-      const b = run(dir, payload({ agent_id: id, tool_name: tool, tool_input: { command } }), { ...at(3), ...REWRITE });
-      assert.equal(decisionOf(b), 'deny', command);
-      assert.equal(b.json.hookSpecificOutput.updatedInput, undefined, command);
+      both(dir, payload({ agent_id: id, tool_name: tool, tool_input: { command } }), { ...at(0), ...REWRITE });
+      const b = both(dir, payload({ agent_id: id, tool_name: tool, tool_input: { command } }), { ...at(3), ...REWRITE });
+      assert.equal(decisionOf(b.poll), 'deny', command);
+      assert.notEqual(b.tail.json?.hookSpecificOutput?.updatedInput?.run_in_background, true, command);
     });
   } finally { cleanup(); }
 });
