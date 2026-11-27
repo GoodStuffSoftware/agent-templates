@@ -171,3 +171,14 @@ signal, the hold, and the last standing-health result. `status --json` prints th
 - Thresholds rest on one machine's week of data; they ship as labelled defaults and are options.
 - The run-state file changes shape (v2) and migrates on first read; an acknowledgement recorded before v2 without a
   proof is re-verified and revoked if no typed prompt matches it.
+
+## Addendum 0.31.76: baseline per newest install
+
+Section 4 set the baseline at the 7 days before the first install of a chain. Three false holds (0.31.72 to 0.31.74) showed that a chain
+whose older release was already bad turned that release's own hours into the "normal" the next release was compared with the wrong way round, and
+that a long chain measured activity that no release had caused. From 0.31.76 the baseline is the 7 days before the NEWEST install, and each
+window starts no earlier than that install; `baseAnchor` (the first install) stays the chain key for the flag cooldown. Trade-off, accepted:
+activity of an older release between its last conclusive check and the newer install is measured by no check; the older release's slots
+are still marked done. A minimum window (option `release_watch_min_window_minutes`, default 60) keeps a check from running on a few minutes of data.
+Planned hand-offs ("DONE: partial, handoff at <path>") leave the partial-share numerator and denominator; spawn-rewrites counts distinct
+agents (agent id, else session id).

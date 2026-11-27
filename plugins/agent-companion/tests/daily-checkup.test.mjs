@@ -811,6 +811,7 @@ test('accounts: each account has its own week, limit and pace; an hour goes to t
   ]));
   assert.equal(accounts.length, 2, 'a malformed entry is dropped');
   assert.deepEqual(configuredAccounts(''), []);
+  assert.equal(configuredAccounts(JSON.stringify([{ id: 'ACCT-Fake-CCC', weekResetUtc: 'Fri 16:00' }]))[0].id, 'acct-fake-ccc', 'an id typed in capitals is normalised like the history ids');
   assert.equal(new Date(weekStartAt('Wed 22:00', T('2026-11-27T08:00:00Z'))).toISOString(), '2026-11-25T22:00:00.000Z');
   assert.equal(new Date(weekStartAt('Fri 16:00', T('2026-11-27T07:59:00Z'))).toISOString(), '2026-11-20T16:00:00.000Z');
   assert.equal(accountLimitAt(accounts[1], T('2026-11-25T23:00:00Z'), 2860), 1300, 'before the plan change');

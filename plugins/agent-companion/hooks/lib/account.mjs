@@ -224,12 +224,13 @@ export function configuredAccounts(raw = opt('claude_accounts', '')) {
   if (!Array.isArray(list)) return [];
   const out = [];
   for (const a of list) {
-    if (!a || typeof a !== 'object' || typeof a.id !== 'string' || !a.id || !RESET_RE.test(String(a.weekResetUtc || ''))) continue;
+    // The id is normalised the way the switch history and the current account are (idOf: lowercase, ID_RE), so an id typed in capitals still matches.
+    if (!a || typeof a !== 'object' || !idOf(a.id) || !RESET_RE.test(String(a.weekResetUtc || ''))) continue;
     const changes = (Array.isArray(a.limitChanges) ? a.limitChanges : [])
       .map((c) => ({ fromMs: Date.parse(c && c.from), weeklyLimitUnits: posNum(c && c.weeklyLimitUnits) }))
       .filter((c) => Number.isFinite(c.fromMs) && c.weeklyLimitUnits)
       .sort((x, y) => x.fromMs - y.fromMs);
-    out.push({ id: a.id, label: typeof a.label === 'string' && a.label ? a.label : a.id.slice(0, 8), weekResetUtc: a.weekResetUtc, weeklyLimitUnits: posNum(a.weeklyLimitUnits), limitChanges: changes });
+    out.push({ id: idOf(a.id), label: typeof a.label === 'string' && a.label ? a.label : a.id.slice(0, 8), weekResetUtc: a.weekResetUtc, weeklyLimitUnits: posNum(a.weeklyLimitUnits), limitChanges: changes });
   }
   return out;
 }

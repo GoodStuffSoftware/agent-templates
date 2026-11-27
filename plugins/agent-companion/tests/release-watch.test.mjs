@@ -1760,10 +1760,10 @@ test('0.31.76 spawn-rewrites: one agent retrying the same refused spawn counts o
 });
 
 test('0.31.76 partial-share: a planned hand-off ending is not a partial; unplanned partials still count', () => {
-  let m = replayFixture({ planned: 12, unplanned: 1, done: 11 });
-  assert.equal(m.workers.since.plannedHandoffs, 12); assert.equal(m.workers.since.partialPct, 4.2);
+  let m = replayFixture({ planned: 12, unplanned: 1, done: 31 });
+  assert.equal(m.workers.since.plannedHandoffs, 12); assert.equal(m.workers.since.partialPct, 3.1);
   assert.equal(metricOf(m, 'partial-share').status, 'ok');
-  m = replayFixture({ planned: 0, unplanned: 13, done: 11 });
+  m = replayFixture({ planned: 0, unplanned: 20, done: 24 });
   assert.equal(metricOf(m, 'partial-share').status, 'flag');
 });
 

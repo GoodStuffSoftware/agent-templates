@@ -73,7 +73,7 @@ export const PROBE_RE = /^[\s\S]{0,400}?hook verification spawn, not real work/i
 const STATUS_RE = /STATUS:\s*(done|partial|blocked)/i;
 // The planned end of a worker at its hand-off line (handoff-limit.mjs): a line "DONE: partial, handoff at <path>".
 const PLANNED_HANDOFF_RE = /^[\s>*_`#-]*DONE:\s*partial,\s*handoff at\s+\S/im;
-const STATUS_LINE_RE =/^[\s>*_`#-]*STATUS:\s*(done|partial|blocked)/im;
+const STATUS_LINE_RE = /^[\s>*_`#-]*STATUS:\s*(done|partial|blocked)/im;
 // Claude Code's own PreToolUse blocks arrive in the SAME transcript shape as a hook's ("PreToolUse:Edit hook error: <text>", the record's
 // permissionDecision says source hook, and no attachment names the command), so the record cannot tell ours from the harness's; the harness
 // messages are known by their wording and are never counted as a hook error or a new signature (the worktree-isolation block is the one seen).
@@ -92,8 +92,8 @@ export function isFailureClear(r) {
   return true;
 }
 
-// T: the install time of the newest release; the baseline is the `days` days before baseTo (default T; a chain passes its first install time, so
-// the baseline never moves when a later release joins). winFrom: start of the window measured now (default baseTo; the tick passes the last
+// T: the install time of the newest release; the baseline is the `days` days before baseTo (default T; since 0.31.76 the tick passes the NEWEST install time,
+// so an earlier release's own hours never fall into a later release's baseline, and the window starts no earlier than that install). winFrom: start of the window measured now (default baseTo; the tick passes the last
 // conclusive check's time, so each check is a rate over its own window, not a running count since install). releases: [{version, T}] of a
 // chain (two or more): the result then carries byVersion[version], one full metrics object per release with only the since side split by version.
 export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, releases, days = 7, sample = 500, scanCap = WORKER_SCAN_CAP, telDir, projectsDir, clearsFiles, holds } = {}) {
@@ -290,8 +290,9 @@ export function analyze({ T, nowMs = S.now(), winFrom, baseFrom, baseTo, release
         noStatusFinished: finNs.length, usageLimitEnded: usageEnded,
         noStatusPct: per(finNs.filter((x) => x.status === 'none').length, finNs.length),
         // 0.31.76: a planned hand-off ending ("DONE: partial, handoff at <path>", the auto hand-off included) is the designed outcome of a long worker, not a partial.
-        partialPct: per(fin.filter((x) => x.status === 'partial' && !x.planned).length, fin.length),
         plannedHandoffs: fin.filter((x) => x.status === 'partial' && x.planned).length,
+        // Planned hand-offs leave the numerator and the denominator alike (as usage-limit endings do for no-final-status), so they neither dilute the rate nor count toward the floor.
+        partialPct: per(fin.filter((x) => x.status === 'partial' && !x.planned).length, fin.length - fin.filter((x) => x.status === 'partial' && x.planned).length),
         blockedPct: per(fin.filter((x) => x.status === 'blocked').length, fin.length),
         hookErrorWorkersPct: per(a.filter((x) => x.hook > 0).length, a.length),
         apiErrorWorkers: a.filter((x) => x.api).length,
@@ -450,7 +451,8 @@ export function evaluate(m, opts = {}) {
   const nsFin = ws.noStatusFinished ?? ws.finished;
   add('no-final-status', { value: ws.noStatusPct, limit: TH.noStatusPct, base: wb.noStatusPct, n: nsFin, minN: TH.noStatusMinFinished, events: cnt(ws.noStatusPct, nsFin), minEv: TH.noStatusMinEv,
     over: ws.noStatusPct > TH.noStatusPct || (wb.noStatusPct != null && ws.noStatusPct - wb.noStatusPct > TH.noStatusPp), unit: '%', detail: `vs ${wb.noStatusPct}% before${ws.usageLimitEnded ? `, ${ws.usageLimitEnded} usage-limit endings left out` : ''}` });
-  add('partial-share', { value: ws.partialPct, limit: TH.partialPct, base: wb.partialPct, n: ws.finished, minN: TH.partialMinFinished, events: cnt(ws.partialPct, ws.finished), minEv: TH.partialMinEv, over: ws.partialPct > TH.partialPct, unit: '%' });
+  const partialN = ws.finished - (ws.plannedHandoffs || 0);
+  add('partial-share', { value: ws.partialPct, limit: TH.partialPct, base: wb.partialPct, n: partialN, minN: TH.partialMinFinished, events: cnt(ws.partialPct, partialN), minEv: TH.partialMinEv, over: ws.partialPct > TH.partialPct, unit: '%' });
   add('blocked-share', { value: ws.blockedPct, limit: TH.blockedPct, base: wb.blockedPct, n: ws.finished, minN: TH.partialMinFinished, events: cnt(ws.blockedPct, ws.finished), minEv: TH.blockedMinEv, over: ws.blockedPct > TH.blockedPct, unit: '%' });
   // Usage-limit errors never count; they show only as an info line.
   const apiN = ws.apiNonUsageWorkers ?? 0; const ul = ws.usageLimitWorkers || 0;
@@ -470,8 +472,7 @@ export function evaluate(m, opts = {}) {
 // ---------- run state v2 ----------
 // release-watch-run.json: { v: 2, baseAnchor, status: 'watching'|'finished'|'insufficient-data', extendedTo, everFlagged, standing: { lastAt },
 //   releases: [{ version, T, due[], done[], lastAt, lastConclusiveAt, verdicts[], status: 'watching'|'waiting-chain'|'finished'|'insufficient-data' }] }.
-// A chain is the run of releases installed while the last one was still being watched: one baseline (the 7 days before the FIRST install,
-// baseAnchor), one analysis per tick. A run file written before 0.31.64 (one release, no v) is read as a chain of one and written back on the next tick.
+// A chain is the run of releases installed while the last one was still being watched: one chain key (baseAnchor, the FIRST install, kept for the flag cooldown; since 0.31.76 the baseline is the 7 days before the NEWEST install), one analysis per tick. A run file written before 0.31.64 (one release, no v) is read as a chain of one and written back on the next tick.
 export function migrateRun(old) {
   if (!old || typeof old !== 'object') return null;
   if (old.v === 2 && Array.isArray(old.releases) && old.baseAnchor > 0) return old;
@@ -493,7 +494,7 @@ const keepForVersion = (x) => x.status !== 'inconclusive' && (x.events > 0 || x.
 
 function checkRow({ at, rs, newest, lead, last, due, late, verdict, flags, evald, metrics, winFrom, byVersion }) {
   const row = { at: iso(at), event: 'check', T: iso(newest.T), chain: iso(rs.baseAnchor), version: newest.version, check: last + 1, label: `+${hoursOf(lead, last)}h`, covered: due.find((d) => d.r === lead).idx.map((i) => i + 1), late, verdict, flags,
-    releases: due.map((d) => ({ version: d.r.version, covered: d.idx.map((i) => i + 1) })), window: { from: iso(winFrom), to: iso(at) } };
+    releases: due.map((d) => ({ version: d.r.version, covered: d.idx.map((i) => i + 1) })), window: { from: iso(Math.max(winFrom, newest.T)), to: iso(at) } };
   if (byVersion) row.byVersion = byVersion;
   if (evald) row.metrics = evald.metrics.map(mrow);
   if (metrics && metrics.spawns) {
