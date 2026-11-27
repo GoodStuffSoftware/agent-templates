@@ -992,8 +992,7 @@ export function rebuildHistoryDays(days, { nowT = nowMs() } = {}) {
     const { limit, target, accounts, history } = checkupOptions();
     const want = new Set(days);
     const done = [];
-    const lines = readFileSync(p.history, 'utf8').split('
-').map((line) => {
+    const lines = readFileSync(p.history, 'utf8').split('\n').map((line) => {
       if (!line.trim()) return line;
       let j;
       try { j = JSON.parse(line); } catch { return line; }
@@ -1003,8 +1002,7 @@ export function rebuildHistoryDays(days, { nowT = nowMs() } = {}) {
       done.push(j.day);
       return JSON.stringify(buildDayRecord(state, s, { limit, target, computedAt: nowT, accounts, history }));
     });
-    if (done.length) atomicWrite(p.history, lines.join('
-'));
+    if (done.length) atomicWrite(p.history, lines.join('\n'));
     return done;
   } catch { return []; }
 }
