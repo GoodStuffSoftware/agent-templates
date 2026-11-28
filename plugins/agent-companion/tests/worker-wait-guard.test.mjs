@@ -317,3 +317,42 @@ test('rewrite: the worker-wait row says stand-down when bash-tail rewrites, deny
     assert.deepEqual(rows.filter((r) => r.agent_id === 'g-row-b').map((r) => r.action), ['hint', 'deny']);
   } finally { cleanup(); }
 });
+
+// 0.31.80 review follow-ups.
+test('stamp: an old-format stamp { s, t } with no id reads as the previous call, with or without a call id on the payload', async () => {
+  const { stampBeforeThisCall } = await import('../hooks/lib/worker-wait-rewrite.mjs');
+  const now = T0 + 5 * 60000;
+  const old = { s: 'ww-guard-1', t: T0 };
+  assert.deepEqual(stampBeforeThisCall(old, { tool_use_id: 'call-9' }, now), old, 'with an id on the payload an id-less stamp is not this call\'s');
+  assert.deepEqual(stampBeforeThisCall(old, {}, now), old, 'without an id an old stamp (older than a second) is the previous call');
+  assert.equal(stampBeforeThisCall(null, {}, now), null);
+});
+
+test('stamp: the write is atomic (it goes through a temp file renamed over the stamp, and the stamp parses)', async () => {
+  const { writeStamp, readStamp } = await import('../hooks/lib/subagent-context.mjs');
+  const { dir, cleanup } = makeFixture();
+  const prev = process.env.CLAUDE_PLUGIN_DATA;
+  try {
+    process.env.CLAUDE_PLUGIN_DATA = join(dir, '.claude', 'plugins', 'data', 'agent-companion-x');
+    assert.equal(writeStamp('atomic-key', { s: 'a', t: 1 }), true);
+    assert.deepEqual(readStamp('atomic-key'), { s: 'a', t: 1 });
+    assert.match(readFileSync(join(PLUGIN_ROOT, 'hooks', 'lib', 'subagent-context.mjs'), 'utf8'), /renameSync\(tmp, dest\)/);
+  } finally { if (prev === undefined) delete process.env.CLAUDE_PLUGIN_DATA; else process.env.CLAUDE_PLUGIN_DATA = prev; cleanup(); }
+});
+
+// Both hooks, one call with no tool_use_id, 0.5 s after the previous wait, poll-guard first.
+test('rewrite: an id-less repeat 0.5 s after the previous wait gets the same answer from both hooks (poll-guard first)', { todo: 'known limit: without a tool_use_id a stamp written 0.5 s earlier cannot be told from the stamp of this call (hook start skew), so poll-guard refuses while bash-tail rewrites' }, () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const id = 'g-noid';
+    const p = () => payload({ agent_id: id, tool_input: { command: 'sleep 30' } });
+    const e = (x) => ({ CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), ...REWRITE, ...x });
+    both(dir, p(), { ...at(0), ...REWRITE });
+    const half = { AGENT_COMPANION_FAKE_NOW: new Date(T0 + 500).toISOString() };
+    const poll = runHook('hooks/poll-guard.mjs', p(), { env: e(half) });
+    const tail = runHook('hooks/bash-tail.mjs', p(), { env: e(half) });
+    const rewritten = tail.json?.hookSpecificOutput?.updatedInput?.run_in_background === true;
+    const denied = decisionOf(poll) === 'deny';
+    assert.equal(denied, !rewritten, 'one hook refuses exactly when the other does not rewrite');
+  } finally { cleanup(); }
+});
