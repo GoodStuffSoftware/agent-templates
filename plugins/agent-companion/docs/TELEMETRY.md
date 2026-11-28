@@ -700,7 +700,7 @@ Written by `hooks/question-dialog.mjs` (0.31.51, option `question_dialog`) each 
 
 ### `worker-wait.jsonl` — the worker one-wait rule
 
-Written by `hooks/poll-guard.mjs` on a subagent's Bash or PowerShell call that looks like a wait loop (`gh pr checks`, `gh run watch`, a `sleep` of 5 s or more, a `while`/`until` loop that sleeps or polls). One row per match, not only the first; the command text is not stored. The lead's own calls write nothing. Toggles: `worker_wait_advisory` (all of it) and `worker_wait_guard` (`hint`, `deny-repeat` default, `off`); under `deny-repeat` a repeat by the same agent in the same session within `worker_wait_repeat_window_minutes` (default 15) of its previous match is refused and also written to `denials.jsonl` (guard `worker-wait`).
+Written by `hooks/poll-guard.mjs` on a subagent's Bash or PowerShell call that looks like a wait loop (`gh pr checks`, `gh run watch`, a `sleep` of 5 s or more, a `while`/`until` loop that sleeps or polls). One row per match, not only the first; the command text is not stored. The lead's own calls write nothing. Toggles: `worker_wait_advisory` (all of it) and `worker_wait_guard` (`hint`, `deny-repeat` default, `off`); under `deny-repeat` a repeat by the same agent in the same session within `worker_wait_repeat_window_minutes` (default 15) of its previous match is refused and also written to `denials.jsonl` (guard `worker-wait`). Since 0.31.79 a repeat Bash wait is instead rewritten by `hooks/bash-tail.mjs` to run in the background (option `worker_wait_rewrite`, default true) when that hook will rewrite it; only a repeat it will not rewrite (PowerShell, a heavy or long-running command, a deny or ask rule) is refused.
 
 | field | type | meaning |
 |---|---|---|
@@ -712,7 +712,8 @@ Written by `hooks/poll-guard.mjs` on a subagent's Bash or PowerShell call that l
 | `tool` | string | `Bash` or `PowerShell` |
 | `kind` | string | `loop`, `gh-check` or `sleep` |
 | `first` | boolean | whether this was the worker's first match (the first hint) |
-| `action` | string | `hint` (the notice was given), `deny` (the call was refused) or `silent` (`worker_wait_guard: hint`, a repeat after the first hint). Absent on rows written before 0.31.23 |
+| `action` | string | `hint` (the notice was given), `deny` (the call was refused), `stand-down` (a repeat that `bash-tail.mjs` rewrote to run in the background; not a refusal, and not counted as one by release-watch) or `silent` (`worker_wait_guard: hint`, a repeat after the first hint). Absent on rows written before 0.31.23 |
+| `predicate_error` | string | optional; present when the shared stand-down predicate failed to load or threw, so the refusal was kept. The error text |
 
 Count matches per week against the 1,145 worker poll requests that cost 2.6% of the weekly limit in one measured week.
 

@@ -388,6 +388,17 @@ const DAY = 24 * HOUR;
 const putRows = (name, rows, dir = 'telemetry') => { const d = join(dir === 'telemetry' ? join(claude, 'agent-companion') : state, dir); mkdirSync(d, { recursive: true }); writeFileSync(join(d, name), rows.map(rowj).join('')); };
 const spread = (n, from, to, mk) => Array.from({ length: n }, (_, i) => mk(from + ((to - from) * (i + 0.5)) / n, i));
 
+test("wait: a worker-wait stand-down row is not counted as a denial (polling-waste counts real refusals only)", () => {
+  putRows("spawns.jsonl", [{ at: T + HOUR }]);
+  putRows("worker-wait.jsonl", [
+    { ts: iso(T + HOUR), kind: "sleep", action: "hint" }, { ts: iso(T + HOUR), kind: "sleep", action: "stand-down" },
+    { ts: iso(T + HOUR), kind: "sleep", action: "deny" },
+  ]);
+  const m = W.analyze({ T, nowMs: T + 3 * HOUR });
+  assert.equal(m.telemetry["wait:sleep/deny"].since, 1);
+  assert.equal(m.telemetry["wait:sleep/stand-down"], undefined);
+});
+
 test('B1: queue-clears counts failure clears only and judges them against the 7-day baseline', () => {
   assert.equal(W.isFailureClear({ rule: 'pid-dead', type: 'lease', label: 'build' }), true);
   assert.equal(W.isFailureClear({ rule: 'requester-gone', type: 'waiting' }), false, 'a waiting ticket whose requester left is routine');
