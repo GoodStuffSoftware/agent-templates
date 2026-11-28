@@ -1,11 +1,16 @@
 // The one decision "bash-tail.mjs will rewrite this worker wait to run_in_background", shared by hooks/bash-tail.mjs (which acts on it)
-// and hooks/poll-guard.mjs (which stands down only when it is true), so the two cannot drift. Only bash-tail.mjs may return
+// and hooks/poll-guard.mjs (which stands down only when it is true), so the two share one rule and the rule itself cannot drift. Only bash-tail.mjs may return
 // updatedInput for a shell tool (Claude Code runs matching hooks in parallel and does not chain updatedInput).
 //
 // Residual case no code here can see: bash-tail.mjs crashes or times out after poll-guard stood down. The hooks are separate
 // processes, so the call then runs in the foreground.
 // Stamp race (0.31.80): the hooks run in parallel, so bash-tail may already have written THIS call's stamp when poll-guard reads it.
 // The stamp therefore carries the call id and the stamp it replaced (pt, ps); stampBeforeThisCall() gives back the earlier one.
+// Known limits (the hooks can still answer differently in these cases; neither is a crash, and the first fails toward a refusal):
+//  - Sibling parallel waits: two waits in one assistant turn, each with its own id. The stamp holds one call back only, so if bash-tail(B)
+//    overwrites it before poll-guard(A) reads it, poll-guard reads B as a previous call.
+//  - No tool_use_id on the payload: this call's own stamp is recognised by time alone (written within a second of now or later), so a real
+//    previous wait about 0.5 s earlier reads as this call's own (poll-guard refuses while bash-tail rewrites). With an id the race is closed.
 
 import { homedir } from 'node:os';
 import { opt, isReviewerSession, callerIsSubagent, claudeDir, homeRoot } from './context.mjs';
