@@ -44,7 +44,7 @@
 
 import {
   openSync, fstatSync, readSync, closeSync, mkdirSync, writeFileSync, appendFileSync, readFileSync,
-  readdirSync, statSync, rmSync,
+  readdirSync, statSync, rmSync, renameSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalTaskType, stateDir } from './context.mjs';
@@ -151,7 +151,11 @@ export function claimOnce(key) {
 export function writeStamp(key, obj) {
   try {
     mkdirSync(claimDir(), { recursive: true });
-    writeFileSync(join(claimDir(), `${safe(key)}.stamp`), JSON.stringify(obj));
+    // Atomic: write a temp file, then rename over the stamp, so a reader never sees a half-written stamp.
+    const dest = join(claimDir(), `${safe(key)}.stamp`);
+    const tmp = `${dest}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(obj));
+    renameSync(tmp, dest);
     return true;
   } catch {
     return false;
