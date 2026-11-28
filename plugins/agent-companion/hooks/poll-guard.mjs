@@ -122,9 +122,18 @@ try {
       mode, prev, sessionId: p.session_id, nowMs: now, windowMs: windowMinutes * 60000, firstClaim,
     });
     if (mode === 'deny-repeat') writeStamp(key, { s: String(p.session_id ?? ''), t: now });
+    // The row records the real outcome: a repeat that bash-tail will rewrite is 'stand-down', not 'deny' (release-watch counts
+    // 'deny' rows as refusals). The predicate is lib/worker-wait-rewrite.mjs's, the one bash-tail.mjs acts on (a dynamic import: it
+    // loads the resource gate and the tail wrapper, needed only on this rare path).
+    let rewrites = false;
+    let predicateError = null;
+    if (d.action === 'deny' && toolName === 'Bash' && opt('worker_wait_rewrite', true)) {
+      try { rewrites = (await import('./lib/worker-wait-rewrite.mjs')).tailWillRewriteWait(p, now); } catch (e) { predicateError = String(e && (e.code || e.message) || e).slice(0, 120); }
+    }
     appendLog('worker-wait.jsonl', {
       ts: new Date().toISOString(), session_id: p.session_id || null, agent_id: p.agent_id,
-      agent_type: p.agent_type || null, tool: toolName, kind: hit.kind, first: d.first, action: d.action,
+      agent_type: p.agent_type || null, tool: toolName, kind: hit.kind, first: d.first, action: rewrites ? 'stand-down' : d.action,
+      ...(predicateError ? { predicate_error: predicateError } : {}),
     });
     if (d.action === 'silent') finish(null);
     const root = process.env.CLAUDE_PLUGIN_ROOT || fileURLToPath(new URL('..', import.meta.url));
@@ -133,14 +142,10 @@ try {
       // spends no round trip on a retry. Anything the rewrite cannot do safely falls through to the refusal below.
       // bash-tail.mjs is the one hook that rewrites shell calls (one rewrite per call survives), so it does this rewrite; this
       // hook just stays out of the way. A command bash-tail rewrites for another reason keeps the refusal below.
-      // The decision is lib/worker-wait-rewrite.mjs's, the same one bash-tail.mjs acts on (a dynamic import: it loads the
-      // resource gate and the tail wrapper, needed only on this rare path). Residual case: bash-tail crashing or timing out
-      // after this hook stood down cannot be seen from here; the wait then runs in the foreground.
-      if (toolName === 'Bash' && opt('worker_wait_rewrite', true)) {
-        let rewrites = false;
-        try { rewrites = (await import('./lib/worker-wait-rewrite.mjs')).tailWillRewriteWait(p, now); } catch { /* fail closed: keep the refusal */ }
-        if (rewrites) finish(null);
-      }
+      // Residual case: bash-tail crashing or timing out after this hook stood down cannot be seen from here; the wait then runs in
+      // the foreground. A predicate that cannot be loaded or run keeps the refusal (bash-tail imports the same module, so it cannot
+      // rewrite either) and is logged in the row above (predicate_error).
+      if (rewrites) finish(null);
       const text = workerWaitDenyText(root, windowMinutes);
       recordDenial('worker-wait', p, `${hit.kind} repeat within ${windowMinutes} min of the one-wait notice`);
       deny(text);

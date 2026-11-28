@@ -268,3 +268,52 @@ test('rewrite: worker_wait_rewrite is declared in plugin.json (default true)', (
   assert.equal(cfg.worker_wait_rewrite.type, 'boolean');
   assert.equal(cfg.worker_wait_rewrite.default, true);
 });
+
+// 0.31.80: tailOwnsCommand matched /worktree/ anywhere in the text, so a path or prose that merely says "worktree" kept poll-guard's refusal.
+test('rewrite: a repeat wait whose text only mentions worktree (a path, a heredoc note) is rewritten, not refused', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const cmds = [
+      'cd /x/.claude/worktrees/w1 && sleep 30',
+      "cat > note.md <<'EOF'\nthe worktree is clean\nEOF\nsleep 30",
+    ];
+    cmds.forEach((command, i) => {
+      const id = 'g-wt' + i;
+      both(dir, payload({ agent_id: id, tool_input: { command } }), { ...at(0), ...REWRITE });
+      const b = both(dir, payload({ agent_id: id, tool_input: { command } }), { ...at(3), ...REWRITE });
+      assert.equal(decisionOf(b.poll), undefined, command);
+      assert.equal(b.tail.json.hookSpecificOutput.updatedInput.run_in_background, true, command);
+    });
+  } finally { cleanup(); }
+});
+
+// 0.31.80: the hooks run in parallel; bash-tail may have written this call's stamp (a later clock reading) before poll-guard reads it.
+test('rewrite: poll-guard judges bash-tail\'s stamp as of before this call, so the two hooks cannot disagree', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    const id = 'g-race';
+    const withCall = (n) => payload({ agent_id: id, tool_use_id: 'call-' + n, tool_input: { command: 'sleep 30' } });
+    both(dir, withCall(1), { ...at(0), ...REWRITE });
+    const later = { AGENT_COMPANION_FAKE_NOW: new Date(T0 + 3 * 60000 + 5).toISOString(), ...REWRITE };
+    const earlier = { AGENT_COMPANION_FAKE_NOW: new Date(T0 + 3 * 60000).toISOString(), ...REWRITE };
+    const e = (x) => ({ CLAUDE_PLUGIN_DATA: join(dir, '.claude', 'plugins', 'data', 'agent-companion-x'), ...x });
+    const tail = runHook('hooks/bash-tail.mjs', withCall(2), { env: e(later) });
+    const poll = runHook('hooks/poll-guard.mjs', withCall(2), { env: e(earlier) });
+    assert.equal(tail.json.hookSpecificOutput.updatedInput.run_in_background, true);
+    assert.equal(decisionOf(poll), undefined, 'poll-guard stands down although bash-tail stamped a later time');
+  } finally { cleanup(); }
+});
+
+// 0.31.80: the worker-wait.jsonl row records the real outcome; release-watch counts action 'deny' rows as refusals.
+test('rewrite: the worker-wait row says stand-down when bash-tail rewrites, deny when poll-guard refuses', () => {
+  const { dir, cleanup } = makeFixture();
+  try {
+    for (const [id, command] of [['g-row-a', 'sleep 30'], ['g-row-b', 'git worktree remove x; sleep 30']]) {
+      both(dir, payload({ agent_id: id, tool_input: { command } }), { ...at(0), ...REWRITE });
+      both(dir, payload({ agent_id: id, tool_input: { command } }), { ...at(3), ...REWRITE });
+    }
+    const rows = rowsOf(dir);
+    assert.deepEqual(rows.filter((r) => r.agent_id === 'g-row-a').map((r) => r.action), ['hint', 'stand-down']);
+    assert.deepEqual(rows.filter((r) => r.agent_id === 'g-row-b').map((r) => r.action), ['hint', 'deny']);
+  } finally { cleanup(); }
+});

@@ -144,7 +144,7 @@ try {
       const fake = Date.parse(process.env.AGENT_COMPANION_FAKE_NOW || '');
       const now = Number.isFinite(fake) ? fake : Date.now();
       const prev = readStamp(key);
-      writeStamp(key, { s: String(p.session_id ?? ''), t: now });
+      writeStamp(key, { s: String(p.session_id ?? ''), t: now, id: typeof p.tool_use_id === 'string' ? p.tool_use_id : null, pt: prev && Number.isFinite(prev.t) ? prev.t : null, ps: prev ? String(prev.s ?? '') : null });
       // The same predicate poll-guard.mjs uses to stand down (lib/worker-wait-rewrite.mjs): the two cannot disagree.
       if (tailRewritesWait(p, { isPs, prev, nowMs: now })) {
         const windowMinutes = windowMinutesOpt();

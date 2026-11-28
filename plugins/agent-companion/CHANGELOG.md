@@ -2,6 +2,12 @@
 
 All notable changes to the `agent-companion` plugin. Dates are UTC.
 
+## 0.31.80 (unreleased)
+
+- **A repeat worker wait whose text merely says "worktree" is rewritten, not refused (hooks/lib/worker-wait-rewrite.mjs).** `tailOwnsCommand` matched `/worktree/` anywhere (a `.claude/worktrees/...` path, a heredoc note), so bash-tail left the wait alone and poll-guard denied it (2 of 3 real Bash refusals in the first hours of 0.31.79). It now asks the worktree-remove decision itself, so only a `git worktree remove` bash-tail rewrites or denies stays owned.
+- **poll-guard and bash-tail cannot answer opposite ways for one call (hooks/lib/worker-wait-rewrite.mjs, hooks/bash-tail.mjs).** Cause: a stamp race. The hooks run in parallel; bash-tail could write its stamp for this call (a slightly later clock reading) before poll-guard read it, so poll-guard saw a stamp in its future, judged "not a repeat" and refused while bash-tail rewrote. The stamp now carries the call id and the stamp it replaced, and poll-guard judges the stamp as of before this call. A predicate that fails to load keeps the refusal and is logged as `predicate_error` in the worker-wait row.
+- **The worker-wait row records the real outcome (hooks/poll-guard.mjs).** A repeat that bash-tail rewrites is logged `action: 'stand-down'`, not `'deny'`, so release-watch's polling-waste and `guard:worker-wait` counts include real refusals only (the first release showed 19 counted against 5 real).
+
 ## 0.31.79 — 2026-11-27
 
 - **The every-prompt hook ends in time on a big lead (hooks/runaway-notice.mjs, lib/session-budget.mjs, lib/interrupted-workers.mjs).** A lead with over a thousand subagent transcripts (1,146 files, about 260 MB) hit the 10 s hook timeout 78 times after an idle spell, and a timed-out hook delivers nothing. The hook now has one 4 s deadline (env `AC_RUNAWAY_DEADLINE_MS` sets it) checked per file and per 4 MB read; the budget scan and the interrupted-worker scan both stop at it and the notices already found are delivered. Each scan saves its progress (the interrupted scan caches size, mtime and result per file under `state/interrupted-scan/`), so the next prompt continues where it stopped and a few prompts later the whole tree is cached and a warm run is well under a second. Notices are the same as an unlimited run.

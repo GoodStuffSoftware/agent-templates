@@ -3,8 +3,9 @@
 // updatedInput for a shell tool (Claude Code runs matching hooks in parallel and does not chain updatedInput).
 //
 // Residual case no code here can see: bash-tail.mjs crashes or times out after poll-guard stood down. The hooks are separate
-// processes, so the call then runs in the foreground. Also, poll-guard reads bash-tail's stamp while bash-tail may already have
-// written this call's stamp; both stamps move together, so the prediction is the same in practice.
+// processes, so the call then runs in the foreground.
+// Stamp race (0.31.80): the hooks run in parallel, so bash-tail may already have written THIS call's stamp when poll-guard reads it.
+// The stamp therefore carries the call id and the stamp it replaced (pt, ps); stampBeforeThisCall() gives back the earlier one.
 
 import { homedir } from 'node:os';
 import { opt, isReviewerSession, callerIsSubagent, claudeDir, homeRoot } from './context.mjs';
@@ -12,6 +13,7 @@ import { isServedCall } from './delegation.mjs';
 import { readStamp } from './subagent-context.mjs';
 import { analyze as analyzeTail, readPermissionRules, blockingPermissionRule } from './bash-tail.mjs';
 import { classifyCommand } from './resource-gate.mjs';
+import { worktreeRemoveDecision } from './worktree-remove.mjs';
 import { workerWaitPattern, workerWaitDecision, workerWaitMode, WORKER_WAIT_WINDOW_MINUTES } from './poll-guard.mjs';
 
 // Enterprise-managed settings, where Claude Code reads them.
@@ -33,11 +35,12 @@ export function permissionHit(p, command) {
   }), command);
 }
 
-// True when bash-tail has a rewrite of its own for this command (heavy, a known long-runner, a worktree remove). Only one
+// True when bash-tail has a rewrite of its own for this command (heavy, a known long-runner, a `git worktree remove` it rewrites or denies). Only one
 // rewrite survives a call, so the worker-wait rewrite leaves such a command alone and poll-guard keeps its refusal.
 export function tailOwnsCommand(command, cwd) {
   try {
-    return classifyCommand(command, { cwd }).heavy.length > 0 || Boolean(analyzeTail(command).runner) || /worktree/.test(command);
+    return classifyCommand(command, { cwd }).heavy.length > 0 || Boolean(analyzeTail(command).runner)
+      || (/worktree/.test(command) && worktreeRemoveDecision(command, { cwd, shell: 'bash' }).action !== 'none');
   } catch { return true; }
 }
 
@@ -64,7 +67,18 @@ export function tailRewritesWait(p, { isPs = false, prev, nowMs }) {
   return d.action === 'deny' && !tailOwnsCommand(command, cwd) && !permissionHit(p, command);
 }
 
+// The stamp as it was before this call. bash-tail writes { s, t, id, pt, ps }: its own call id and the stamp it replaced. A stamp
+// of this very call (same id; with no id on the payload, written within a second of now or later than now) is undone to the
+// stamp it replaced; an older stamp is the previous one as is.
+export function stampBeforeThisCall(stamp, p, nowMs) {
+  if (!stamp) return null;
+  const id = typeof p.tool_use_id === 'string' && p.tool_use_id ? p.tool_use_id : null;
+  const own = id ? stamp.id === id : (Number.isFinite(stamp.t) && stamp.t - nowMs > -1000);
+  if (!own) return stamp;
+  return Number.isFinite(stamp.pt) ? { s: stamp.ps, t: stamp.pt } : null;
+}
+
 // For poll-guard.mjs: the same decision, reading the stamp read-only.
 export function tailWillRewriteWait(p, nowMs) {
-  return tailRewritesWait(p, { isPs: p.tool_name === 'PowerShell', prev: readStamp(tailStampKey(p)), nowMs });
+  return tailRewritesWait(p, { isPs: p.tool_name === 'PowerShell', prev: stampBeforeThisCall(readStamp(tailStampKey(p)), p, nowMs), nowMs });
 }
